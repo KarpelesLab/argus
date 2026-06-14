@@ -57,6 +57,8 @@ pub struct Compound {
     pub classes: Vec<String>,
     pub attrs: Vec<AttrSel>,
     pub pseudos: Vec<PseudoClass>,
+    /// `:not(...)` arguments — the compound matches only if none of these do.
+    pub negations: Vec<Compound>,
 }
 
 /// A complex selector: compounds left-to-right, with `combinators[k]` linking
@@ -82,6 +84,16 @@ impl Selector {
             s.1 += (c.classes.len() + c.attrs.len() + c.pseudos.len()) as u32;
             if c.tag.is_some() {
                 s.2 += 1;
+            }
+            // `:not()` contributes the specificity of its argument.
+            for n in &c.negations {
+                if n.id.is_some() {
+                    s.0 += 1;
+                }
+                s.1 += (n.classes.len() + n.attrs.len() + n.pseudos.len()) as u32;
+                if n.tag.is_some() {
+                    s.2 += 1;
+                }
             }
         }
         s
@@ -197,6 +209,7 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                     }
                     Some(Token::Function(fname)) => {
                         let is_nth = !double && fname.eq_ignore_ascii_case("nth-child");
+                        let is_not = !double && fname.eq_ignore_ascii_case("not");
                         *i += 1;
                         // Capture the argument tokens up to the matching ')'.
                         let mut args = Vec::new();
@@ -219,6 +232,12 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                         if is_nth {
                             if let Some((a, b)) = parse_nth(&args) {
                                 c.pseudos.push(PseudoClass::NthChild(a, b));
+                            }
+                        } else if is_not {
+                            // `:not(<compound>)` — parse the inner simple selector.
+                            let mut j = 0;
+                            if let Some(inner) = parse_compound(&args, &mut j) {
+                                c.negations.push(inner);
                             }
                         }
                     }
@@ -374,6 +393,12 @@ fn matches_compound(doc: &Document, node: NodeId, compound: &Compound) -> bool {
     }
     for &p in &compound.pseudos {
         if !pseudo_matches(doc, node, p) {
+            return false;
+        }
+    }
+    // `:not(...)` — the compound fails if any negated selector matches.
+    for n in &compound.negations {
+        if matches_compound(doc, node, n) {
             return false;
         }
     }
@@ -550,6 +575,29 @@ mod tests {
         assert!(!matches(&doc, li2, &sel("li:last-child")));
         // Specificity: attribute selector counts in the class column.
         assert_eq!(sel("li[id]").specificity(), Specificity(0, 1, 1));
+    }
+
+    #[test]
+    fn not_selector() {
+        // <ul><li>a</li><li class="skip">b</li><li id="x">c</li></ul>
+        let mut doc = Document::new();
+        let root = doc.root();
+        let ul = doc.create_element(QualName::html("ul"), vec![]);
+        doc.append(root, ul);
+        let li1 = doc.create_element(QualName::html("li"), vec![]);
+        doc.append(ul, li1);
+        let li2 = doc.create_element(QualName::html("li"), vec![Attribute::new("class", "skip")]);
+        doc.append(ul, li2);
+        let li3 = doc.create_element(QualName::html("li"), vec![Attribute::new("id", "x")]);
+        doc.append(ul, li3);
+
+        assert!(matches(&doc, li1, &sel("li:not(.skip)")));
+        assert!(!matches(&doc, li2, &sel("li:not(.skip)")));
+        assert!(matches(&doc, li3, &sel("li:not(.skip)")));
+        assert!(!matches(&doc, li3, &sel("li:not(#x)")));
+        assert!(matches(&doc, li1, &sel("li:not(#x)")));
+        // `:not()` adds its argument's specificity (a class here).
+        assert_eq!(sel("li:not(.skip)").specificity(), Specificity(0, 1, 1));
     }
 
     #[test]
