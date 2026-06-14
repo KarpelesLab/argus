@@ -16,10 +16,13 @@ pub fn run(role: Role, channel: Channel) -> io::Result<()> {
     let _viewport = proto::child_handshake(&channel)?;
     log!("ready");
 
+    // A persistent cookie jar so sessions survive across requests in this process.
+    let mut jar = rsurl::CookieJar::new();
+
     loop {
         match proto::recv(&channel) {
             Ok((Msg::LoadUrl { url }, _)) if role == Role::NetService => {
-                let (status, body) = fetch(&url);
+                let (status, body) = fetch(&url, &mut jar);
                 log!("GET {url} -> {status} ({} bytes)", body.len());
                 proto::send(&channel, Msg::ResourceLoaded { status, body }, &[])?;
             }
@@ -38,11 +41,13 @@ pub fn run(role: Role, channel: Channel) -> io::Result<()> {
     }
 }
 
-/// Fetch `url` over rsurl. Returns `(status, body)`; `status == 0` on transport
-/// error. The net service runs on the trusted side of the sandbox — content never
-/// touches a socket (see `docs/PROCESS_MODEL.md`).
-fn fetch(url: &str) -> (u16, Vec<u8>) {
-    match rsurl::get(url) {
+/// Fetch `url` over rsurl, threading `jar` so cookies set by responses are sent on
+/// subsequent requests (session persistence). Returns `(status, body)`; `status ==
+/// 0` on transport error. The net service runs on the trusted side of the sandbox —
+/// content never touches a socket (see `docs/PROCESS_MODEL.md`).
+fn fetch(url: &str, jar: &mut rsurl::CookieJar) -> (u16, Vec<u8>) {
+    let result = rsurl::Request::get(url).and_then(|req| req.send_with_jar(jar));
+    match result {
         Ok(resp) => (resp.status, resp.body),
         Err(e) => {
             log!("fetch error for {url}: {e}");
