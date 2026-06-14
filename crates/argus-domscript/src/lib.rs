@@ -787,6 +787,35 @@ mod tests {
     }
 
     #[test]
+    fn apply_ops_survives_arbitrary_json() {
+        // The ops payload comes from the JS VM; the JSON parser + op replay must
+        // never panic on malformed or hostile input.
+        let mut seed = 0x2545F4914F6CDD1Du64;
+        let mut byte = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed & 0xff) as u8
+        };
+        const BIAS: &[u8] = b"[]{}\",:opprstyleattrclassappendcreatetgtkindidselval0\\u\n ";
+        for _ in 0..3000 {
+            let len = (byte() as usize) * 2;
+            let s: String = (0..len)
+                .map(|_| {
+                    if byte() < 170 {
+                        BIAS[byte() as usize % BIAS.len()] as char
+                    } else {
+                        byte() as char
+                    }
+                })
+                .collect();
+            let mut doc = argus_html::parse("<div id=d><span id=s>x</span></div>");
+            apply_ops(&mut doc, &s); // must not panic
+            let _ = doc.serialize();
+        }
+    }
+
+    #[test]
     fn no_scripts_is_noop() {
         let mut doc = argus_html::parse("<p id=p>hi</p>");
         assert!(apply_scripts(&mut doc).is_none());
