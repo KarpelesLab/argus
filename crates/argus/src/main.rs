@@ -13,10 +13,12 @@ fn main() {
     let role = parse_role();
     argus_util::log::set_role(role);
 
-    // `--dump-page=PATH`: render the sample page off-screen to a PNG and exit.
+    let url = flag_value("--url=");
+
+    // `--dump-page=PATH`: render the page (sample or `--url`) off-screen to a PNG.
     if role == Role::Browser {
         if let Some(path) = flag_value("--dump-page=") {
-            if let Err(err) = dump_page(&path) {
+            if let Err(err) = dump_page(&path, url.as_deref()) {
                 eprintln!("[browser] dump-page failed: {err}");
                 std::process::exit(1);
             }
@@ -27,7 +29,7 @@ fn main() {
     let result = match role {
         // Default to an on-screen window; `--headless` runs the verifier and exits.
         Role::Browser if has_flag("--headless") => argus_browser::run(),
-        Role::Browser => argus_browser::run_default(),
+        Role::Browser => argus_browser::run_default(url),
         Role::Content => argus_content::run(child_channel()),
         Role::NetService | Role::StorageService => argus_services::run(role, child_channel()),
     };
@@ -38,13 +40,13 @@ fn main() {
     }
 }
 
-/// Render the built-in sample page and write it to `path` as a PNG.
-fn dump_page(path: &str) -> std::io::Result<()> {
+/// Render a page (the sample, or `url`) and write it to `path` as a PNG.
+fn dump_page(path: &str, url: Option<&str>) -> std::io::Result<()> {
     use argus_geometry::Size;
     use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
 
     let viewport = Size::new(800, 600);
-    let (size, rgba) = argus_browser::render_page_once(argus_browser::SAMPLE_HTML, viewport)?;
+    let (size, rgba) = argus_browser::render_once(url, viewport)?;
 
     let frame = VideoFrame {
         pts: None,

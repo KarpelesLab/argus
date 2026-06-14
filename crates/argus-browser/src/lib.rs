@@ -68,20 +68,72 @@ fn provide_page(content: &Child, html: &str) -> io::Result<()> {
     )
 }
 
-/// Render `html` to pixels once, off-screen, by driving a content process. Returns
-/// the framebuffer size and its RGBA bytes. Used by the `--dump-page` tool.
-pub fn render_page_once(html: &str, viewport: Size) -> io::Result<(Size, Vec<u8>)> {
+/// Ask the net service to fetch `url`, returning the body as an HTML string (or a
+/// small error page on failure).
+fn fetch_html(net: &Child, url: &str) -> io::Result<String> {
+    proto::send(
+        net.channel(),
+        Msg::LoadUrl {
+            url: url.to_string(),
+        },
+        &[],
+    )?;
+    match proto::recv(net.channel())?.0 {
+        Msg::ResourceLoaded { status, body } => {
+            if status == 0 {
+                Ok(error_page(url, "network error"))
+            } else if body.is_empty() {
+                Ok(error_page(url, &format!("empty response (HTTP {status})")))
+            } else {
+                Ok(String::from_utf8_lossy(&body).into_owned())
+            }
+        }
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("expected ResourceLoaded, got {other:?}"),
+        )),
+    }
+}
+
+fn error_page(url: &str, message: &str) -> String {
+    format!(
+        "<!DOCTYPE html><html><head><title>Error</title>\
+         <style>body{{color:#900}} p{{color:#333}}</style></head><body>\
+         <h1>Could not load page</h1><p>{url}</p><p>{message}</p></body></html>"
+    )
+}
+
+/// The page to show: a fetched URL or the built-in sample.
+fn resolve_html(net: &Child, url: Option<&str>) -> String {
+    match url {
+        Some(u) => fetch_html(net, u).unwrap_or_else(|e| error_page(u, &e.to_string())),
+        None => SAMPLE_HTML.to_string(),
+    }
+}
+
+/// Render a page (a fetched `url`, or the sample) to pixels once, off-screen.
+/// Returns the framebuffer size and RGBA bytes. Used by the `--dump-page` tool.
+pub fn render_once(url: Option<&str>, viewport: Size) -> io::Result<(Size, Vec<u8>)> {
     log::set_role(Role::Browser);
     let mut content = spawn_child(Role::Content)?;
+    let mut net = spawn_child(Role::NetService)?;
     proto::parent_handshake(content.channel(), viewport)?;
-    provide_page(&content, html)?;
+    proto::parent_handshake(net.channel(), viewport)?;
+
+    let html = resolve_html(&net, url);
+    if let Some(bytes) = system_font_bytes() {
+        proto::send(content.channel(), Msg::ProvideFont { bytes }, &[])?;
+    }
+    proto::send(content.channel(), Msg::LoadDocument { html }, &[])?;
 
     let frame = request_frame(&content)?;
     let pixels = frame.pixels().to_vec();
     let size = frame.size();
 
     proto::send(content.channel(), Msg::Shutdown, &[])?;
+    proto::send(net.channel(), Msg::Shutdown, &[])?;
     content.wait()?;
+    net.wait()?;
     Ok((size, pixels))
 }
 
@@ -166,23 +218,25 @@ fn request_frame(content: &Child) -> io::Result<Framebuffer> {
 }
 
 /// Run the browser in its default mode for this platform: a real window where one
-/// is available, the headless verifier otherwise.
+/// is available, the headless verifier otherwise. `url` selects the page (the
+/// built-in sample when `None`).
 #[cfg(target_os = "macos")]
-pub fn run_default() -> io::Result<()> {
-    run_windowed()
+pub fn run_default(url: Option<String>) -> io::Result<()> {
+    run_windowed(url)
 }
 
 /// See [`run_default`].
 #[cfg(not(target_os = "macos"))]
-pub fn run_default() -> io::Result<()> {
+pub fn run_default(_url: Option<String>) -> io::Result<()> {
     run()
 }
 
-/// Run the browser with an on-screen window (macOS). Spawns content + net, opens
-/// a window, presents content's framebuffer, forwards clicks into the sandboxed
-/// content process, and repaints — until the window is closed.
+/// Run the browser with an on-screen window (macOS). Spawns content + net, fetches
+/// the page (a URL or the sample), opens a window, presents content's framebuffer,
+/// forwards clicks into the sandboxed content process, and repaints — until the
+/// window is closed.
 #[cfg(target_os = "macos")]
-pub fn run_windowed() -> io::Result<()> {
+pub fn run_windowed(url: Option<String>) -> io::Result<()> {
     use argus_platform::window::{Event, Window};
 
     log::set_role(Role::Browser);
@@ -197,8 +251,9 @@ pub fn run_windowed() -> io::Result<()> {
     let mut net = spawn_child(Role::NetService)?;
     proto::parent_handshake(content.channel(), viewport)?;
     proto::parent_handshake(net.channel(), viewport)?;
-    provide_page(&content, SAMPLE_HTML)?;
-    log!("children handshook; sample page sent; opening window");
+    let html = resolve_html(&net, url.as_deref());
+    provide_page(&content, &html)?;
+    log!("children handshook; page sent; opening window");
 
     // Present the first frame.
     let mut frame = request_frame(&content)?;

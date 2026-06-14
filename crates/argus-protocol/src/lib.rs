@@ -104,6 +104,10 @@ pub enum Msg {
     ProvideFont { bytes: Vec<u8> },
     /// browser → content: the HTML document to render.
     LoadDocument { html: String },
+    /// browser → net service: fetch this URL.
+    LoadUrl { url: String },
+    /// net service → browser: a fetched resource (`status == 0` means failure).
+    ResourceLoaded { status: u16, body: Vec<u8> },
     /// browser → child: exit cleanly.
     Shutdown,
 }
@@ -137,6 +141,8 @@ const TAG_INPUT_CLICK: u8 = 5;
 const TAG_SHUTDOWN: u8 = 6;
 const TAG_PROVIDE_FONT: u8 = 7;
 const TAG_LOAD_DOCUMENT: u8 = 8;
+const TAG_LOAD_URL: u8 = 9;
+const TAG_RESOURCE_LOADED: u8 = 10;
 
 impl Msg {
     /// Number of file descriptors that accompany this message out-of-band.
@@ -178,6 +184,15 @@ impl Msg {
                 buf.push(TAG_LOAD_DOCUMENT);
                 put_bytes(&mut buf, html.as_bytes());
             }
+            Msg::LoadUrl { url } => {
+                buf.push(TAG_LOAD_URL);
+                put_bytes(&mut buf, url.as_bytes());
+            }
+            Msg::ResourceLoaded { status, body } => {
+                buf.push(TAG_RESOURCE_LOADED);
+                buf.extend_from_slice(&status.to_le_bytes());
+                put_bytes(&mut buf, body);
+            }
             Msg::Shutdown => buf.push(TAG_SHUTDOWN),
         }
         buf
@@ -204,6 +219,13 @@ impl Msg {
             },
             TAG_LOAD_DOCUMENT => Msg::LoadDocument {
                 html: String::from_utf8_lossy(c.bytes()?).into_owned(),
+            },
+            TAG_LOAD_URL => Msg::LoadUrl {
+                url: String::from_utf8_lossy(c.bytes()?).into_owned(),
+            },
+            TAG_RESOURCE_LOADED => Msg::ResourceLoaded {
+                status: c.u16()?,
+                body: c.bytes()?.to_vec(),
             },
             TAG_SHUTDOWN => Msg::Shutdown,
             other => return Err(DecodeError::BadTag(other)),
@@ -291,6 +313,13 @@ mod tests {
         });
         round_trip(Msg::LoadDocument {
             html: "<p>hi & bye</p>".to_string(),
+        });
+        round_trip(Msg::LoadUrl {
+            url: "https://example.com/x".to_string(),
+        });
+        round_trip(Msg::ResourceLoaded {
+            status: 200,
+            body: vec![60, 104, 49, 62],
         });
         round_trip(Msg::Shutdown);
     }

@@ -11,6 +11,7 @@ rust-version.workspace = true
 argus-util.workspace = true
 argus-ipc.workspace = true
 argus-protocol.workspace = true
+rsurl = "0.0.9"
 
 [lints]
 workspace = true
