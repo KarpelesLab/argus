@@ -30,6 +30,8 @@ h2 {{ color: #444 }}\
 .center {{ text-align: center }}\
 .tbl td, .tbl th {{ border: 1px solid #ccd3df; background-color: #ffffff }}\
 .tbl th {{ background-color: #eef1f7 }}\
+.row {{ display: flex }}\
+.col {{ background-color: #ffffff; border: 1px solid #d0d7e2; padding: 10px; margin: 4px }}\
 </style></head><body>\
 <h1>Argus</h1>\
 <div class=\"card\">\
@@ -67,6 +69,12 @@ blue link</a> all flow inside this paragraph with correct spacing.</p>\
 <tr><td>CSS cascade</td><td>argus-css</td><td>working</td></tr>\
 <tr><td>Layout</td><td>argus-layout</td><td>block + inline + tables</td></tr>\
 </tbody></table>\
+<h3>Flexbox</h3>\
+<div class=\"row\">\
+<div class=\"col\">First column in a flex row.</div>\
+<div class=\"col\">Second column, sharing the width equally.</div>\
+<div class=\"col\">Third column of the flex container.</div>\
+</div>\
 <script>\
 function fib(n){{ return n < 2 ? n : fib(n-1) + fib(n-2); }}\
 console.log('kataan ran: fib(20) = ' + fib(20));\

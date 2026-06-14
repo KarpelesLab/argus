@@ -17,11 +17,13 @@ use std::sync::OnceLock;
 
 pub use argus_css::Stylesheet as AuthorStylesheet;
 
-/// The `display` value, reduced to what Phase 1 layout understands.
+/// The `display` value, reduced to what layout understands.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Display {
     Block,
     Inline,
+    /// A flex container (display: flex); children lay out in a row.
+    Flex,
     None,
 }
 
@@ -260,6 +262,7 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     if let Some(v) = map.get("display") {
         cs.display = match v.as_str() {
             "block" => Display::Block,
+            "flex" | "inline-flex" => Display::Flex,
             "none" => Display::None,
             _ => Display::Inline,
         };

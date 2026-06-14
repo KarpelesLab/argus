@@ -310,6 +310,13 @@ impl Ctx<'_> {
                             self.layout_block(child, cstyle, content_left, content_w, child_marker);
                             self.cursor_y += cstyle.margin.bottom;
                         }
+                        Display::Flex => {
+                            self.flush_words(&mut words, &style, content_left, content_w);
+                            pending_space = false;
+                            self.cursor_y += cstyle.margin.top;
+                            self.layout_flex(child, cstyle, content_left, content_w);
+                            self.cursor_y += cstyle.margin.bottom;
+                        }
                     }
                 }
                 _ => {}
@@ -389,6 +396,71 @@ impl Ctx<'_> {
 
     fn is_li(&self, id: NodeId) -> bool {
         matches!(&self.doc.node(id).data, NodeData::Element(e) if e.name.is_html("li"))
+    }
+
+    /// Lay out a `display: flex` container: block-level children are placed in a
+    /// single row, sharing the content width equally; the row's height is the
+    /// tallest item. A basic subset — no wrapping, `flex-grow`, or `justify`/`align`.
+    fn layout_flex(&mut self, id: NodeId, style: ComputedStyle, x: f32, avail: f32) {
+        let items: Vec<NodeId> = self
+            .doc
+            .children(id)
+            .filter(|&c| match &self.doc.node(c).data {
+                NodeData::Element(_) => {
+                    computed_style(self.doc, c, &style, self.author).display != Display::None
+                }
+                _ => false,
+            })
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+
+        let border_box_top = self.cursor_y;
+        let border_box_left = x + style.margin.left;
+        let h_extra = style.margin.left
+            + style.margin.right
+            + style.border.left
+            + style.border.right
+            + style.padding.left
+            + style.padding.right;
+        let content_w = match style.width {
+            Some(len) => len.to_px(style.font_size, avail),
+            None => (avail - h_extra).max(0.0),
+        };
+        let content_left = border_box_left + style.border.left + style.padding.left;
+        let border_box_w = content_w
+            + style.padding.left
+            + style.padding.right
+            + style.border.left
+            + style.border.right;
+
+        let bg_idx = (style.background_color.a > 0).then(|| {
+            self.rects.push(RectFill {
+                x: border_box_left,
+                y: border_box_top,
+                w: border_box_w,
+                h: 0.0,
+                color: style.background_color,
+            });
+            self.rects.len() - 1
+        });
+
+        self.cursor_y += style.border.top + style.padding.top;
+        let row_top = self.cursor_y;
+        let item_w = content_w / items.len() as f32;
+        let mut max_h = 0.0f32;
+        for (i, &item) in items.iter().enumerate() {
+            self.cursor_y = row_top;
+            let istyle = computed_style(self.doc, item, &style, self.author);
+            self.layout_block(item, istyle, content_left + i as f32 * item_w, item_w, None);
+            max_h = max_h.max(self.cursor_y - row_top);
+        }
+        self.cursor_y = row_top + max_h + style.padding.bottom + style.border.bottom;
+
+        if let Some(idx) = bg_idx {
+            self.rects[idx].h = self.cursor_y - border_box_top;
+        }
     }
 
     /// Lay out a `<table>` as a simple equal-column grid: columns share the table
@@ -690,5 +762,27 @@ mod tests {
         // Three distinct column x-positions.
         let xs: std::collections::BTreeSet<i32> = cell_runs.iter().map(|r| r.x as i32).collect();
         assert_eq!(xs.len(), 3, "expected 3 columns, got {xs:?}");
+    }
+
+    #[test]
+    fn flex_row_places_items_side_by_side() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let html = "<div style=\"display:flex\"><div>one</div><div>two</div></div>";
+        let doc = parse(html);
+        let layout = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let one = layout.runs.iter().find(|r| r.text == "one").unwrap();
+        let two = layout.runs.iter().find(|r| r.text == "two").unwrap();
+        // Items sit on the same line (≈ same baseline), in two columns.
+        assert!(
+            (one.baseline - two.baseline).abs() < 1.0,
+            "items not on one row"
+        );
+        assert!(
+            two.x > one.x + 100.0,
+            "second item should be in the next column"
+        );
     }
 }
