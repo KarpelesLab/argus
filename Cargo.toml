@@ -15,6 +15,7 @@ rust-version = "1.85"
 argus-util = { path = "crates/argus-util" }
 argus-geometry = { path = "crates/argus-geometry" }
 argus-ipc = { path = "crates/argus-ipc" }
+argus-protocol = { path = "crates/argus-protocol" }
 argus-platform = { path = "crates/argus-platform" }
 argus-compositor = { path = "crates/argus-compositor" }
 argus-browser = { path = "crates/argus-browser" }

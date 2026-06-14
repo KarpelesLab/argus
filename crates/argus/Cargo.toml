@@ -1,0 +1,23 @@
+[package]
+name = "argus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "argus"
+path = "src/main.rs"
+
+[dependencies]
+argus-util.workspace = true
+argus-ipc.workspace = true
+argus-platform.workspace = true
+argus-browser.workspace = true
+argus-content.workspace = true
+argus-services.workspace = true
+
+[lints]
+workspace = true

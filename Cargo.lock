@@ -3,6 +3,49 @@
 version = 4
 
 [[package]]
+name = "argus"
+version = "0.0.0"
+dependencies = [
+ "argus-browser",
+ "argus-content",
+ "argus-ipc",
+ "argus-platform",
+ "argus-services",
+ "argus-util",
+]
+
+[[package]]
+name = "argus-browser"
+version = "0.0.0"
+dependencies = [
+ "argus-compositor",
+ "argus-geometry",
+ "argus-ipc",
+ "argus-platform",
+ "argus-protocol",
+ "argus-util",
+]
+
+[[package]]
+name = "argus-compositor"
+version = "0.0.0"
+dependencies = [
+ "argus-geometry",
+ "argus-ipc",
+]
+
+[[package]]
+name = "argus-content"
+version = "0.0.0"
+dependencies = [
+ "argus-compositor",
+ "argus-geometry",
+ "argus-ipc",
+ "argus-protocol",
+ "argus-util",
+]
+
+[[package]]
 name = "argus-geometry"
 version = "0.0.0"
 
@@ -11,6 +54,32 @@ name = "argus-ipc"
 version = "0.0.0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "argus-platform"
+version = "0.0.0"
+dependencies = [
+ "argus-ipc",
+ "argus-util",
+ "libc",
+]
+
+[[package]]
+name = "argus-protocol"
+version = "0.0.0"
+dependencies = [
+ "argus-geometry",
+ "argus-ipc",
+]
+
+[[package]]
+name = "argus-services"
+version = "0.0.0"
+dependencies = [
+ "argus-ipc",
+ "argus-protocol",
+ "argus-util",
 ]
 
 [[package]]

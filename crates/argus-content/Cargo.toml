@@ -1,0 +1,18 @@
+[package]
+name = "argus-content"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+argus-util.workspace = true
+argus-ipc.workspace = true
+argus-protocol.workspace = true
+argus-compositor.workspace = true
+argus-geometry.workspace = true
+
+[lints]
+workspace = true
