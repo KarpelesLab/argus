@@ -5,5 +5,7 @@
 
 mod entities;
 pub mod tokenizer;
+mod tree_builder;
 
 pub use tokenizer::{tokenize, Token};
+pub use tree_builder::parse;
