@@ -17,23 +17,27 @@ use std::io;
 /// A built-in sample document rendered by the windowed shell and the page dumper.
 pub const SAMPLE_HTML: &str = "<!DOCTYPE html><html><head><title>Argus</title><style>\
 body { background-color: #f4f6fb; color: #1c2430 }\
-h1 { color: #2e86de }\
+h1 { color: #2e86de; text-align: center }\
 h2 { color: #444 }\
-.note { background-color: #fff3cd; color: #5a4b00 }\
+.card { background-color: #ffffff; border: 1px solid #d0d7e2; padding: 16px; margin: 12px 0 }\
+.note { background-color: #fff3cd; color: #5a4b00; border: 1px solid #f0d000; padding: 12px }\
 .brand { color: #c0392b }\
+.center { text-align: center }\
 </style></head><body>\
 <h1>Argus</h1>\
+<div class=\"card\">\
 <p>A web browser written in <strong class=\"brand\">pure Rust</strong>. This page was \
-fetched as HTML, parsed into a DOM, run through a real CSS cascade (user-agent + the \
-author styles in this document's &lt;style&gt; element), laid out into lines, and \
-painted with shaped, anti-aliased glyphs — all inside a sandboxed content process.</p>\
-<h2>Phase 1</h2>\
-<p class=\"note\">This paragraph has an author background-color and text color applied \
-by a class selector. Specificity, the cascade, and inline styles all work.</p>\
-<p style=\"color: #2e7d32\">This one is colored green by an inline style attribute, \
-which beats the author rules for this element.</p>\
+fetched over the network, parsed into a DOM, run through a real CSS cascade, laid out \
+with the box model (margins, borders, padding, width, text-align), and painted with \
+shaped, anti-aliased glyphs — all inside a sandboxed content process.</p>\
+</div>\
+<h2>Box model</h2>\
+<p class=\"note\">This box has a background, a border, and padding, applied by a class \
+selector. Specificity, the cascade, inline styles, and the box model all work.</p>\
+<p class=\"center\" style=\"color: #2e7d32\">This line is centered and colored green by \
+an inline style attribute.</p>\
 <h3>Next</h3>\
-<p>Images, a real fragment tree, and more CSS properties come next.</p>\
+<p>Images, a real inline fragment tree, and more CSS properties come next.</p>\
 </body></html>";
 
 /// Locate a usable system font on disk (the browser process is trusted and may

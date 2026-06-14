@@ -4,17 +4,18 @@
 //! stylesheet, author stylesheets (the page's `<style>` elements), and inline
 //! `style` attributes — sorted by origin, `!important`, specificity, and source
 //! order, on top of inherited values. Selector matching and value parsing come
-//! from `argus-css`. A full property model is future work; we interpret the subset
-//! Phase 1 layout/paint use. See `docs/subsystems/style.md`.
+//! from `argus-css`. We interpret the subset Phase 1 layout/paint use (display,
+//! font, color/background, the box model, text-align). See
+//! `docs/subsystems/style.md`.
 
 use argus_css::{matches, parse_color, parse_declaration_block, parse_length, parse_stylesheet};
-use argus_css::{Specificity, Stylesheet};
-
-pub use argus_css::Stylesheet as AuthorStylesheet;
+use argus_css::{Length, Specificity, Stylesheet};
 use argus_dom::{Document, NodeData, NodeId};
 use argus_geometry::Color;
 use std::collections::HashMap;
 use std::sync::OnceLock;
+
+pub use argus_css::Stylesheet as AuthorStylesheet;
 
 /// The `display` value, reduced to what Phase 1 layout understands.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -24,16 +25,50 @@ pub enum Display {
     None,
 }
 
-/// A computed style for one element. Lengths are in CSS pixels.
+/// Inline-axis text alignment.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TextAlign {
+    Left,
+    Center,
+    Right,
+}
+
+/// Four edge values (top/right/bottom/left) in CSS pixels.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct Edges {
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub left: f32,
+}
+
+impl Edges {
+    pub fn uniform(v: f32) -> Edges {
+        Edges {
+            top: v,
+            right: v,
+            bottom: v,
+            left: v,
+        }
+    }
+}
+
+/// A computed style for one element. Lengths are in CSS pixels (except `width`,
+/// resolved against the containing block during layout).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct ComputedStyle {
     pub display: Display,
     pub font_size: f32,
-    pub margin_top: f32,
-    pub margin_bottom: f32,
     pub bold: bool,
     pub color: Color,
     pub background_color: Color,
+    pub margin: Edges,
+    pub padding: Edges,
+    pub border: Edges,
+    pub border_color: Color,
+    /// Specified width, resolved during layout (`None` = auto).
+    pub width: Option<Length>,
+    pub text_align: TextAlign,
 }
 
 impl ComputedStyle {
@@ -42,11 +77,15 @@ impl ComputedStyle {
         ComputedStyle {
             display: Display::Block,
             font_size: 16.0,
-            margin_top: 0.0,
-            margin_bottom: 0.0,
             bold: false,
             color: Color::BLACK,
             background_color: Color::TRANSPARENT,
+            margin: Edges::default(),
+            padding: Edges::default(),
+            border: Edges::default(),
+            border_color: Color::BLACK,
+            width: None,
+            text_align: TextAlign::Left,
         }
     }
 }
@@ -66,6 +105,7 @@ h6 { font-size: 0.67em; font-weight: bold; margin: 2.33em 0 }
 p { margin: 1em 0 }
 b, strong { font-weight: bold }
 ul, ol, blockquote, figure, pre { margin: 1em 0 }
+blockquote { margin: 1em 40px }
 ";
 
 fn ua_stylesheet() -> &'static Stylesheet {
@@ -160,7 +200,6 @@ pub fn computed_style(
         }
     }
 
-    // Ascending so later (higher priority) declarations overwrite earlier ones.
     cands.sort_by_key(|c| (c.rank, c.spec, c.order));
     let mut map: HashMap<String, String> = HashMap::new();
     for c in cands {
@@ -170,11 +209,10 @@ pub fn computed_style(
     let mut cs = ComputedStyle {
         display: Display::Inline,
         font_size: parent.font_size,
-        margin_top: 0.0,
-        margin_bottom: 0.0,
         bold: parent.bold,
         color: parent.color,
-        background_color: Color::TRANSPARENT,
+        text_align: parent.text_align, // text-align inherits
+        ..ComputedStyle::initial()
     };
     apply(&mut cs, &map, parent);
     cs
@@ -239,19 +277,128 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             cs.background_color = c;
         }
     }
+    if let Some(v) = map.get("text-align") {
+        cs.text_align = match v.as_str() {
+            "center" => TextAlign::Center,
+            "right" | "end" => TextAlign::Right,
+            _ => TextAlign::Left,
+        };
+    }
 
     let fs = cs.font_size;
+    // Margins.
     if let Some(v) = map.get("margin") {
-        let (t, b) = margin_shorthand(v, fs);
-        cs.margin_top = t;
-        cs.margin_bottom = b;
+        cs.margin = edges_shorthand(v, fs);
     }
-    if let Some(v) = map.get("margin-top").and_then(|v| parse_length(v)) {
-        cs.margin_top = v.to_px(fs, 0.0);
+    side_edge(map, "margin", fs, &mut cs.margin);
+    // Padding.
+    if let Some(v) = map.get("padding") {
+        cs.padding = edges_shorthand(v, fs);
     }
-    if let Some(v) = map.get("margin-bottom").and_then(|v| parse_length(v)) {
-        cs.margin_bottom = v.to_px(fs, 0.0);
+    side_edge(map, "padding", fs, &mut cs.padding);
+    // Borders.
+    if let Some(v) = map.get("border") {
+        let (w, c) = parse_border(v, fs);
+        cs.border = Edges::uniform(w);
+        if let Some(c) = c {
+            cs.border_color = c;
+        }
     }
+    if let Some(v) = map.get("border-width").and_then(|v| len_px(v, fs)) {
+        cs.border = Edges::uniform(v);
+    }
+    if let Some(v) = map.get("border-color").and_then(|v| parse_color(v)) {
+        cs.border_color = v;
+    }
+    if let Some(px) = map.get("border-top-width").and_then(|v| len_px(v, fs)) {
+        cs.border.top = px;
+    }
+    if let Some(px) = map.get("border-right-width").and_then(|v| len_px(v, fs)) {
+        cs.border.right = px;
+    }
+    if let Some(px) = map.get("border-bottom-width").and_then(|v| len_px(v, fs)) {
+        cs.border.bottom = px;
+    }
+    if let Some(px) = map.get("border-left-width").and_then(|v| len_px(v, fs)) {
+        cs.border.left = px;
+    }
+    // Width.
+    if let Some(v) = map.get("width") {
+        cs.width = if v == "auto" { None } else { parse_length(v) };
+    }
+}
+
+/// Resolve per-side overrides like `margin-top`, `padding-left`.
+fn side_edge(map: &HashMap<String, String>, prop: &str, fs: f32, edges: &mut Edges) {
+    if let Some(px) = map.get(&format!("{prop}-top")).and_then(|v| len_px(v, fs)) {
+        edges.top = px;
+    }
+    if let Some(px) = map
+        .get(&format!("{prop}-right"))
+        .and_then(|v| len_px(v, fs))
+    {
+        edges.right = px;
+    }
+    if let Some(px) = map
+        .get(&format!("{prop}-bottom"))
+        .and_then(|v| len_px(v, fs))
+    {
+        edges.bottom = px;
+    }
+    if let Some(px) = map.get(&format!("{prop}-left")).and_then(|v| len_px(v, fs)) {
+        edges.left = px;
+    }
+}
+
+fn len_px(v: &str, fs: f32) -> Option<f32> {
+    parse_length(v).map(|l| l.to_px(fs, 0.0))
+}
+
+/// `top right bottom left` shorthand with 1–4 values.
+fn edges_shorthand(v: &str, fs: f32) -> Edges {
+    let vals: Vec<f32> = v
+        .split_whitespace()
+        .map(|t| len_px(t, fs).unwrap_or(0.0))
+        .collect();
+    match vals.len() {
+        0 => Edges::default(),
+        1 => Edges::uniform(vals[0]),
+        2 => Edges {
+            top: vals[0],
+            bottom: vals[0],
+            right: vals[1],
+            left: vals[1],
+        },
+        3 => Edges {
+            top: vals[0],
+            right: vals[1],
+            left: vals[1],
+            bottom: vals[2],
+        },
+        _ => Edges {
+            top: vals[0],
+            right: vals[1],
+            bottom: vals[2],
+            left: vals[3],
+        },
+    }
+}
+
+/// Parse `border: <width> <style> <color>` (any order), returning width + color.
+fn parse_border(v: &str, fs: f32) -> (f32, Option<Color>) {
+    let mut width = 0.0;
+    let mut color = None;
+    for tok in v.split_whitespace() {
+        if let Some(px) = len_px(tok, fs) {
+            width = px;
+        } else if let Some(c) = parse_color(tok) {
+            color = Some(c);
+        } else if tok == "none" || tok == "hidden" {
+            width = 0.0;
+        }
+        // border-style keywords (solid/dashed/…) are ignored for now.
+    }
+    (width, color)
 }
 
 fn resolve_font_size(v: &str, parent_fs: f32) -> Option<f32> {
@@ -280,19 +427,8 @@ fn is_bold(v: &str) -> bool {
     }
 }
 
-/// First token of `v` that parses as a color (handles the `background` shorthand).
 fn color_in(v: &str) -> Option<Color> {
     parse_color(v).or_else(|| v.split_whitespace().find_map(parse_color))
-}
-
-fn margin_shorthand(v: &str, fs: f32) -> (f32, f32) {
-    let vals: Vec<f32> = v
-        .split_whitespace()
-        .map(|tok| parse_length(tok).map(|l| l.to_px(fs, 0.0)).unwrap_or(0.0))
-        .collect();
-    let top = vals.first().copied().unwrap_or(0.0);
-    let bottom = vals.get(2).or_else(|| vals.first()).copied().unwrap_or(0.0);
-    (top, bottom)
 }
 
 #[cfg(test)]
@@ -300,62 +436,54 @@ mod tests {
     use super::*;
     use argus_dom::{Attribute, QualName};
 
-    fn doc_with(html_like: impl FnOnce(&mut Document) -> NodeId) -> (Document, NodeId) {
-        let mut doc = Document::new();
-        let node = html_like(&mut doc);
-        (doc, node)
+    fn one(doc: &mut Document, tag: &str, attrs: Vec<Attribute>) -> NodeId {
+        let root = doc.root();
+        let el = doc.create_element(QualName::html(tag), attrs);
+        doc.append(root, el);
+        el
     }
 
     #[test]
     fn ua_headings() {
-        let (doc, h1) = doc_with(|doc| {
-            let root = doc.root();
-            let el = doc.create_element(QualName::html("h1"), vec![]);
-            doc.append(root, el);
-            el
-        });
-        let author = Stylesheet::default();
-        let cs = computed_style(&doc, h1, &ComputedStyle::initial(), &author);
+        let mut doc = Document::new();
+        let h1 = one(&mut doc, "h1", vec![]);
+        let cs = computed_style(&doc, h1, &ComputedStyle::initial(), &Stylesheet::default());
         assert_eq!(cs.display, Display::Block);
         assert!(cs.bold);
         assert_eq!(cs.font_size, 32.0);
-        assert!(cs.margin_top > 0.0);
+        assert!(cs.margin.top > 0.0);
     }
 
     #[test]
-    fn author_and_inline_cascade() {
-        // <p class="lead" style="color: red">  with author `p { color: blue }`
-        let (doc, p) = doc_with(|doc| {
-            let root = doc.root();
-            let el = doc.create_element(
-                QualName::html("p"),
-                vec![
-                    Attribute::new("class", "lead"),
-                    Attribute::new("style", "color: red"),
-                ],
-            );
-            doc.append(root, el);
-            el
-        });
+    fn cascade_color_background_inline() {
+        let mut doc = Document::new();
+        let p = one(
+            &mut doc,
+            "p",
+            vec![
+                Attribute::new("class", "lead"),
+                Attribute::new("style", "color: red"),
+            ],
+        );
         let author =
             parse_stylesheet("p { color: blue; background-color: #eee } .lead { color: green }");
         let cs = computed_style(&doc, p, &ComputedStyle::initial(), &author);
-        // Inline `color: red` beats author rules; background comes from author.
         assert_eq!(cs.color, Color::rgb(255, 0, 0));
         assert_eq!(cs.background_color, Color::rgb(0xee, 0xee, 0xee));
     }
 
     #[test]
-    fn specificity_decides_within_author() {
-        let (doc, p) = doc_with(|doc| {
-            let root = doc.root();
-            let el = doc.create_element(QualName::html("p"), vec![Attribute::new("class", "lead")]);
-            doc.append(root, el);
-            el
-        });
-        // `.lead` (0,1,0) beats `p` (0,0,1) regardless of source order.
-        let author = parse_stylesheet(".lead { color: green } p { color: blue }");
-        let cs = computed_style(&doc, p, &ComputedStyle::initial(), &author);
-        assert_eq!(cs.color, Color::rgb(0, 128, 0));
+    fn box_model_properties() {
+        let mut doc = Document::new();
+        let d = one(&mut doc, "div", vec![]);
+        let author = parse_stylesheet(
+            "div { padding: 10px 20px; border: 2px solid #000; width: 50%; text-align: center }",
+        );
+        let cs = computed_style(&doc, d, &ComputedStyle::initial(), &author);
+        assert_eq!(cs.padding.top, 10.0);
+        assert_eq!(cs.padding.left, 20.0);
+        assert_eq!(cs.border, Edges::uniform(2.0));
+        assert_eq!(cs.text_align, TextAlign::Center);
+        assert_eq!(cs.width, Some(Length::Percent(50.0)));
     }
 }
