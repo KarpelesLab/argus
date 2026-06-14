@@ -263,6 +263,8 @@ button { display: block; border: 1px solid #888; background: #e8e8e8; padding: 4
 option { display: none }
 input[type=checkbox], input[type=radio] { width: 14px; height: 14px; padding: 0; margin: 4px 6px 4px 0 }
 input[type=radio] { border-radius: 8px }
+input:disabled, textarea:disabled, select:disabled, button:disabled \
+  { background: #eeeeee; color: #999999; border-color: #cccccc }
 ";
 
 fn ua_stylesheet() -> &'static Stylesheet {

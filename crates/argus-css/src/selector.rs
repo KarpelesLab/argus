@@ -46,6 +46,10 @@ pub enum PseudoClass {
     LastChild,
     /// `:nth-child(an+b)`, stored as `(a, b)`. `odd` = `(2, 1)`, `even` = `(2, 0)`.
     NthChild(i32, i32),
+    /// Form-state pseudo-classes, backed by attribute presence.
+    Checked,
+    Disabled,
+    Enabled,
 }
 
 /// A compound selector: an optional type plus id/classes/attrs/pseudo-classes.
@@ -202,6 +206,9 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                             match name.as_str() {
                                 "first-child" => c.pseudos.push(PseudoClass::FirstChild),
                                 "last-child" => c.pseudos.push(PseudoClass::LastChild),
+                                "checked" => c.pseudos.push(PseudoClass::Checked),
+                                "disabled" => c.pseudos.push(PseudoClass::Disabled),
+                                "enabled" => c.pseudos.push(PseudoClass::Enabled),
                                 _ => {}
                             }
                         }
@@ -455,7 +462,15 @@ fn pseudo_matches(doc: &Document, node: NodeId, p: PseudoClass) -> bool {
                 diff % a == 0 && diff / a >= 0
             }
         }
+        PseudoClass::Checked => element_has_attr(doc, node, "checked"),
+        PseudoClass::Disabled => element_has_attr(doc, node, "disabled"),
+        PseudoClass::Enabled => !element_has_attr(doc, node, "disabled"),
     }
+}
+
+/// Whether `node` is an element carrying attribute `name`.
+fn element_has_attr(doc: &Document, node: NodeId, name: &str) -> bool {
+    matches!(&doc.node(node).data, NodeData::Element(e) if e.attr(name).is_some())
 }
 
 /// Parse the argument of `:nth-child(...)` into `(a, b)` for `an+b`. Handles
@@ -598,6 +613,29 @@ mod tests {
         assert!(matches(&doc, li1, &sel("li:not(#x)")));
         // `:not()` adds its argument's specificity (a class here).
         assert_eq!(sel("li:not(.skip)").specificity(), Specificity(0, 1, 1));
+    }
+
+    #[test]
+    fn form_state_pseudo_classes() {
+        // <input checked> and <input disabled>
+        let mut doc = Document::new();
+        let root = doc.root();
+        let checked =
+            doc.create_element(QualName::html("input"), vec![Attribute::new("checked", "")]);
+        doc.append(root, checked);
+        let disabled = doc.create_element(
+            QualName::html("input"),
+            vec![Attribute::new("disabled", "")],
+        );
+        doc.append(root, disabled);
+        let plain = doc.create_element(QualName::html("input"), vec![]);
+        doc.append(root, plain);
+
+        assert!(matches(&doc, checked, &sel("input:checked")));
+        assert!(!matches(&doc, plain, &sel("input:checked")));
+        assert!(matches(&doc, disabled, &sel(":disabled")));
+        assert!(matches(&doc, plain, &sel("input:enabled")));
+        assert!(!matches(&doc, disabled, &sel(":enabled")));
     }
 
     #[test]
