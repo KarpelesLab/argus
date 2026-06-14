@@ -31,6 +31,7 @@ h2 {{ color: #444 }}\
 .center {{ text-align: center }}\
 .tbl td, .tbl th {{ border: 1px solid #ccd3df; background-color: #ffffff }}\
 .tbl th {{ background-color: #eef1f7 }}\
+.tbl tbody tr:nth-child(even) td {{ background-color: #eaf0fb }}\
 .row {{ display: flex }}\
 .col {{ background-color: #ffffff; border: 1px solid #d0d7e2; padding: 10px; margin: 4px }}\
 </style></head><body>\

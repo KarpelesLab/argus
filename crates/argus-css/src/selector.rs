@@ -44,6 +44,8 @@ pub struct AttrSel {
 pub enum PseudoClass {
     FirstChild,
     LastChild,
+    /// `:nth-child(an+b)`, stored as `(a, b)`. `odd` = `(2, 1)`, `even` = `(2, 0)`.
+    NthChild(i32, i32),
 }
 
 /// A compound selector: an optional type plus id/classes/attrs/pseudo-classes.
@@ -193,17 +195,31 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                         }
                         *i += 1;
                     }
-                    Some(Token::Function(_)) => {
+                    Some(Token::Function(fname)) => {
+                        let is_nth = !double && fname.eq_ignore_ascii_case("nth-child");
                         *i += 1;
-                        // skip to matching ')'
+                        // Capture the argument tokens up to the matching ')'.
+                        let mut args = Vec::new();
                         let mut depth = 1;
                         while *i < tokens.len() && depth > 0 {
                             match tokens.get(*i) {
                                 Some(Token::LParen) => depth += 1,
-                                Some(Token::RParen) => depth -= 1,
-                                _ => {}
+                                Some(Token::RParen) => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        *i += 1;
+                                        break;
+                                    }
+                                }
+                                Some(t) => args.push(t.clone()),
+                                None => {}
                             }
                             *i += 1;
+                        }
+                        if is_nth {
+                            if let Some((a, b)) = parse_nth(&args) {
+                                c.pseudos.push(PseudoClass::NthChild(a, b));
+                            }
                         }
                     }
                     _ => return None,
@@ -379,20 +395,74 @@ fn attr_matches(e: &argus_dom::ElementData, sel: &AttrSel) -> bool {
 }
 
 fn pseudo_matches(doc: &Document, node: NodeId, p: PseudoClass) -> bool {
-    let mut sib = match p {
-        PseudoClass::FirstChild => doc.node(node).prev_sibling(),
-        PseudoClass::LastChild => doc.node(node).next_sibling(),
-    };
-    while let Some(id) = sib {
-        if matches!(doc.node(id).data, NodeData::Element(_)) {
-            return false; // an element sibling on that side → not first/last
+    match p {
+        PseudoClass::FirstChild | PseudoClass::LastChild => {
+            let mut sib = match p {
+                PseudoClass::LastChild => doc.node(node).next_sibling(),
+                _ => doc.node(node).prev_sibling(),
+            };
+            while let Some(id) = sib {
+                if matches!(doc.node(id).data, NodeData::Element(_)) {
+                    return false; // an element sibling on that side → not first/last
+                }
+                sib = match p {
+                    PseudoClass::LastChild => doc.node(id).next_sibling(),
+                    _ => doc.node(id).prev_sibling(),
+                };
+            }
+            true
         }
-        sib = match p {
-            PseudoClass::FirstChild => doc.node(id).prev_sibling(),
-            PseudoClass::LastChild => doc.node(id).next_sibling(),
-        };
+        PseudoClass::NthChild(a, b) => {
+            // 1-based index among element siblings.
+            let mut index = 1i32;
+            let mut sib = doc.node(node).prev_sibling();
+            while let Some(id) = sib {
+                if matches!(doc.node(id).data, NodeData::Element(_)) {
+                    index += 1;
+                }
+                sib = doc.node(id).prev_sibling();
+            }
+            // Matches if index == a*n + b for some integer n >= 0.
+            if a == 0 {
+                index == b
+            } else {
+                let diff = index - b;
+                diff % a == 0 && diff / a >= 0
+            }
+        }
     }
-    true
+}
+
+/// Parse the argument of `:nth-child(...)` into `(a, b)` for `an+b`. Handles
+/// `odd`, `even`, a bare integer `b`, `n`/`-n`, `an`, and `an±b`.
+fn parse_nth(args: &[Token]) -> Option<(i32, i32)> {
+    match args {
+        [Token::Ident(k)] if k.eq_ignore_ascii_case("odd") => Some((2, 1)),
+        [Token::Ident(k)] if k.eq_ignore_ascii_case("even") => Some((2, 0)),
+        [Token::Number(b)] => Some((0, *b as i32)),
+        // `n`, `-n`, optionally followed by `+b`/`-b` (a signed Number token).
+        [Token::Ident(k)] if is_n_ident(k) => Some((n_coeff(k), 0)),
+        [Token::Ident(k), Token::Number(b)] if is_n_ident(k) => Some((n_coeff(k), *b as i32)),
+        // `an`, optionally followed by a signed `b`.
+        [Token::Dimension(a, u)] if u.eq_ignore_ascii_case("n") => Some((*a as i32, 0)),
+        [Token::Dimension(a, u), Token::Number(b)] if u.eq_ignore_ascii_case("n") => {
+            Some((*a as i32, *b as i32))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `s` is the bare `n` coefficient ident (`n` or `-n`).
+fn is_n_ident(s: &str) -> bool {
+    s.eq_ignore_ascii_case("n") || s.eq_ignore_ascii_case("-n") || s.eq_ignore_ascii_case("+n")
+}
+
+fn n_coeff(s: &str) -> i32 {
+    if s.starts_with('-') {
+        -1
+    } else {
+        1
+    }
 }
 
 /// The nearest ancestor that is an element (stops at the document).
@@ -480,5 +550,36 @@ mod tests {
         assert!(!matches(&doc, li2, &sel("li:last-child")));
         // Specificity: attribute selector counts in the class column.
         assert_eq!(sel("li[id]").specificity(), Specificity(0, 1, 1));
+    }
+
+    #[test]
+    fn nth_child_selectors() {
+        // <ul> with five <li> children: li1..li5.
+        let mut doc = Document::new();
+        let root = doc.root();
+        let ul = doc.create_element(QualName::html("ul"), vec![]);
+        doc.append(root, ul);
+        let lis: Vec<NodeId> = (0..5)
+            .map(|_| {
+                let li = doc.create_element(QualName::html("li"), vec![]);
+                doc.append(ul, li);
+                li
+            })
+            .collect();
+
+        // odd → 1,3,5 ; even → 2,4
+        assert!(matches(&doc, lis[0], &sel("li:nth-child(odd)")));
+        assert!(!matches(&doc, lis[1], &sel("li:nth-child(odd)")));
+        assert!(matches(&doc, lis[1], &sel("li:nth-child(even)")));
+        // exact index
+        assert!(matches(&doc, lis[2], &sel("li:nth-child(3)")));
+        assert!(!matches(&doc, lis[3], &sel("li:nth-child(3)")));
+        // an+b: 2n+1 = 1,3,5 ; 3n = 3 (n>=1) — n=0 gives 0 (no element)
+        assert!(matches(&doc, lis[4], &sel("li:nth-child(2n+1)")));
+        assert!(matches(&doc, lis[2], &sel("li:nth-child(3n)")));
+        assert!(!matches(&doc, lis[0], &sel("li:nth-child(3n)")));
+        // n+3 (a=1,b=3) matches index >= 3 → li3,li4,li5
+        assert!(matches(&doc, lis[3], &sel("li:nth-child(n+3)")));
+        assert!(!matches(&doc, lis[1], &sel("li:nth-child(n+3)")));
     }
 }
