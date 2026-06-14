@@ -1142,6 +1142,46 @@ mod tests {
     }
 
     #[test]
+    fn layout_survives_arbitrary_input() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let mut seed = 0xD1B54A32D192ED03u64;
+        let mut byte = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed & 0xff) as u8
+        };
+        // Bias toward markup plus CSS property/value bytes so styled, nested boxes
+        // (flex/grid/tables/lists) are exercised, not just text.
+        const BIAS: &[u8] =
+            b"<>/=\"' ;:{}().%#-\nstyledivpaulitbflexgridcolorwidthpaddingmarginbordedisplay0123";
+        for _ in 0..2000 {
+            let len = (byte() as usize) * 4;
+            let bytes: Vec<u8> = (0..len)
+                .map(|_| {
+                    if byte() < 150 {
+                        BIAS[byte() as usize % BIAS.len()]
+                    } else {
+                        byte()
+                    }
+                })
+                .collect();
+            let s = String::from_utf8_lossy(&bytes);
+            let doc = parse(&s);
+            // The full pipeline (parse → cascade → layout) must never panic, and
+            // must produce finite geometry.
+            let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+            assert!(l.height.is_finite());
+            for r in &l.rects {
+                assert!(r.w.is_finite() && r.h.is_finite());
+            }
+        }
+    }
+
+    #[test]
     fn gap_spaces_flex_items() {
         let Some(font) = system_font() else {
             eprintln!("no system font; skipping");
