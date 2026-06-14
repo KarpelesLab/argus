@@ -83,14 +83,22 @@ impl Content {
                 fb.fill(Color::WHITE);
                 let doc = argus_html::parse(html);
                 let layout = argus_layout::layout(&doc, font, self.viewport.width as f32);
-                let text = argus_gfx::render_runs(
-                    &layout.runs,
+                let list = argus_gfx::DisplayList {
+                    rects: layout.rects,
+                    runs: layout.runs,
+                };
+                let painted = argus_gfx::render_display_list(
+                    &list,
                     font,
                     self.viewport.width,
                     self.viewport.height,
                 );
-                argus_gfx::composite_over(fb.pixels_mut(), &text.pixels);
-                log!("rendered page: {} text runs", layout.runs.len());
+                argus_gfx::composite_over(fb.pixels_mut(), &painted.pixels);
+                log!(
+                    "rendered page: {} rects, {} text runs",
+                    list.rects.len(),
+                    list.runs.len()
+                );
             }
             _ => fb.fill(PHASE0_PAINT),
         }

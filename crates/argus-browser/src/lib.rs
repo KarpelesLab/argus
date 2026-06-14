@@ -15,17 +15,25 @@ use argus_util::{log, Role};
 use std::io;
 
 /// A built-in sample document rendered by the windowed shell and the page dumper.
-pub const SAMPLE_HTML: &str = "<!DOCTYPE html><html><head><title>Argus</title></head><body>\
+pub const SAMPLE_HTML: &str = "<!DOCTYPE html><html><head><title>Argus</title><style>\
+body { background-color: #f4f6fb; color: #1c2430 }\
+h1 { color: #2e86de }\
+h2 { color: #444 }\
+.note { background-color: #fff3cd; color: #5a4b00 }\
+.brand { color: #c0392b }\
+</style></head><body>\
 <h1>Argus</h1>\
-<p>A web browser written in pure Rust. This page was fetched as HTML, parsed into a \
-DOM, given user-agent styles, laid out into lines, and painted with shaped, \
-anti-aliased glyphs — all inside a sandboxed content process.</p>\
+<p>A web browser written in <strong class=\"brand\">pure Rust</strong>. This page was \
+fetched as HTML, parsed into a DOM, run through a real CSS cascade (user-agent + the \
+author styles in this document's &lt;style&gt; element), laid out into lines, and \
+painted with shaped, anti-aliased glyphs — all inside a sandboxed content process.</p>\
 <h2>Phase 1</h2>\
-<p>The text you are reading was measured with real font metrics and broken into \
-lines that fit the window. Headings are larger and bold. Resize and reload to see \
-it reflow.</p>\
+<p class=\"note\">This paragraph has an author background-color and text color applied \
+by a class selector. Specificity, the cascade, and inline styles all work.</p>\
+<p style=\"color: #2e7d32\">This one is colored green by an inline style attribute, \
+which beats the author rules for this element.</p>\
 <h3>Next</h3>\
-<p>Colors, backgrounds, links, and a proper fragment tree come next.</p>\
+<p>Images, a real fragment tree, and more CSS properties come next.</p>\
 </body></html>";
 
 /// Locate a usable system font on disk (the browser process is trusted and may

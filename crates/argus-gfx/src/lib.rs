@@ -14,9 +14,27 @@
 //! the content process composites into its framebuffer.
 
 use argus_geometry::Color;
-use oxideav_core::{Group, Node, Transform2D, VectorFrame};
+use oxideav_core::{Group, Node, Paint, Path, PathNode, Point, Rgba, Transform2D, VectorFrame};
 use oxideav_raster::Renderer;
 use oxideav_scribe::{Face, FaceChain, Shaper};
+
+fn rgba_of(c: Color) -> Rgba {
+    Rgba::new(c.r, c.g, c.b, c.a)
+}
+
+/// Recursively set the fill paint of every `Path` node in a glyph subtree, so a
+/// shaped run paints in `color` instead of the face's default black.
+fn recolor(node: &mut Node, paint: &Paint) {
+    match node {
+        Node::Path(p) => p.fill = Some(paint.clone()),
+        Node::Group(g) => {
+            for child in &mut g.children {
+                recolor(child, paint);
+            }
+        }
+        _ => {}
+    }
+}
 
 /// A loaded font face ready to shape and render text.
 pub struct Font {
@@ -53,14 +71,75 @@ impl Font {
     }
 }
 
-/// A shaped-and-positioned text run for [`render_runs`]: its left edge at `x` and
-/// baseline at `baseline`, in canvas pixels.
+/// A shaped-and-positioned text run: its left edge at `x` and baseline at
+/// `baseline`, in canvas pixels, painted in `color`.
 #[derive(Clone, Debug)]
 pub struct TextRun {
     pub x: f32,
     pub baseline: f32,
     pub text: String,
     pub size_px: f32,
+    pub color: Color,
+}
+
+/// A filled rectangle in canvas pixels (e.g. an element background).
+#[derive(Clone, Copy, Debug)]
+pub struct RectFill {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub color: Color,
+}
+
+/// A flat list of paint commands. Rectangles paint first (backgrounds), then text.
+#[derive(Clone, Debug, Default)]
+pub struct DisplayList {
+    pub rects: Vec<RectFill>,
+    pub runs: Vec<TextRun>,
+}
+
+/// Rasterize a [`DisplayList`] onto a transparent [`Canvas`] in one pass: filled
+/// rects behind colored text runs.
+pub fn render_display_list(list: &DisplayList, font: &Font, width: u32, height: u32) -> Canvas {
+    let mut children: Vec<Node> = Vec::with_capacity(list.rects.len() + list.runs.len());
+    for r in &list.rects {
+        children.push(rect_node(r));
+    }
+    for run in &list.runs {
+        let mut group = build_run(font, &run.text, run.size_px, run.x, run.baseline);
+        let paint = Paint::Solid(rgba_of(run.color));
+        for child in &mut group.children {
+            recolor(child, &paint);
+        }
+        children.push(Node::Group(group));
+    }
+    let root = Group {
+        children,
+        ..Group::default()
+    };
+    let video = render_run(root, width, height);
+    let pixels = video
+        .planes
+        .into_iter()
+        .next()
+        .map(|p| p.data)
+        .unwrap_or_else(|| vec![0; width as usize * height as usize * 4]);
+    Canvas {
+        width,
+        height,
+        pixels,
+    }
+}
+
+fn rect_node(r: &RectFill) -> Node {
+    let mut path = Path::new();
+    path.move_to(Point::new(r.x, r.y));
+    path.line_to(Point::new(r.x + r.w, r.y));
+    path.line_to(Point::new(r.x + r.w, r.y + r.h));
+    path.line_to(Point::new(r.x, r.y + r.h));
+    path.close();
+    Node::Path(PathNode::new(path).with_fill(Paint::Solid(rgba_of(r.color))))
 }
 
 /// An RGBA8 canvas (row-major, tightly packed, straight alpha).
@@ -136,7 +215,14 @@ pub fn composite_over(dst: &mut [u8], src: &[u8]) {
 pub fn render_runs(runs: &[TextRun], font: &Font, width: u32, height: u32) -> Canvas {
     let children: Vec<Node> = runs
         .iter()
-        .map(|run| Node::Group(build_run(font, &run.text, run.size_px, run.x, run.baseline)))
+        .map(|run| {
+            let mut group = build_run(font, &run.text, run.size_px, run.x, run.baseline);
+            let paint = Paint::Solid(rgba_of(run.color));
+            for child in &mut group.children {
+                recolor(child, &paint);
+            }
+            Node::Group(group)
+        })
         .collect();
     let root = Group {
         children,

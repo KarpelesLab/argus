@@ -11,6 +11,7 @@ rust-version.workspace = true
 argus-dom.workspace = true
 argus-style.workspace = true
 argus-gfx.workspace = true
+argus-geometry.workspace = true
 
 [dev-dependencies]
 argus-html.workspace = true

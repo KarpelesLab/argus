@@ -103,6 +103,11 @@ pub fn parse_stylesheet(css: &str) -> Stylesheet {
     Stylesheet { rules }
 }
 
+/// Parse a bare declaration block (e.g. the value of an inline `style` attribute).
+pub fn parse_declaration_block(input: &str) -> Vec<Declaration> {
+    parse_declarations(&tokenizer::tokenize(input))
+}
+
 fn skip_ws(tokens: &[Token], i: &mut usize) {
     while matches!(tokens.get(*i), Some(Token::Whitespace)) {
         *i += 1;
