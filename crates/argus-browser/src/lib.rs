@@ -68,7 +68,7 @@ blue link</a> all flow inside this paragraph with correct spacing.</p>\
 </ul>\
 <hr>\
 <ol>\
-<li>JavaScript via kataan (pending its embedding API)</li>\
+<li>JavaScript via kataan, with synchronous DOM bindings</li>\
 <li>Navigation, tabs, and history</li>\
 <li>More CSS: flexbox, grid, and the long tail</li>\
 </ol>\

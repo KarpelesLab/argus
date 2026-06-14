@@ -1,7 +1,22 @@
 # Upstream Requirements: kataan
 
 **Consumer:** [`argus-script`](../subsystems/scripting.md) (+ `argus-webapi`)
-**Critical path:** kataan's embedding API + GC landing **gate Argus Phase 2**.
+
+> **Update (revised after testing kataan 0.0.3):** the original premise below — that
+> Argus's DOM bindings are *blocked* until kataan ships a Rust host-function/embedder
+> API — turned out to be **false for the synchronous case**. kataan's published JS
+> already supports ES6 `Proxy` (get/set traps), `Object.defineProperty` accessors,
+> `JSON.stringify`/`parse`, closures, and `this` — enough to model `document`/`window`
+> **entirely in JS**. Argus now ships working synchronous DOM bindings via a JS-side
+> shim + post-execution reconciliation (`crates/argus-content/src/dom_script.rs`): the
+> page's scripts mutate proxy objects that record ops, which Rust replays into the real
+> DOM before layout. The Tier-1 embedder API below is therefore **no longer
+> Phase-2-blocking**; it remains the *better* long-term path and is **required for the
+> interactive surface** (event loop, `setTimeout`, event listeners, live reflow, reading
+> back computed geometry), which the JS-shim approach cannot provide.
+
+**Critical path:** the embedding API + GC remain wanted for an **event-driven** DOM and
+performance, but no longer gate basic Phase 2 scripting.
 
 ## Baseline (what exists today)
 

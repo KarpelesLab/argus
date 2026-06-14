@@ -18,17 +18,21 @@ co-equal embedding, not an afterthought).
 |-------|-------|
 | 0 — Foundations / multi-process | ✅ complete (sandbox, IPC, shared-mem framebuffer, AppKit window, CI) |
 | 1 — Static document to pixels | ✅ essentially complete (HTML→DOM, CSS cascade + box model, block/inline layout, lists/hr, text shaping + raster, networking over rsurl, images) |
-| 2 — Scripting & dynamic DOM | 🟡 started — page `<script>` runs in kataan (computation + console). **Blocked** on kataan's embedding API for DOM bindings / event loop ([upstream/kataan.md](upstream/kataan.md)) |
+| 2 — Scripting & dynamic DOM | 🟡 page `<script>` runs in kataan; **synchronous DOM bindings now work** via a JS-side shim + reconciliation (`document.getElementById` → `textContent`/`innerHTML`/`className`/`setAttribute`/`style.*`) — no kataan host-callback API needed (ES6 Proxy/`Object.defineProperty`/`JSON` suffice). Live event loop, timers, events, and reading back computed layout still want a real embedding API ([upstream/kataan.md](upstream/kataan.md)) |
 | 3 — Chrome, navigation & services | 🟡 links → fetch → re-render, URL + subresource resolution, **scroll-wheel**, **persistent cookie jar**. Tabs/history/back-forward, CSP, HTTP cache remain |
 | 4 — Layout & CSS breadth | 🟡 box model, **box-sizing**, **min/max-width**, **line-height**, text-align (incl. **justify**), **text-transform**, **white-space: pre/nowrap**, **visibility**, **`<br>`**, **vertical-align (sub/sup)**, **position: relative**, **`@media` queries** (min/max-width), **custom properties (`var()`)**, attribute + `:first/last-child` + **`:nth-child`** + **`:not()`** selectors (with descendant/child combinators), lists + **list-style-type**, `<hr>`, **tables**, **flexbox**, **grid** + **gap**, underline + **line-through**, **border-radius**, **opacity**. Floats, absolute/fixed positioning, `flex-grow`/`justify`/`align`, grid spans/`fr`, web fonts, complex text remain |
 | 5 — Web platform & headless | 🟡 headless surfaces: `--dump-page`, `--dump-dom`, `--dump-a11y`, **`--dump-text`**, `--eval` (JS). Web API breadth (needs JS bindings), full CDP, storage remain |
 | 6 — Media & richer rendering | 🟡 PNG + GIF image decode (oxideav). JPEG/WebP/AVIF, `<video>`/`<audio>`, animations, GPU compositor remain |
 | 7 — Hardening / perf / conformance | 🟡 started — parser + **full layout-pipeline** robustness tests (random inputs) + cargo-fuzz harness (html/css/**layout**), accessibility tree. WPT, perf, sandbox hardening remain |
 
-Honest scope note: the **load-bearing risk for the rest of Phase 2** is external —
-kataan needs the embedding API documented in [upstream/kataan.md](upstream/kataan.md)
-before `document`/`window` and the event loop can exist. Phases 4–7 are a large,
-multi-cycle effort beyond the current foundation.
+Honest scope note: **synchronous `document`/`window` bindings now work** without
+any kataan changes — kataan supports enough JS (ES6 `Proxy` traps,
+`Object.defineProperty`, `JSON`, closures) to model the DOM in JS-space and
+reconcile mutations back into the real tree (`crates/argus-content/src/dom_script.rs`).
+What still needs a real **embedding API** ([upstream/kataan.md](upstream/kataan.md))
+is the *interactive* surface: an event loop, timers (`setTimeout`), event listeners,
+and reading back computed geometry. Phases 4–7 are a large, multi-cycle effort
+beyond the current foundation.
 
 ---
 
