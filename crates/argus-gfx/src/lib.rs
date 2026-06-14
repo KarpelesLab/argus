@@ -82,14 +82,16 @@ pub struct TextRun {
     pub color: Color,
 }
 
-/// A filled rectangle in canvas pixels (e.g. an element background).
-#[derive(Clone, Copy, Debug)]
+/// A filled rectangle in canvas pixels (e.g. an element background), optionally
+/// with rounded corners (`radius`).
+#[derive(Clone, Copy, Debug, Default)]
 pub struct RectFill {
     pub x: f32,
     pub y: f32,
     pub w: f32,
     pub h: f32,
     pub color: Color,
+    pub radius: f32,
 }
 
 /// A flat list of paint commands. Rectangles paint first (backgrounds), then text.
@@ -134,11 +136,27 @@ pub fn render_display_list(list: &DisplayList, font: &Font, width: u32, height: 
 
 fn rect_node(r: &RectFill) -> Node {
     let mut path = Path::new();
-    path.move_to(Point::new(r.x, r.y));
-    path.line_to(Point::new(r.x + r.w, r.y));
-    path.line_to(Point::new(r.x + r.w, r.y + r.h));
-    path.line_to(Point::new(r.x, r.y + r.h));
-    path.close();
+    let rad = r.radius.min(r.w / 2.0).min(r.h / 2.0).max(0.0);
+    if rad <= 0.5 {
+        path.move_to(Point::new(r.x, r.y));
+        path.line_to(Point::new(r.x + r.w, r.y));
+        path.line_to(Point::new(r.x + r.w, r.y + r.h));
+        path.line_to(Point::new(r.x, r.y + r.h));
+        path.close();
+    } else {
+        // Rounded rectangle: straight edges joined by quadratic corner arcs.
+        let (x, y, w, h) = (r.x, r.y, r.w, r.h);
+        path.move_to(Point::new(x + rad, y));
+        path.line_to(Point::new(x + w - rad, y));
+        path.quad_to(Point::new(x + w, y), Point::new(x + w, y + rad));
+        path.line_to(Point::new(x + w, y + h - rad));
+        path.quad_to(Point::new(x + w, y + h), Point::new(x + w - rad, y + h));
+        path.line_to(Point::new(x + rad, y + h));
+        path.quad_to(Point::new(x, y + h), Point::new(x, y + h - rad));
+        path.line_to(Point::new(x, y + rad));
+        path.quad_to(Point::new(x, y), Point::new(x + rad, y));
+        path.close();
+    }
     Node::Path(PathNode::new(path).with_fill(Paint::Solid(rgba_of(r.color))))
 }
 

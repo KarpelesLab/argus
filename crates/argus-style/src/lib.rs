@@ -77,6 +77,8 @@ pub struct ComputedStyle {
     pub underline: bool,
     /// Column count for a grid container (from `grid-template-columns`).
     pub grid_columns: u32,
+    /// Uniform `border-radius` in pixels.
+    pub border_radius: f32,
 }
 
 impl ComputedStyle {
@@ -96,6 +98,7 @@ impl ComputedStyle {
             text_align: TextAlign::Left,
             underline: false,
             grid_columns: 1,
+            border_radius: 0.0,
         }
     }
 }
@@ -351,6 +354,12 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     }
     if let Some(v) = map.get("grid-template-columns") {
         cs.grid_columns = grid_track_count(v);
+    }
+    if let Some(px) = map
+        .get("border-radius")
+        .and_then(|v| len_px(v.split_whitespace().next().unwrap_or(v), fs))
+    {
+        cs.border_radius = px;
     }
 }
 

@@ -200,6 +200,7 @@ impl Ctx<'_> {
                 w: border_box_w,
                 h: 0.0,
                 color: style.background_color,
+                radius: style.border_radius,
             });
             self.rects.len() - 1
         });
@@ -215,6 +216,7 @@ impl Ctx<'_> {
                     w: 0.0,
                     h: 0.0,
                     color: style.border_color,
+                    radius: 0.0,
                 });
             }
             i
@@ -450,6 +452,7 @@ impl Ctx<'_> {
                 w: border_box_w,
                 h: 0.0,
                 color: style.background_color,
+                radius: style.border_radius,
             });
             self.rects.len() - 1
         });
@@ -515,6 +518,7 @@ impl Ctx<'_> {
                 w: border_box_w,
                 h: 0.0,
                 color: style.background_color,
+                radius: style.border_radius,
             });
             self.rects.len() - 1
         });
@@ -756,7 +760,14 @@ impl Ctx<'_> {
 }
 
 fn rect(x: f32, y: f32, w: f32, h: f32, color: argus_geometry::Color) -> RectFill {
-    RectFill { x, y, w, h, color }
+    RectFill {
+        x,
+        y,
+        w,
+        h,
+        color,
+        radius: 0.0,
+    }
 }
 
 #[cfg(test)]
