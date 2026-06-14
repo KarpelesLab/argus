@@ -19,13 +19,17 @@ and compositor, a multi-process security architecture, a JS↔DOM binding bridge
 storage, navigation/session management, and both a windowed GUI shell **and** a
 headless automation surface.
 
-> **Status:** Phase 0 (foundations) substantially complete — a multi-process
-> skeleton runs: the browser process spawns a **sandboxed** content process and a
-> net service, hands a painted framebuffer across shared memory, presents it in a
-> native window, forwards input over IPC, and survives a content-process crash.
-> Run it with `cargo run` (window) or `cargo run -- --headless` (verifier).
-> Next up is Phase 1 (parse → style → layout → paint a real page). See
-> [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> **Status:** Phase 0 complete; **Phase 1 renders its first real page.** The
+> sandboxed content process now parses HTML into a DOM, applies user-agent styles,
+> lays out block/inline content into lines (measured with real font metrics), and
+> paints shaped, anti-aliased glyphs into a shared-memory framebuffer — headings
+> render large and bold, paragraphs wrap to the viewport. Text shaping and
+> rasterization use the first-party **oxideav** stack (`oxideav-scribe`/`-raster`).
+>
+> Try it: `cargo run` (windowed) · `cargo run -- --dump-page=/tmp/page.png` (render
+> the sample page to an image) · `cargo run -- --headless` (Phase 0 verifier).
+> Still ahead in Phase 1: CSS parsing, color/backgrounds, images, a real fragment
+> tree. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ---
 
