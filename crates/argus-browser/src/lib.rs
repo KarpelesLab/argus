@@ -52,6 +52,9 @@ all inside a sandboxed content process.</p>\
 <ul id=\"js-list\"><li>placeholder (replaced by innerHTML)</li></ul>\
 <div id=\"counter-btn\" class=\"pill\" style=\"width: 140px\">Click me</div>\
 <p>clicked <strong id=\"counter\">0</strong> times (try it in the window).</p>\
+<input value=\"an editable text field\">\
+<input placeholder=\"...or a grey placeholder\">\
+<button>A button</button>\
 </div>\
 <h2>Box model &amp; images</h2>\
 <p class=\"note\">This box has a background, a border, and padding from a class \

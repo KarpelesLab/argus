@@ -446,6 +446,35 @@ impl Ctx<'_> {
             // style); block-level children flush the line box and lay out separately.
             let mut words: Vec<InlineWord> = Vec::new();
             let mut pending_space = false;
+            // `<input>` has no children: render its `value` (or `placeholder`) text.
+            if let Some(e) = self.doc.node(id).as_element() {
+                if e.name.is_html("input") {
+                    let placeholder = e.attr("value").map(|v| v.is_empty()).unwrap_or(true);
+                    let text = e
+                        .attr("value")
+                        .filter(|v| !v.is_empty())
+                        .or_else(|| e.attr("placeholder"))
+                        .unwrap_or("");
+                    let color = if placeholder {
+                        argus_geometry::Color::rgb(0x80, 0x80, 0x80)
+                    } else {
+                        style.fade(style.color)
+                    };
+                    for (i, word) in text.split_whitespace().enumerate() {
+                        words.push(InlineWord {
+                            text: word.to_string(),
+                            font_size: style.font_size,
+                            color,
+                            space_before: i > 0,
+                            underline: false,
+                            strike: false,
+                            href: None,
+                            hard_break: false,
+                            baseline_shift: 0.0,
+                        });
+                    }
+                }
+            }
             for child in self.doc.children(id) {
                 match &self.doc.node(child).data {
                     NodeData::Text(_) => {
@@ -1262,6 +1291,31 @@ mod tests {
         assert!(
             up < base,
             "superscript {up} should sit above baseline {base}"
+        );
+    }
+
+    #[test]
+    fn input_renders_value_in_a_box() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let doc = parse(
+            "<input value=\"hello\"><input placeholder=\"type here\"><button>Submit</button>",
+        );
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let texts: Vec<&str> = l.runs.iter().map(|r| r.text.as_str()).collect();
+        // The value, the placeholder words, and the button label all render.
+        assert!(texts.contains(&"hello"), "input value: {texts:?}");
+        assert!(
+            texts.contains(&"type") && texts.contains(&"here"),
+            "placeholder: {texts:?}"
+        );
+        assert!(texts.contains(&"Submit"), "button label: {texts:?}");
+        // Each field is a bordered box (border rects exist).
+        assert!(
+            l.rects.iter().filter(|r| r.w > 0.0 && r.h > 0.0).count() >= 3,
+            "expected boxes for the fields"
         );
     }
 

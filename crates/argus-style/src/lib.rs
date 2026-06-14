@@ -253,6 +253,10 @@ hr { margin: 8px 0; border-top: 1px solid #c0c0c0 }
 td, th { padding: 4px }
 th { font-weight: bold; text-align: center }
 caption { display: block; text-align: center; margin: 4px 0 }
+input, textarea, select { display: block; border: 1px solid #999; background: #fff; \
+  padding: 4px 6px; width: 220px; margin: 4px 0; white-space: nowrap }
+button { display: block; border: 1px solid #888; background: #e8e8e8; padding: 4px 12px; \
+  width: 120px; text-align: center; margin: 4px 0; border-radius: 4px }
 ";
 
 fn ua_stylesheet() -> &'static Stylesheet {
