@@ -7,8 +7,11 @@
 //! id'd elements, run prelude + page scripts through kataan once, then read the
 //! recorded ops back and apply them to the real [`Document`] before layout.
 //!
-//! This is a pragmatic subset — no live reflow, events, or timers — but it makes a
-//! real chunk of the DOM API actually change the rendered page:
+//! This is a pragmatic subset — synchronous only, no live reflow — but it makes a
+//! real chunk of the DOM API actually change the rendered page, plus discrete
+//! `click` handlers (via deterministic replay through [`apply_scripts_with_events`])
+//! and `setTimeout`/`setInterval` callbacks (drained synchronously, earliest delay
+//! first, with no real wall-clock delay). The API surface includes:
 //! `document.getElementById` / `querySelector` (full CSS selector engine) /
 //! `createElement` / `body` / `write`, and on elements `textContent`/`innerText`,
 //! `innerHTML`, `className`, `setAttribute`/`getAttribute`, `style.<camelCase>`,
@@ -135,6 +138,41 @@ var document = {
 document.body = __argus_el({kind: "sel", val: "body"});
 document.documentElement = __argus_el({kind: "sel", val: "html"});
 var window = document.window = document;
+
+// Timers: there is no wall clock in the synchronous reconciliation model, so
+// scheduled callbacks are queued and drained (earliest delay first) after the
+// script + event dispatches run. This makes deferred-init patterns work; it does
+// not animate over real time. `setInterval` fires once (bounded), and the drain
+// is capped to avoid infinite re-scheduling.
+var __timers = [];
+var __timerOrder = 0;
+function setTimeout(fn, delay) {
+  if (typeof fn !== "function") return 0;
+  var id = ++__timerOrder;
+  __timers.push({id: id, fn: fn, delay: (+delay) || 0});
+  return id;
+}
+function setInterval(fn, delay) { return setTimeout(fn, delay); }
+function clearTimeout(id) {
+  for (var i = 0; i < __timers.length; i++) {
+    if (__timers[i].id === id) { __timers.splice(i, 1); return; }
+  }
+}
+function clearInterval(id) { clearTimeout(id); }
+window.setTimeout = setTimeout; window.setInterval = setInterval;
+window.clearTimeout = clearTimeout; window.clearInterval = clearInterval;
+function __argus_drain() {
+  var iters = 0;
+  while (__timers.length > 0 && iters < 1000) {
+    var bi = 0;
+    for (var i = 1; i < __timers.length; i++) {
+      if (__timers[i].delay < __timers[bi].delay) bi = i;
+    }
+    var t = __timers.splice(bi, 1)[0];
+    t.fn();
+    iters++;
+  }
+}
 "#;
 
 /// One past interaction to replay: fire `event` on the element identified by
@@ -177,6 +215,8 @@ pub fn apply_scripts_with_events(doc: &mut Document, events: &[Interaction]) -> 
             json_string(&e.event)
         ));
     }
+    // Drain any scheduled timers (synchronously, no real delay).
+    src.push_str("\n__argus_drain();");
     // Emit the recorded ops on a sentinel line we can pick out of the console.
     src.push_str("\nconsole.log(\"\\u0001ARGUSOPS\" + JSON.stringify(__argus_ops));\n");
 
@@ -1019,6 +1059,23 @@ mod tests {
         let mut doc = argus_html::parse(html);
         apply_scripts_with_events(&mut doc, &[click.clone(), click.clone()]);
         assert_eq!(text_of(&doc, "n"), "12");
+    }
+
+    #[test]
+    fn set_timeout_runs_synchronously_in_delay_order() {
+        // Timers drain after the script, earliest delay first. Here the 10ms timer
+        // appends "B" before the 50ms timer appends "C"; "A" is set inline first.
+        let mut doc = argus_html::parse(
+            "<div id=\"out\"></div>\
+             <script>\
+               var e = document.getElementById('out');\
+               e.textContent = 'A';\
+               setTimeout(function(){ e.textContent = e.textContent + 'C'; }, 50);\
+               setTimeout(function(){ e.textContent = e.textContent + 'B'; }, 10);\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        assert_eq!(text_of(&doc, "out"), "ABC");
     }
 
     #[test]
