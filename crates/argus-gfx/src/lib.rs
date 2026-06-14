@@ -116,6 +116,21 @@ pub fn render_text(
     }
 }
 
+/// Source-over composite straight-alpha RGBA `src` onto opaque RGBA `dst`
+/// (both tightly packed, same length). `dst` stays opaque.
+pub fn composite_over(dst: &mut [u8], src: &[u8]) {
+    for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+        let a = s[3] as u32;
+        if a == 0 {
+            continue;
+        }
+        for c in 0..3 {
+            d[c] = ((s[c] as u32 * a + d[c] as u32 * (255 - a)) / 255) as u8;
+        }
+        d[3] = 255;
+    }
+}
+
 /// Render many text runs onto one transparent [`Canvas`] in a single rasterization
 /// pass (glyphs are black; color support lands with the paint layer).
 pub fn render_runs(runs: &[TextRun], font: &Font, width: u32, height: u32) -> Canvas {

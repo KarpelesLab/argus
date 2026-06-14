@@ -15,9 +15,12 @@ path = "src/main.rs"
 argus-util.workspace = true
 argus-ipc.workspace = true
 argus-platform.workspace = true
+argus-geometry.workspace = true
 argus-browser.workspace = true
 argus-content.workspace = true
 argus-services.workspace = true
+oxideav-core = "0.1"
+oxideav-png = "0.1"
 
 [lints]
 workspace = true

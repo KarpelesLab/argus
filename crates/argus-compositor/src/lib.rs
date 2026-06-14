@@ -50,6 +50,12 @@ impl Framebuffer {
         &self.shm.as_slice()[..byte_len(self.size)]
     }
 
+    /// Mutable raw RGBA8 bytes, for compositing into the framebuffer.
+    pub fn pixels_mut(&mut self) -> &mut [u8] {
+        let n = byte_len(self.size);
+        &mut self.shm.as_mut_slice()[..n]
+    }
+
     /// Paint every pixel `color`.
     pub fn fill(&mut self, color: Color) {
         let rgba = color.to_rgba8();

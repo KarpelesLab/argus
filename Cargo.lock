@@ -8,10 +8,13 @@ version = "0.0.0"
 dependencies = [
  "argus-browser",
  "argus-content",
+ "argus-geometry",
  "argus-ipc",
  "argus-platform",
  "argus-services",
  "argus-util",
+ "oxideav-core",
+ "oxideav-png",
 ]
 
 [[package]]
@@ -40,7 +43,10 @@ version = "0.0.0"
 dependencies = [
  "argus-compositor",
  "argus-geometry",
+ "argus-gfx",
+ "argus-html",
  "argus-ipc",
+ "argus-layout",
  "argus-platform",
  "argus-protocol",
  "argus-util",

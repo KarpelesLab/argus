@@ -13,6 +13,17 @@ fn main() {
     let role = parse_role();
     argus_util::log::set_role(role);
 
+    // `--dump-page=PATH`: render the sample page off-screen to a PNG and exit.
+    if role == Role::Browser {
+        if let Some(path) = flag_value("--dump-page=") {
+            if let Err(err) = dump_page(&path) {
+                eprintln!("[browser] dump-page failed: {err}");
+                std::process::exit(1);
+            }
+            return;
+        }
+    }
+
     let result = match role {
         // Default to an on-screen window; `--headless` runs the verifier and exits.
         Role::Browser if has_flag("--headless") => argus_browser::run(),
@@ -25,6 +36,28 @@ fn main() {
         eprintln!("[{role}] fatal: {err}");
         std::process::exit(1);
     }
+}
+
+/// Render the built-in sample page and write it to `path` as a PNG.
+fn dump_page(path: &str) -> std::io::Result<()> {
+    use argus_geometry::Size;
+    use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
+
+    let viewport = Size::new(800, 600);
+    let (size, rgba) = argus_browser::render_page_once(argus_browser::SAMPLE_HTML, viewport)?;
+
+    let frame = VideoFrame {
+        pts: None,
+        planes: vec![VideoPlane {
+            stride: (size.width * 4) as usize,
+            data: rgba,
+        }],
+    };
+    let png = oxideav_png::encode_single(&frame, size.width, size.height, PixelFormat::Rgba, &[])
+        .map_err(|e| std::io::Error::other(format!("png encode: {e:?}")))?;
+    std::fs::write(path, png)?;
+    eprintln!("[browser] wrote {path} ({}x{})", size.width, size.height);
+    Ok(())
 }
 
 /// Determine this process's role from `--role=<name>` (default: browser).
@@ -43,6 +76,11 @@ fn parse_role() -> Role {
 /// Whether `flag` appears in the process arguments.
 fn has_flag(flag: &str) -> bool {
     std::env::args().any(|a| a == flag)
+}
+
+/// The value of a `prefix=value` argument, if present.
+fn flag_value(prefix: &str) -> Option<String> {
+    std::env::args().find_map(|a| a.strip_prefix(prefix).map(|v| v.to_string()))
 }
 
 /// Reconstruct the IPC channel a child inherited from its parent.

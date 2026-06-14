@@ -14,6 +14,69 @@ use argus_protocol::{self as proto, Msg};
 use argus_util::{log, Role};
 use std::io;
 
+/// A built-in sample document rendered by the windowed shell and the page dumper.
+pub const SAMPLE_HTML: &str = "<!DOCTYPE html><html><head><title>Argus</title></head><body>\
+<h1>Argus</h1>\
+<p>A web browser written in pure Rust. This page was fetched as HTML, parsed into a \
+DOM, given user-agent styles, laid out into lines, and painted with shaped, \
+anti-aliased glyphs — all inside a sandboxed content process.</p>\
+<h2>Phase 1</h2>\
+<p>The text you are reading was measured with real font metrics and broken into \
+lines that fit the window. Headings are larger and bold. Resize and reload to see \
+it reflow.</p>\
+<h3>Next</h3>\
+<p>Colors, backgrounds, links, and a proper fragment tree come next.</p>\
+</body></html>";
+
+/// Locate a usable system font on disk (the browser process is trusted and may
+/// read the filesystem; content cannot).
+fn system_font_bytes() -> Option<Vec<u8>> {
+    for path in [
+        "/System/Library/Fonts/Geneva.ttf",
+        "/System/Library/Fonts/Monaco.ttf",
+        "/System/Library/Fonts/SFNS.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+    ] {
+        if let Ok(bytes) = std::fs::read(path) {
+            return Some(bytes);
+        }
+    }
+    None
+}
+
+/// Send the content process a font and a document to render.
+fn provide_page(content: &Child, html: &str) -> io::Result<()> {
+    if let Some(bytes) = system_font_bytes() {
+        proto::send(content.channel(), Msg::ProvideFont { bytes }, &[])?;
+    } else {
+        log!("no system font found; content will render the fallback color");
+    }
+    proto::send(
+        content.channel(),
+        Msg::LoadDocument {
+            html: html.to_string(),
+        },
+        &[],
+    )
+}
+
+/// Render `html` to pixels once, off-screen, by driving a content process. Returns
+/// the framebuffer size and its RGBA bytes. Used by the `--dump-page` tool.
+pub fn render_page_once(html: &str, viewport: Size) -> io::Result<(Size, Vec<u8>)> {
+    log::set_role(Role::Browser);
+    let mut content = spawn_child(Role::Content)?;
+    proto::parent_handshake(content.channel(), viewport)?;
+    provide_page(&content, html)?;
+
+    let frame = request_frame(&content)?;
+    let pixels = frame.pixels().to_vec();
+    let size = frame.size();
+
+    proto::send(content.channel(), Msg::Shutdown, &[])?;
+    content.wait()?;
+    Ok((size, pixels))
+}
+
 /// Run the Phase 0 browser-process skeleton.
 pub fn run() -> io::Result<()> {
     log::set_role(Role::Browser);
@@ -126,7 +189,8 @@ pub fn run_windowed() -> io::Result<()> {
     let mut net = spawn_child(Role::NetService)?;
     proto::parent_handshake(content.channel(), viewport)?;
     proto::parent_handshake(net.channel(), viewport)?;
-    log!("children handshook; opening window");
+    provide_page(&content, SAMPLE_HTML)?;
+    log!("children handshook; sample page sent; opening window");
 
     // Present the first frame.
     let mut frame = request_frame(&content)?;
