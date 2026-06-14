@@ -233,6 +233,19 @@ fn apply_ops(doc: &mut Document, json: &str) {
             }
             continue;
         }
+        if op_kind == "write" {
+            // `document.write` after load: append the fragment to <body>.
+            if let Some(body) = find_body(doc) {
+                let frag = argus_html::parse(&value);
+                if let Some(fbody) = find_body(&frag) {
+                    let kids: Vec<NodeId> = frag.children(fbody).collect();
+                    for c in kids {
+                        import_subtree(&frag, c, doc, body);
+                    }
+                }
+            }
+            continue;
+        }
 
         let Some(node) = resolve(doc, &created, get("tgt")) else {
             continue;
@@ -760,6 +773,17 @@ mod tests {
                 .collect::<std::collections::BTreeSet<_>>(),
             "class was {class:?}"
         );
+    }
+
+    #[test]
+    fn document_write_appends_to_body() {
+        let mut doc = argus_html::parse(
+            "<p id=\"first\">a</p>\
+             <script>document.write('<p id=\"w\">written</p>');</script>",
+        );
+        apply_scripts(&mut doc);
+        // The written element exists with its text.
+        assert_eq!(text_of(&doc, "w"), "written");
     }
 
     #[test]
