@@ -5,5 +5,6 @@
 //! the rest of Argus never sees per-OS differences. See `docs/ARCHITECTURE.md`.
 
 pub mod process;
+pub mod sandbox;
 
 pub use process::{spawn_child, Child, CHILD_CHANNEL_FD};

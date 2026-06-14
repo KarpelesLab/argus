@@ -11,6 +11,7 @@ rust-version.workspace = true
 argus-util.workspace = true
 argus-ipc.workspace = true
 argus-protocol.workspace = true
+argus-platform.workspace = true
 argus-compositor.workspace = true
 argus-geometry.workspace = true
 

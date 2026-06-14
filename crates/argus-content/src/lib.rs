@@ -18,6 +18,12 @@ pub const PHASE0_PAINT: Color = Color::rgb(0x2E, 0x86, 0xDE);
 /// Run the content process to completion over `channel`.
 pub fn run(channel: Channel) -> io::Result<()> {
     log::set_role(Role::Content);
+
+    // Enter the sandbox before doing anything else: from here on this process has
+    // no network and no filesystem-write capability. The inherited IPC channel and
+    // shared memory continue to work; everything privileged is brokered.
+    enter_sandbox();
+
     let viewport = proto::child_handshake(&channel)?;
     log!("ready; viewport {}x{}", viewport.width, viewport.height);
 
@@ -45,5 +51,27 @@ pub fn run(channel: Channel) -> io::Result<()> {
             }
             other => log!("ignoring unexpected message {other:?}"),
         }
+    }
+}
+
+/// Install the OS sandbox and, when one is active, prove it took effect.
+fn enter_sandbox() {
+    match argus_platform::sandbox::enter() {
+        Ok(true) => {
+            let probe = argus_platform::sandbox::probe_denied();
+            log!(
+                "sandbox active (fs-write denied = {}, network denied = {})",
+                probe.fs_write_denied,
+                probe.network_denied
+            );
+            // The boundary must actually hold. A renderer that can still write the
+            // filesystem is a security failure, so fail closed rather than run on.
+            assert!(
+                probe.fs_write_denied,
+                "sandbox installed but filesystem writes are still permitted"
+            );
+        }
+        Ok(false) => log!("no sandbox available on this platform (yet)"),
+        Err(e) => log!("WARNING: failed to enter sandbox: {e}"),
     }
 }

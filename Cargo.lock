@@ -41,6 +41,7 @@ dependencies = [
  "argus-compositor",
  "argus-geometry",
  "argus-ipc",
+ "argus-platform",
  "argus-protocol",
  "argus-util",
 ]
