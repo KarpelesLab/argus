@@ -211,7 +211,8 @@ pub type ImageSizes = HashMap<String, (u32, u32)>;
 pub fn layout(doc: &Document, font: &Font, viewport_width: f32, images: &ImageSizes) -> Layout {
     let content_x = PAGE_MARGIN;
     let content_width = (viewport_width - 2.0 * PAGE_MARGIN).max(0.0);
-    let author = author_stylesheet(doc);
+    // Apply `@media` rules that match this viewport width.
+    let author = author_stylesheet(doc).matching_media(viewport_width);
 
     let mut ctx = Ctx {
         doc,
@@ -1318,6 +1319,28 @@ mod tests {
             double > single * 1.6,
             "line-height:2 gap {double} should far exceed line-height:1 gap {single}"
         );
+    }
+
+    #[test]
+    fn media_query_applies_at_layout_width() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A @media rule narrows the box background only below 600px wide.
+        let html = "<style>\
+            div { background-color: #0000ff }\
+            @media (max-width: 600px) { div { background-color: #ff0000 } }\
+            </style><div>x</div>";
+        let red_bg = |vw: u32| -> bool {
+            let doc = parse(html);
+            let l = layout(&doc, &font, vw as f32, &ImageSizes::new());
+            l.rects
+                .iter()
+                .any(|r| r.color.r == 255 && r.color.g == 0 && r.color.b == 0 && r.color.a > 0)
+        };
+        assert!(red_bg(400), "narrow viewport should apply the @media rule");
+        assert!(!red_bg(800), "wide viewport should keep the base rule");
     }
 
     #[test]

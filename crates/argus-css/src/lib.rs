@@ -22,11 +22,13 @@ pub struct Declaration {
     pub important: bool,
 }
 
-/// A qualified rule: a selector list and its declarations.
+/// A qualified rule: a selector list and its declarations. `media`, if set, is
+/// the `@media` condition the rule is gated behind (evaluated against the viewport).
 #[derive(Clone, PartialEq, Debug)]
 pub struct Rule {
     pub selectors: Vec<Selector>,
     pub declarations: Vec<Declaration>,
+    pub media: Option<String>,
 }
 
 /// A parsed stylesheet.
@@ -35,27 +37,64 @@ pub struct Stylesheet {
     pub rules: Vec<Rule>,
 }
 
+impl Stylesheet {
+    /// A copy keeping only rules whose `@media` condition matches a viewport
+    /// `viewport_width` px wide (un-gated rules are always kept). Source order
+    /// is preserved so the cascade is unchanged.
+    pub fn matching_media(&self, viewport_width: f32) -> Stylesheet {
+        Stylesheet {
+            rules: self
+                .rules
+                .iter()
+                .filter(|r| match &r.media {
+                    None => true,
+                    Some(q) => media_query_matches(q, viewport_width),
+                })
+                .cloned()
+                .collect(),
+        }
+    }
+}
+
 /// Parse a stylesheet. Malformed rules are skipped; `@`-rules are skipped (their
 /// blocks too) for now.
 pub fn parse_stylesheet(css: &str) -> Stylesheet {
     let tokens = tokenizer::tokenize(css);
     let mut rules = Vec::new();
-    let mut i = 0;
+    parse_rules_into(&tokens, None, &mut rules);
+    Stylesheet { rules }
+}
 
+/// Parse qualified rules from `tokens`, tagging each with `media` (the enclosing
+/// `@media` condition, if any). `@media` blocks recurse; other at-rules are skipped.
+fn parse_rules_into(tokens: &[Token], media: Option<&str>, rules: &mut Vec<Rule>) {
+    let mut i = 0;
     while i < tokens.len() {
-        skip_ws(&tokens, &mut i);
+        skip_ws(tokens, &mut i);
         if i >= tokens.len() {
             break;
         }
 
-        // Skip at-rules: to the end of their block, or a top-level ';'.
-        if matches!(tokens[i], Token::AtKeyword(_)) {
+        if let Token::AtKeyword(name) = &tokens[i] {
+            let is_media = name.eq_ignore_ascii_case("media");
+            i += 1;
+            // Capture the prelude (the media query) up to '{' or ';'.
+            let prelude_start = i;
             while i < tokens.len() && !matches!(tokens[i], Token::LBrace | Token::Semicolon) {
                 i += 1;
             }
+            let query = stringify(&tokens[prelude_start..i]).trim().to_string();
             match tokens.get(i) {
                 Some(Token::Semicolon) => i += 1,
-                Some(Token::LBrace) => skip_block(&tokens, &mut i),
+                Some(Token::LBrace) => {
+                    let block_start = i + 1;
+                    skip_block(tokens, &mut i); // advances past the matching '}'
+                    let block = &tokens[block_start..i.saturating_sub(1).max(block_start)];
+                    if is_media {
+                        // Nested media combines conservatively to the inner query.
+                        parse_rules_into(block, Some(&query), rules);
+                    }
+                }
                 _ => {}
             }
             continue;
@@ -97,10 +136,52 @@ pub fn parse_stylesheet(css: &str) -> Stylesheet {
         rules.push(Rule {
             selectors,
             declarations: parse_declarations(block),
+            media: media.map(|m| m.to_string()),
         });
     }
+}
 
-    Stylesheet { rules }
+/// Whether a `@media` query matches a viewport `viewport_width` px wide. Supports
+/// `screen`/`all`/`print`, `(min-width)`/`(max-width)` in px/em, comma lists (OR),
+/// and `and` (AND). Unknown features are treated as non-matching.
+pub fn media_query_matches(query: &str, viewport_width: f32) -> bool {
+    let q = query.trim();
+    if q.is_empty() {
+        return true;
+    }
+    // A comma-separated media query list matches if any branch matches.
+    q.split(',')
+        .any(|branch| media_branch_matches(branch, viewport_width))
+}
+
+fn media_branch_matches(branch: &str, vw: f32) -> bool {
+    let branch = branch.trim().to_ascii_lowercase();
+    if branch.is_empty() {
+        return true;
+    }
+    // Every `and`-joined condition must hold.
+    branch.split("and").all(|cond| {
+        let cond = cond.trim().trim_start_matches("only ").trim();
+        if cond.is_empty() || cond == "screen" || cond == "all" {
+            return true;
+        }
+        if cond == "print" || cond == "speech" {
+            return false;
+        }
+        if let Some(inner) = cond.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+            let Some((feat, val)) = inner.split_once(':') else {
+                return false;
+            };
+            let feat = feat.trim();
+            let px = parse_length(val.trim()).map(|l| l.to_px(16.0, vw));
+            return match (feat, px) {
+                ("min-width", Some(p)) => vw >= p,
+                ("max-width", Some(p)) => vw <= p,
+                _ => false,
+            };
+        }
+        false
+    })
 }
 
 /// Parse a bare declaration block (e.g. the value of an inline `style` attribute).
@@ -246,12 +327,36 @@ mod tests {
     }
 
     #[test]
-    fn skips_at_rules() {
-        let css = "@media screen { p { color: red } } h1 { color: blue }";
+    fn parses_media_rules_and_other_at_rules_skipped() {
+        let css = "@import url(x.css); @media screen { p { color: red } } h1 { color: blue }";
         let sheet = parse_stylesheet(css);
-        // The @media block is skipped wholesale; only h1 survives at top level.
-        assert_eq!(sheet.rules.len(), 1);
-        assert_eq!(sheet.rules[0].declarations[0].value, "blue");
+        // @import is skipped; the @media rule is kept (tagged) plus the top-level h1.
+        assert_eq!(sheet.rules.len(), 2);
+        let p = sheet.rules.iter().find(|r| r.media.is_some()).unwrap();
+        assert_eq!(p.media.as_deref(), Some("screen"));
+        assert_eq!(p.declarations[0].value, "red");
+        let h1 = sheet.rules.iter().find(|r| r.media.is_none()).unwrap();
+        assert_eq!(h1.declarations[0].value, "blue");
+    }
+
+    #[test]
+    fn media_query_evaluation() {
+        assert!(media_query_matches("screen", 800.0));
+        assert!(media_query_matches("", 800.0));
+        assert!(!media_query_matches("print", 800.0));
+        assert!(media_query_matches("(max-width: 600px)", 500.0));
+        assert!(!media_query_matches("(max-width: 600px)", 700.0));
+        assert!(media_query_matches("(min-width: 600px)", 700.0));
+        assert!(media_query_matches("screen and (min-width: 400px)", 500.0));
+        assert!(!media_query_matches("screen and (min-width: 800px)", 500.0));
+        // Comma list is OR.
+        assert!(media_query_matches("print, (max-width: 600px)", 500.0));
+
+        // A matching media rule overrides a base rule via matching_media().
+        let sheet =
+            parse_stylesheet("p { color: blue } @media (max-width: 600px) { p { color: red } }");
+        assert_eq!(sheet.matching_media(500.0).rules.len(), 2); // both apply
+        assert_eq!(sheet.matching_media(900.0).rules.len(), 1); // media rule dropped
     }
 
     /// Robustness (a lightweight fuzz): the tokenizer + parser + selector engine +
