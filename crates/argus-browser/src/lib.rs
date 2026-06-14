@@ -676,6 +676,12 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
                         let (frame, h) = request_frame(&content, &net, current_url.as_deref())?;
                         content_height = h;
                         window.present(frame.pixels(), frame.size());
+                    } else {
+                        // Non-navigation click: the content process may have dispatched
+                        // a DOM event handler that changed the page — re-render.
+                        let (frame, h) = request_frame(&content, &net, current_url.as_deref())?;
+                        content_height = h;
+                        window.present(frame.pixels(), frame.size());
                     }
                 }
             }

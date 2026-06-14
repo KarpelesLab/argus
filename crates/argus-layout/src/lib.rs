@@ -189,6 +189,16 @@ pub struct ImageBox {
     pub src: String,
 }
 
+/// The border-box of an element that carries an `id`, for click hit-testing.
+#[derive(Clone, Debug)]
+pub struct ElementBound {
+    pub id: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
 /// The result of laying a document out at a given viewport width.
 pub struct Layout {
     /// Background + border rectangles, painted behind text (ancestors first).
@@ -199,8 +209,22 @@ pub struct Layout {
     pub images: Vec<ImageBox>,
     /// Clickable hyperlink regions.
     pub links: Vec<LinkBox>,
+    /// Border-boxes of id'd elements (deepest last), for click hit-testing.
+    pub bounds: Vec<ElementBound>,
     /// Total content height in pixels.
     pub height: f32,
+}
+
+impl Layout {
+    /// The `id` of the most specific id'd element whose box contains `(x, y)` —
+    /// the smallest-area containing box wins, so a nested child beats its ancestor.
+    pub fn element_at(&self, x: f32, y: f32) -> Option<&str> {
+        self.bounds
+            .iter()
+            .filter(|b| x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h)
+            .min_by(|a, b| (a.w * a.h).partial_cmp(&(b.w * b.h)).unwrap())
+            .map(|b| b.id.as_str())
+    }
 }
 
 /// Intrinsic `(width, height)` of each image by source URL, for sizing boxes.
@@ -223,6 +247,7 @@ pub fn layout(doc: &Document, font: &Font, viewport_width: f32, images: &ImageSi
         runs: Vec::new(),
         images: Vec::new(),
         links: Vec::new(),
+        bounds: Vec::new(),
         cursor_y: PAGE_MARGIN,
     };
 
@@ -238,6 +263,7 @@ pub fn layout(doc: &Document, font: &Font, viewport_width: f32, images: &ImageSi
         runs: ctx.runs,
         images: ctx.images,
         links: ctx.links,
+        bounds: ctx.bounds,
         height: ctx.cursor_y + PAGE_MARGIN,
     }
 }
@@ -266,6 +292,7 @@ struct Ctx<'a> {
     runs: Vec<TextRun>,
     images: Vec<ImageBox>,
     links: Vec<LinkBox>,
+    bounds: Vec<ElementBound>,
     cursor_y: f32,
 }
 
@@ -288,6 +315,7 @@ impl Ctx<'_> {
             self.runs.len(),
             self.images.len(),
             self.links.len(),
+            self.bounds.len(),
         );
 
         let border_box_top = self.cursor_y;
@@ -558,6 +586,17 @@ impl Ctx<'_> {
             // right
         }
 
+        // Record this element's border-box for click hit-testing, if it has an id.
+        if let Some(eid) = self.doc.node(id).as_element().and_then(|e| e.attr("id")) {
+            self.bounds.push(ElementBound {
+                id: eid.to_string(),
+                x: border_box_left,
+                y: border_box_top,
+                w: border_box_w,
+                h: self.cursor_y - border_box_top,
+            });
+        }
+
         // `position: relative` paints the box (and its subtree) shifted by its
         // inset, without affecting the normal flow of following siblings.
         if style.position == Position::Relative {
@@ -569,7 +608,7 @@ impl Ctx<'_> {
     }
 
     /// Shift every display-list item appended since `start` by `(dx, dy)`.
-    fn shift_display_list(&mut self, start: (usize, usize, usize, usize), dx: f32, dy: f32) {
+    fn shift_display_list(&mut self, start: (usize, usize, usize, usize, usize), dx: f32, dy: f32) {
         for r in &mut self.rects[start.0..] {
             r.x += dx;
             r.y += dy;
@@ -585,6 +624,10 @@ impl Ctx<'_> {
         for l in &mut self.links[start.3..] {
             l.x += dx;
             l.y += dy;
+        }
+        for b in &mut self.bounds[start.4..] {
+            b.x += dx;
+            b.y += dy;
         }
     }
 
@@ -1220,6 +1263,37 @@ mod tests {
             up < base,
             "superscript {up} should sit above baseline {base}"
         );
+    }
+
+    #[test]
+    fn element_at_hit_tests_id_boxes() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let doc = parse(
+            "<div id=\"outer\" style=\"padding:20px\">\
+               <p id=\"inner\">hello</p>\
+             </div>",
+        );
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        // A point inside the inner paragraph resolves to the deepest id (inner).
+        let inner = l
+            .bounds
+            .iter()
+            .find(|b| b.id == "inner")
+            .expect("inner bound");
+        assert_eq!(l.element_at(inner.x + 2.0, inner.y + 2.0), Some("inner"));
+        // A point in the outer's top padding (above the inner box) resolves to outer.
+        let outer = l
+            .bounds
+            .iter()
+            .find(|b| b.id == "outer")
+            .expect("outer bound");
+        assert!(outer.y + 5.0 < inner.y, "padding should sit above inner");
+        assert_eq!(l.element_at(outer.x + 5.0, outer.y + 5.0), Some("outer"));
+        // Far outside hits nothing.
+        assert_eq!(l.element_at(5000.0, 5000.0), None);
     }
 
     #[test]

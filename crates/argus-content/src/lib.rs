@@ -28,8 +28,11 @@ pub fn run(channel: Channel) -> io::Result<()> {
     let mut content = Content {
         viewport,
         font: None,
+        html: None,
         doc: None,
+        events: Vec::new(),
         links: Vec::new(),
+        bounds: Vec::new(),
         scroll_y: 0,
         content_height: viewport.height,
         _frame: None,
@@ -58,6 +61,8 @@ pub fn run(channel: Channel) -> io::Result<()> {
                         log!("console.log: {line}");
                     }
                 }
+                content.html = Some(html);
+                content.events.clear();
                 content.doc = Some(doc);
             }
             Msg::RequestFrame => {
@@ -83,7 +88,11 @@ pub fn run(channel: Channel) -> io::Result<()> {
                     .find(|l| l.contains(x as f32, y as f32))
                     .map(|l| l.href.clone())
                     .unwrap_or_default();
-                if !url.is_empty() {
+                if url.is_empty() {
+                    // Not a link: dispatch a `click` to the deepest id'd element and
+                    // re-run the page's scripts with the full interaction history.
+                    content.dispatch_click(x as f32, y as f32);
+                } else {
                     log!("link clicked at ({x}, {y}) -> {url}");
                 }
                 proto::send(&channel, Msg::ClickResult { url }, &[])?;
@@ -100,10 +109,16 @@ pub fn run(channel: Channel) -> io::Result<()> {
 struct Content {
     viewport: Size,
     font: Option<Font>,
+    /// The original page HTML, re-parsed for deterministic event replay.
+    html: Option<String>,
     /// The parsed document, already mutated by its scripts (Phase 2 DOM bindings).
     doc: Option<argus_dom::Document>,
+    /// The interaction history replayed on every script run (event sourcing).
+    events: Vec<argus_domscript::Interaction>,
     /// Clickable link regions from the last render (in screen coords), for input.
     links: Vec<argus_layout::LinkBox>,
+    /// Id'd element boxes from the last render (screen coords), for click dispatch.
+    bounds: Vec<argus_layout::ElementBound>,
     /// Vertical scroll offset in pixels.
     scroll_y: u32,
     /// Full page height from the last layout (reported to the browser for clamping).
@@ -168,6 +183,10 @@ impl Content {
         for l in &mut layout.links {
             l.y -= scroll;
         }
+        for b in &mut layout.bounds {
+            b.y -= scroll;
+        }
+        self.bounds = layout.bounds;
         let list = argus_gfx::DisplayList {
             rects: layout.rects,
             runs: layout.runs,
@@ -204,6 +223,35 @@ impl Content {
         );
         self.links = layout.links;
         Ok(fb)
+    }
+
+    /// Hit-test a click against id'd element boxes; if one is hit, append a `click`
+    /// interaction and re-run the page's scripts with the full history (deterministic
+    /// event replay), so handlers and accumulated state take effect on the next frame.
+    fn dispatch_click(&mut self, x: f32, y: f32) {
+        // Find the deepest (smallest) id'd box under the cursor.
+        let Some(id) = self
+            .bounds
+            .iter()
+            .filter(|b| x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h)
+            .min_by(|a, b| (a.w * a.h).partial_cmp(&(b.w * b.h)).unwrap())
+            .map(|b| b.id.clone())
+        else {
+            return;
+        };
+        let Some(html) = &self.html else { return };
+        self.events.push(argus_domscript::Interaction {
+            kind: "id".into(),
+            val: id,
+            event: "click".into(),
+        });
+        let mut doc = argus_html::parse(html);
+        if let Some(console) = argus_domscript::apply_scripts_with_events(&mut doc, &self.events) {
+            for line in console.lines() {
+                log!("console.log: {line}");
+            }
+        }
+        self.doc = Some(doc);
     }
 }
 
