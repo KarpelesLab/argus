@@ -50,6 +50,8 @@ all inside a sandboxed content process.</p>\
 <h3>Scripting (Phase 2): live DOM bindings</h3>\
 <p id=\"js-status\" style=\"color: #b00\">JavaScript has not run yet.</p>\
 <ul id=\"js-list\"><li>placeholder (replaced by innerHTML)</li></ul>\
+<div id=\"counter-btn\" class=\"pill\" style=\"width: 140px\">Click me</div>\
+<p>clicked <strong id=\"counter\">0</strong> times (try it in the window).</p>\
 </div>\
 <h2>Box model &amp; images</h2>\
 <p class=\"note\">This box has a background, a border, and padding from a class \
@@ -112,6 +114,11 @@ document.getElementById('js-list').innerHTML = '<li>built by</li><li>document</l
 var li = document.createElement('li');\
 li.textContent = 'and one more via createElement + appendChild';\
 document.querySelector('#js-list').appendChild(li);\
+var clicks = 0;\
+document.getElementById('counter-btn').addEventListener('click', function(e){{\
+  clicks = clicks + 1;\
+  document.getElementById('counter').textContent = '' + clicks;\
+}});\
 console.log('kataan ran: fib(20) = ' + fib(20));\
 </script>\
 </body></html>"
