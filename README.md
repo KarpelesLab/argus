@@ -19,9 +19,13 @@ and compositor, a multi-process security architecture, a JS↔DOM binding bridge
 storage, navigation/session management, and both a windowed GUI shell **and** a
 headless automation surface.
 
-> **Status:** Pre-code. This repository currently contains the architecture,
-> subsystem designs, and roadmap. Implementation begins once the design docs are
-> agreed. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> **Status:** Phase 0 (foundations) substantially complete — a multi-process
+> skeleton runs: the browser process spawns a **sandboxed** content process and a
+> net service, hands a painted framebuffer across shared memory, presents it in a
+> native window, forwards input over IPC, and survives a content-process crash.
+> Run it with `cargo run` (window) or `cargo run -- --headless` (verifier).
+> Next up is Phase 1 (parse → style → layout → paint a real page). See
+> [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ---
 

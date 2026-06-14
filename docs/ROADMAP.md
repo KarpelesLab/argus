@@ -28,14 +28,18 @@ survives.
 `argus-compositor` (trivial blit), `argus-browser` (process manager + IPC router),
 `argus-content` (sandboxed shell), `argus-services` (skeleton), `argus-shell` (blank window).
 
+**Status: substantially complete.** Built as a single `argus` binary that re-execs
+itself per role (`--role=…`); the on-screen window uses AppKit directly via `objc2`.
+
 **Exit criteria:**
-- [ ] Cargo workspace with the Layer 0–5 crate skeleton compiling; CI runs fmt + clippy + tests on macOS (Linux later).
-- [ ] `argus-platform` opens a native window and presents a shared-memory RGBA buffer on macOS.
-- [ ] Browser process spawns a content process **inside the OS sandbox** (macOS Seatbelt): no network, no fs write, verified by a denied-syscall test.
-- [ ] `argus-ipc`: versioned, length-prefixed typed messages + shared-memory regions; a content process can only talk to the browser process.
-- [ ] Content process renders a solid color into the window through the compositor; input is plumbed end-to-end (a click logs in content).
-- [ ] Crash isolation: content-process kill is contained; service restart works.
-- [ ] The embedder API shape (`Browser`/`Tab`/events) is sketched and used by `argus-shell`.
+- [x] Cargo workspace with the crate skeleton compiling; CI runs fmt + clippy (`-D warnings`) + tests on macOS (Linux later).
+- [x] `argus-platform` opens a native window and presents a shared-memory RGBA buffer on macOS.
+- [x] Browser process spawns a content process **inside the OS sandbox** (macOS Seatbelt): no network, no fs write, verified by a self-probe that fails closed.
+- [x] `argus-ipc`: versioned, length-prefixed typed messages + shared-memory regions (SCM_RIGHTS fd passing); a content process holds only its one channel to the browser.
+- [x] Content process renders a solid color into the window through the compositor; input is plumbed end-to-end (a click is forwarded over IPC and logged in the sandboxed content process).
+- [x] Crash isolation: content-process kill is contained; the browser and net service survive (covered by the `phase0` end-to-end test).
+- [~] The embedder API shape (`Browser`/`Tab`/events) is sketched — currently a direct `run`/`run_windowed`; the typed embedder API is fleshed out alongside Phase 1.
+- [ ] Service auto-restart on crash (deferred; services currently exit-and-reap).
 
 **De-risks:** the hardest, least web-like plumbing — sandbox, IPC, shared memory,
 crash handling — up front, per the user's explicit choice.
