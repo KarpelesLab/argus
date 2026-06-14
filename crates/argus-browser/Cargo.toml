@@ -16,6 +16,7 @@ argus-compositor.workspace = true
 argus-geometry.workspace = true
 argus-html.workspace = true
 argus-dom.workspace = true
+argus-domscript.workspace = true
 
 [lints]
 workspace = true

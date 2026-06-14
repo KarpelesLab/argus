@@ -1,0 +1,17 @@
+[package]
+name = "argus-domscript"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+argus-dom.workspace = true
+argus-html.workspace = true
+argus-css.workspace = true
+argus-script.workspace = true
+
+[lints]
+workspace = true

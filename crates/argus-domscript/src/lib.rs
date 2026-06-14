@@ -89,7 +89,7 @@ var window = document.window = document;
 
 /// Run a document's inline scripts and apply their DOM mutations in place.
 /// Returns the console output (minus the internal ops line) for logging.
-pub(crate) fn apply_scripts(doc: &mut Document) -> Option<String> {
+pub fn apply_scripts(doc: &mut Document) -> Option<String> {
     let scripts = collect_scripts(doc);
     if scripts.is_empty() {
         return None;

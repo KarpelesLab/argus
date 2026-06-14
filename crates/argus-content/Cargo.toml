@@ -19,8 +19,7 @@ argus-layout.workspace = true
 argus-gfx.workspace = true
 argus-image.workspace = true
 argus-dom.workspace = true
-argus-css.workspace = true
-argus-script.workspace = true
+argus-domscript.workspace = true
 
 [lints]
 workspace = true

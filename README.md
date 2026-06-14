@@ -47,7 +47,7 @@ headless automation surface.
 > `cargo run -- --url=https://example.com` (load a site) ·
 > `cargo run -- --dump-page=/tmp/page.png` (render to an image) ·
 > `cargo run -- --dump-text` / `--dump-dom` / `--dump-a11y` (headless text/DOM/a11y) ·
-> `cargo run -- --headless` (multi-process verifier). 18 crates, green on macOS CI.
+> `cargo run -- --headless` (multi-process verifier). 19 crates, green on macOS CI.
 > See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what remains (full JS/DOM,
 > floats/positioning, more conformance, media, GPU compositing).
 

@@ -24,6 +24,7 @@ version = "0.0.0"
 dependencies = [
  "argus-compositor",
  "argus-dom",
+ "argus-domscript",
  "argus-geometry",
  "argus-html",
  "argus-ipc",
@@ -45,8 +46,8 @@ name = "argus-content"
 version = "0.0.0"
 dependencies = [
  "argus-compositor",
- "argus-css",
  "argus-dom",
+ "argus-domscript",
  "argus-geometry",
  "argus-gfx",
  "argus-html",
@@ -55,7 +56,6 @@ dependencies = [
  "argus-layout",
  "argus-platform",
  "argus-protocol",
- "argus-script",
  "argus-util",
 ]
 
@@ -70,6 +70,16 @@ dependencies = [
 [[package]]
 name = "argus-dom"
 version = "0.0.0"
+
+[[package]]
+name = "argus-domscript"
+version = "0.0.0"
+dependencies = [
+ "argus-css",
+ "argus-dom",
+ "argus-html",
+ "argus-script",
+]
 
 [[package]]
 name = "argus-geometry"

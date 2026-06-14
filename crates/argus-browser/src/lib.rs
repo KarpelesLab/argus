@@ -238,7 +238,10 @@ pub fn dump_dom(url: Option<&str>) -> io::Result<String> {
     let html = resolve_html(&net, url);
     proto::send(net.channel(), Msg::Shutdown, &[])?;
     net.wait()?;
-    Ok(argus_html::parse(&html).serialize())
+    // Reflect synchronous DOM mutations from the page's scripts (Phase 2).
+    let mut doc = argus_html::parse(&html);
+    argus_domscript::apply_scripts(&mut doc);
+    Ok(doc.serialize())
 }
 
 /// Headless automation: fetch a page and return its **accessibility tree** — the
@@ -253,7 +256,8 @@ pub fn dump_a11y(url: Option<&str>) -> io::Result<String> {
     let html = resolve_html(&net, url);
     proto::send(net.channel(), Msg::Shutdown, &[])?;
     net.wait()?;
-    let doc = argus_html::parse(&html);
+    let mut doc = argus_html::parse(&html);
+    argus_domscript::apply_scripts(&mut doc);
 
     /// ARIA role implied by an HTML tag (None = generic/presentational).
     fn role_for(tag: &str) -> Option<&'static str> {
@@ -342,7 +346,9 @@ pub fn dump_text(url: Option<&str>) -> io::Result<String> {
     let html = resolve_html(&net, url);
     proto::send(net.channel(), Msg::Shutdown, &[])?;
     net.wait()?;
-    Ok(render_text(&argus_html::parse(&html)))
+    let mut doc = argus_html::parse(&html);
+    argus_domscript::apply_scripts(&mut doc);
+    Ok(render_text(&doc))
 }
 
 /// Project a parsed document to `innerText`-style rendered text: drop

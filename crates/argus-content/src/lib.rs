@@ -15,8 +15,6 @@ use argus_util::{log, Role};
 use std::collections::HashMap;
 use std::io;
 
-mod dom_script;
-
 /// Fallback color painted when no document has been loaded yet (Argus blue).
 pub const PHASE0_PAINT: Color = Color::rgb(0x2E, 0x86, 0xDE);
 
@@ -55,7 +53,7 @@ pub fn run(channel: Channel) -> io::Result<()> {
                 // Parse once, run the page's scripts against a JS-side DOM shim, and
                 // apply their mutations so layout sees the post-script tree.
                 let mut doc = argus_html::parse(&html);
-                if let Some(console) = dom_script::apply_scripts(&mut doc) {
+                if let Some(console) = argus_domscript::apply_scripts(&mut doc) {
                     for line in console.lines() {
                         log!("console.log: {line}");
                     }
