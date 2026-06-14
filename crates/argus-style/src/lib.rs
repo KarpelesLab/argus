@@ -69,6 +69,8 @@ pub struct ComputedStyle {
     /// Specified width, resolved during layout (`None` = auto).
     pub width: Option<Length>,
     pub text_align: TextAlign,
+    /// `text-decoration: underline`.
+    pub underline: bool,
 }
 
 impl ComputedStyle {
@@ -86,6 +88,7 @@ impl ComputedStyle {
             border_color: Color::BLACK,
             width: None,
             text_align: TextAlign::Left,
+            underline: false,
         }
     }
 }
@@ -104,7 +107,7 @@ h5 { font-size: 0.83em; font-weight: bold; margin: 1.67em 0 }
 h6 { font-size: 0.67em; font-weight: bold; margin: 2.33em 0 }
 p { margin: 1em 0 }
 b, strong { font-weight: bold }
-a { color: #0645ad }
+a { color: #0645ad; text-decoration: underline }
 ul, ol, blockquote, figure, pre { margin: 1em 0 }
 ul, ol { padding-left: 40px }
 blockquote { margin: 1em 40px }
@@ -286,6 +289,12 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             "right" | "end" => TextAlign::Right,
             _ => TextAlign::Left,
         };
+    }
+    if let Some(v) = map
+        .get("text-decoration")
+        .or_else(|| map.get("text-decoration-line"))
+    {
+        cs.underline = v.split_whitespace().any(|t| t == "underline");
     }
 
     let fs = cs.font_size;

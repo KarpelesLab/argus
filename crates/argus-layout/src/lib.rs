@@ -46,6 +46,8 @@ struct InlineWord {
     color: argus_geometry::Color,
     /// Whether whitespace precedes this word (a break opportunity + a space glyph).
     space_before: bool,
+    /// Whether this word is underlined (`text-decoration: underline`).
+    underline: bool,
     /// The hyperlink target, if this word is inside an `<a href>`.
     href: Option<Rc<str>>,
 }
@@ -404,6 +406,7 @@ impl Ctx<'_> {
                         color: style.color,
                         // Words within a text node are separated by whitespace.
                         space_before: *pending_space || !first,
+                        underline: style.underline,
                         href: link.clone(),
                     });
                     *pending_space = false;
@@ -503,6 +506,11 @@ impl Ctx<'_> {
                     size_px: w.font_size,
                     color: w.color,
                 });
+                if w.underline {
+                    let uy = baseline + (w.font_size * 0.08).max(1.0);
+                    let uh = (w.font_size / 16.0).max(1.0);
+                    self.rects.push(rect(pen_x, uy, word_w, uh, w.color));
+                }
                 if let Some(href) = &w.href {
                     self.links.push(LinkBox {
                         x: pen_x,
