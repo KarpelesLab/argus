@@ -19,17 +19,20 @@ and compositor, a multi-process security architecture, a JS↔DOM binding bridge
 storage, navigation/session management, and both a windowed GUI shell **and** a
 headless automation surface.
 
-> **Status:** Phase 0 complete; **Phase 1 renders its first real page.** The
-> sandboxed content process now parses HTML into a DOM, applies user-agent styles,
-> lays out block/inline content into lines (measured with real font metrics), and
-> paints shaped, anti-aliased glyphs into a shared-memory framebuffer — headings
-> render large and bold, paragraphs wrap to the viewport. Text shaping and
-> rasterization use the first-party **oxideav** stack (`oxideav-scribe`/`-raster`).
+> **Status:** Phase 0 complete; **Phase 1 renders styled pages.** The sandboxed
+> content process parses HTML into a DOM, runs a real **CSS cascade** (a UA
+> stylesheet + the page's author `<style>` + inline `style` attributes, ordered by
+> origin/`!important`/specificity), lays out block/inline content into lines
+> (measured with real font metrics), and paints colored backgrounds and shaped,
+> anti-aliased glyphs into a shared-memory framebuffer. Headings are large and bold,
+> paragraphs wrap and take their cascaded colors, class/id selectors and
+> backgrounds work. Text shaping + rasterization use the first-party **oxideav**
+> stack (`oxideav-scribe`/`-raster`).
 >
 > Try it: `cargo run` (windowed) · `cargo run -- --dump-page=/tmp/page.png` (render
 > the sample page to an image) · `cargo run -- --headless` (Phase 0 verifier).
-> Still ahead in Phase 1: CSS parsing, color/backgrounds, images, a real fragment
-> tree. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> Still ahead in Phase 1: inline-level box styling, images, a real fragment tree,
+> more CSS properties. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ---
 
