@@ -21,7 +21,6 @@ use argus_style::{
 use std::collections::HashMap;
 use std::rc::Rc;
 
-const LINE_HEIGHT: f32 = 1.2;
 const PAGE_MARGIN: f32 = 8.0;
 
 /// A list-item marker: either a glyph string (numbers/letters) or a geometric
@@ -356,7 +355,7 @@ impl Ctx<'_> {
                     size_px: style.font_size,
                     color: style.fade(style.color),
                 });
-                self.cursor_y += style.font_size * LINE_HEIGHT;
+                self.cursor_y += style.font_size * style.line_height;
             }
         } else {
             // Children. Inline-level content accumulates into `words` (each with its own
@@ -877,7 +876,7 @@ impl Ctx<'_> {
             let baseline = self.cursor_y + self.font.ascent_px(max_size);
 
             let line_top = self.cursor_y;
-            let line_h = max_size * LINE_HEIGHT;
+            let line_h = max_size * block.line_height;
             let mut pen_x = x + offset;
             for (j, w) in line.iter().enumerate() {
                 // The <br> sentinel only contributes line height, no glyphs.
@@ -1009,6 +1008,33 @@ mod tests {
                 .filter(|r| r.text.contains("eighteen"))
                 .count()
                 >= 1
+        );
+    }
+
+    #[test]
+    fn line_height_scales_line_spacing() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A two-line paragraph: doubling line-height roughly doubles the gap
+        // between the two lines' baselines.
+        let body = "<p style=\"line-height: {LH}\">one two three four five six seven \
+                    eight nine ten eleven twelve thirteen fourteen fifteen</p>";
+        let gap = |lh: &str| -> f32 {
+            let doc = parse(&body.replace("{LH}", lh));
+            let l = layout(&doc, &font, 160.0, &ImageSizes::new());
+            let mut ys: Vec<f32> = l.runs.iter().map(|r| r.baseline).collect();
+            ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            ys.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+            assert!(ys.len() >= 2, "expected the paragraph to wrap");
+            ys[1] - ys[0]
+        };
+        let single = gap("1.0");
+        let double = gap("2.0");
+        assert!(
+            double > single * 1.6,
+            "line-height:2 gap {double} should far exceed line-height:1 gap {single}"
         );
     }
 

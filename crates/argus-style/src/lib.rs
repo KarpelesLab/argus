@@ -120,6 +120,8 @@ pub struct ComputedStyle {
     pub text_transform: TextTransform,
     /// `box-sizing` — how `width` maps to the box model (not inherited).
     pub box_sizing: BoxSizing,
+    /// `line-height` as a multiple of `font-size` (inherited).
+    pub line_height: f32,
 }
 
 impl ComputedStyle {
@@ -146,6 +148,7 @@ impl ComputedStyle {
             list_style: ListStyle::Disc,
             text_transform: TextTransform::None,
             box_sizing: BoxSizing::ContentBox,
+            line_height: 1.2,
         }
     }
 
@@ -313,6 +316,7 @@ pub fn computed_style(
         white_space_pre: parent.white_space_pre, // white-space inherits
         list_style: parent.list_style,           // list-style-type inherits
         text_transform: parent.text_transform,   // text-transform inherits
+        line_height: parent.line_height,         // line-height inherits
         ..ComputedStyle::initial()
     };
     apply(&mut cs, &map, parent);
@@ -414,6 +418,20 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             "border-box" => BoxSizing::BorderBox,
             _ => BoxSizing::ContentBox,
         };
+    }
+    if let Some(v) = map.get("line-height") {
+        let v = v.trim();
+        if v == "normal" {
+            cs.line_height = 1.2;
+        } else if let Ok(n) = v.parse::<f32>() {
+            // Unitless: a direct multiple of font-size.
+            cs.line_height = n.max(0.0);
+        } else if let Some(px) = parse_length(v).map(|l| l.to_px(cs.font_size, cs.font_size)) {
+            // Length: store as a multiple of this element's font-size.
+            if cs.font_size > 0.0 {
+                cs.line_height = (px / cs.font_size).max(0.0);
+            }
+        }
     }
 
     let fs = cs.font_size;
