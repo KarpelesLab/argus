@@ -1,9 +1,11 @@
 //! Selector parsing, specificity, and matching against the DOM.
 //!
-//! Supports type, universal, class, and id selectors in compound selectors, joined
-//! by descendant (whitespace) and child (`>`) combinators. Pseudo-classes/elements
-//! are parsed-and-ignored for now (they don't affect matching but are skipped so
-//! they don't break parsing). Attribute and sibling selectors come later.
+//! Supports type, universal, class, id, and attribute (`[a]`/`[a=v]`/`~=`/`^=`/
+//! `$=`/`*=`) selectors in compound selectors, joined by descendant (whitespace)
+//! and child (`>`) combinators. Evaluated pseudo-classes: `:first-child`,
+//! `:last-child`, `:nth-child(an+b)`, `:not(...)`, and the form-state
+//! `:checked`/`:disabled`/`:enabled`. Other pseudo-classes/elements are
+//! parsed-and-ignored so they don't break matching.
 
 use crate::tokenizer::Token;
 use argus_dom::{Document, NodeData, NodeId};
