@@ -317,6 +317,155 @@ pub fn dump_a11y(url: Option<&str>) -> io::Result<String> {
     Ok(out)
 }
 
+/// Headless automation: fetch a page and return its **rendered text** — an
+/// `innerText`-style projection that drops non-rendered elements, collapses
+/// inline whitespace, and breaks lines at block boundaries and `<br>`. Used by
+/// `--dump-text` (useful for scraping and snapshot tests).
+pub fn dump_text(url: Option<&str>) -> io::Result<String> {
+    log::set_role(Role::Browser);
+    let mut net = spawn_child(Role::NetService)?;
+    proto::parent_handshake(net.channel(), Size::new(800, 600))?;
+    let html = resolve_html(&net, url);
+    proto::send(net.channel(), Msg::Shutdown, &[])?;
+    net.wait()?;
+    Ok(render_text(&argus_html::parse(&html)))
+}
+
+/// Project a parsed document to `innerText`-style rendered text: drop
+/// non-rendered elements, collapse inline whitespace, and break lines at block
+/// boundaries and `<br>`. Table cells are tab-separated. Lines are trimmed.
+fn render_text(doc: &argus_dom::Document) -> String {
+    use argus_dom::{Document, NodeData, NodeId};
+
+    /// Tags that are never rendered as text.
+    fn is_hidden(tag: &str) -> bool {
+        matches!(
+            tag,
+            "head" | "title" | "style" | "script" | "meta" | "link" | "base" | "noscript"
+        )
+    }
+    /// Tags that introduce a line break before and after their content.
+    fn is_block(tag: &str) -> bool {
+        matches!(
+            tag,
+            "html"
+                | "body"
+                | "p"
+                | "div"
+                | "section"
+                | "article"
+                | "header"
+                | "footer"
+                | "nav"
+                | "main"
+                | "aside"
+                | "figure"
+                | "blockquote"
+                | "pre"
+                | "hr"
+                | "address"
+                | "form"
+                | "ul"
+                | "ol"
+                | "li"
+                | "dl"
+                | "dt"
+                | "dd"
+                | "table"
+                | "tr"
+                | "h1"
+                | "h2"
+                | "h3"
+                | "h4"
+                | "h5"
+                | "h6"
+        )
+    }
+
+    // Build the text with explicit newline tokens, then normalize runs of blank
+    // lines and trailing/leading whitespace at the end.
+    fn walk(doc: &Document, id: NodeId, pre: bool, out: &mut String) {
+        match &doc.node(id).data {
+            NodeData::Text(t) => {
+                if pre {
+                    out.push_str(t);
+                } else if t.chars().any(|c| !c.is_whitespace()) {
+                    // Collapse internal whitespace but keep a leading/trailing space
+                    // so adjacent inline text doesn't run together.
+                    if t.starts_with(char::is_whitespace) {
+                        out.push(' ');
+                    }
+                    let mut first = true;
+                    for word in t.split_whitespace() {
+                        if !first {
+                            out.push(' ');
+                        }
+                        out.push_str(word);
+                        first = false;
+                    }
+                    if t.ends_with(char::is_whitespace) {
+                        out.push(' ');
+                    }
+                } else if !out.ends_with(char::is_whitespace) {
+                    out.push(' ');
+                }
+            }
+            NodeData::Element(e) => {
+                let tag = &*e.name.local;
+                if is_hidden(tag) {
+                    return;
+                }
+                if tag == "br" {
+                    out.push('\n');
+                    return;
+                }
+                let block = is_block(tag);
+                let cell = matches!(tag, "td" | "th");
+                let child_pre = pre || tag == "pre";
+                if block && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                for c in doc.children(id) {
+                    walk(doc, c, child_pre, out);
+                }
+                if cell && !out.ends_with('\t') {
+                    out.push('\t'); // separate table cells, like innerText
+                }
+                if block && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            // Document / Doctype / Comment: descend into children if any.
+            _ => {
+                for c in doc.children(id) {
+                    walk(doc, c, pre, out);
+                }
+            }
+        }
+    }
+
+    let mut raw = String::new();
+    walk(doc, doc.root(), false, &mut raw);
+
+    // Normalize: trim each line, collapse consecutive blank lines, trim ends.
+    let mut text = String::new();
+    let mut blanks = 0;
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            blanks += 1;
+            if blanks > 1 {
+                continue;
+            }
+        } else {
+            blanks = 0;
+        }
+        text.push_str(line);
+        text.push('\n');
+    }
+    text.trim_start_matches('\n').to_string()
+}
+
 /// Render a page (a fetched `url`, or the sample) to pixels once, off-screen.
 /// Returns the framebuffer size and RGBA bytes. Used by the `--dump-page` tool.
 pub fn render_once(url: Option<&str>, viewport: Size) -> io::Result<(Size, Vec<u8>)> {
@@ -565,7 +714,32 @@ fn verify_uniform(fb: &Framebuffer) -> io::Result<Color> {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_url;
+    use super::{render_text, resolve_url};
+
+    #[test]
+    fn rendered_text_structure() {
+        let doc = argus_html::parse(
+            "<html><head><title>T</title><style>p{color:red}</style></head>\
+             <body><h1>Title</h1><p>Hello <b>bold</b> world</p>\
+             <ul><li>one</li><li>two</li></ul>\
+             <p>a<br>b</p>\
+             <table><tr><td>x</td><td>y</td></tr></table>\
+             <script>ignore()</script></body></html>",
+        );
+        let text = render_text(&doc);
+        // Non-rendered content is dropped.
+        assert!(!text.contains("color:red"));
+        assert!(!text.contains("ignore"));
+        // Inline text collapses onto one line; block elements break lines.
+        assert!(text.contains("Hello bold world"), "got:\n{text}");
+        assert!(text.contains("Title"));
+        // <br> breaks a line within a paragraph.
+        assert!(text.contains("a\nb"), "br should break: {text:?}");
+        // Table cells are tab-separated.
+        assert!(text.contains("x\ty"), "cells tab-separated: {text:?}");
+        // List items are on their own lines.
+        assert!(text.contains("one\ntwo"), "list items: {text:?}");
+    }
 
     #[test]
     fn url_resolution() {

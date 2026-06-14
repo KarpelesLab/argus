@@ -21,7 +21,7 @@ co-equal embedding, not an afterthought).
 | 2 — Scripting & dynamic DOM | 🟡 started — page `<script>` runs in kataan (computation + console). **Blocked** on kataan's embedding API for DOM bindings / event loop ([upstream/kataan.md](upstream/kataan.md)) |
 | 3 — Chrome, navigation & services | 🟡 links → fetch → re-render, URL + subresource resolution, **scroll-wheel**, **persistent cookie jar**. Tabs/history/back-forward, CSP, HTTP cache remain |
 | 4 — Layout & CSS breadth | 🟡 box model, **box-sizing**, **line-height**, text-align, **text-transform**, **white-space: pre**, **`<br>`**, attribute + `:first/last-child` selectors, lists + **list-style-type**, `<hr>`, **tables**, **flexbox**, **grid**, underline + **line-through**, **border-radius**, **opacity**. Floats/positioning, `flex-grow`/`justify`/`align`, grid spans/`fr`, web fonts, complex text remain |
-| 5 — Web platform & headless | 🟡 headless surfaces: `--dump-page`, `--dump-dom`, `--dump-a11y`, `--eval` (JS). Web API breadth (needs JS bindings), full CDP, storage remain |
+| 5 — Web platform & headless | 🟡 headless surfaces: `--dump-page`, `--dump-dom`, `--dump-a11y`, **`--dump-text`**, `--eval` (JS). Web API breadth (needs JS bindings), full CDP, storage remain |
 | 6 — Media & richer rendering | 🟡 PNG + GIF image decode (oxideav). JPEG/WebP/AVIF, `<video>`/`<audio>`, animations, GPU compositor remain |
 | 7 — Hardening / perf / conformance | 🟡 started — parser robustness tests (8k random inputs) + cargo-fuzz harness, accessibility tree. WPT, perf, sandbox hardening remain |
 

@@ -51,6 +51,17 @@ fn main() {
             }
             return;
         }
+        // `--dump-text`: print the rendered (innerText-style) text and exit.
+        if has_flag("--dump-text") {
+            match argus_browser::dump_text(url.as_deref()) {
+                Ok(text) => print!("{text}"),
+                Err(err) => {
+                    eprintln!("[browser] dump-text failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         // `--dump-a11y`: print the accessibility tree and exit.
         if has_flag("--dump-a11y") {
             match argus_browser::dump_a11y(url.as_deref()) {
