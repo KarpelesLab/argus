@@ -7,9 +7,12 @@
 //! id'd elements, run prelude + page scripts through kataan once, then read the
 //! recorded ops back and apply them to the real [`Document`] before layout.
 //!
-//! This is a pragmatic subset — no live reflow, events, or timers — but it makes
-//! `document.getElementById(id).textContent = …`, `.innerHTML`, `.style.x`,
-//! `.className`, and `setAttribute` actually change the rendered page.
+//! This is a pragmatic subset — no live reflow, events, or timers — but it makes a
+//! real chunk of the DOM API actually change the rendered page:
+//! `document.getElementById` / `querySelector` (full CSS selector engine) /
+//! `createElement` / `body`, and on elements `textContent`/`innerText`,
+//! `innerHTML`, `className`, `setAttribute`/`getAttribute`, `style.<camelCase>`,
+//! and `appendChild`/`append`/`remove`.
 
 use argus_dom::{Attribute, Document, NodeData, NodeId, QualName};
 
