@@ -7,10 +7,12 @@
 //! is greedily broken into lines that fit the content width, measured with the real
 //! font, and aligned per `text-align`. Styles come from the `argus-style` cascade.
 //!
-//! Covers block + inline formatting, lists, `<hr>`, tables, and basic flex/grid.
-//! Still a subset of `docs/subsystems/layout.md`: no floats/positioning, no margin
-//! collapsing, no `flex-grow`/`justify`/`align` or grid spans, no inline-level boxes
-//! with their own geometry (inline runs adopt their block's font size/color).
+//! Covers block + inline formatting, the box model (with `box-sizing` and
+//! `line-height`), lists (`list-style-type`), `<br>`, `<hr>`, tables, and basic
+//! flex/grid. Still a subset of `docs/subsystems/layout.md`: no floats/positioning,
+//! no margin collapsing, no `flex-grow`/`justify`/`align` or grid spans, no
+//! inline-level boxes with their own geometry (inline runs adopt their block's
+//! font size/color).
 
 use argus_dom::{Document, ElementData, NodeData, NodeId};
 use argus_gfx::{Font, RectFill, TextRun};
