@@ -952,24 +952,39 @@ impl Ctx<'_> {
         }
         lines.push(line_start..taken.len());
 
-        for range in lines {
+        let line_count = lines.len();
+        for (line_idx, range) in lines.into_iter().enumerate() {
             let line = &taken[range.clone()];
-            // Line width and tallest font for baseline/height.
+            // Line width, gap count, and tallest font for baseline/height.
             let mut line_w = 0.0f32;
             let mut max_size = 0.0f32;
+            let mut gaps = 0u32;
             for (j, w) in line.iter().enumerate() {
-                let space = if j > 0 && w.space_before {
+                let has_space = j > 0 && w.space_before;
+                let space = if has_space {
                     self.font.measure(" ", w.font_size)
                 } else {
                     0.0
                 };
+                if has_space && !w.text.is_empty() {
+                    gaps += 1;
+                }
                 line_w += space + self.font.measure(&w.text, w.font_size);
                 max_size = max_size.max(w.font_size);
             }
+            // `justify` stretches inter-word gaps on every line but the last
+            // (and not the line just before a forced `<br>` break).
+            let is_last =
+                line_idx + 1 == line_count || taken.get(range.end).is_some_and(|w| w.hard_break);
+            let justify_extra = if block.text_align == TextAlign::Justify && !is_last && gaps > 0 {
+                ((width - line_w) / gaps as f32).max(0.0)
+            } else {
+                0.0
+            };
             let offset = match block.text_align {
-                TextAlign::Left => 0.0,
                 TextAlign::Center => ((width - line_w) / 2.0).max(0.0),
                 TextAlign::Right => (width - line_w).max(0.0),
+                _ => 0.0,
             };
             let baseline = self.cursor_y + self.font.ascent_px(max_size);
 
@@ -982,7 +997,7 @@ impl Ctx<'_> {
                     continue;
                 }
                 if j > 0 && w.space_before {
-                    pen_x += self.font.measure(" ", w.font_size);
+                    pen_x += self.font.measure(" ", w.font_size) + justify_extra;
                 }
                 let word_w = self.font.measure(&w.text, w.font_size);
                 let wb = baseline + w.baseline_shift;
@@ -1129,6 +1144,47 @@ mod tests {
         assert!(
             up < base,
             "superscript {up} should sit above baseline {base}"
+        );
+    }
+
+    #[test]
+    fn justify_stretches_non_last_lines() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // First-line right edge: justified text should reach further right than
+        // left-aligned text (it fills the content width).
+        let first_line_right = |align: &str| -> f32 {
+            let html = format!(
+                "<p style=\"text-align:{align}\">one two three four five six seven eight \
+                 nine ten eleven twelve thirteen fourteen fifteen sixteen</p>"
+            );
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 200.0, &ImageSizes::new());
+            let min_baseline = l
+                .runs
+                .iter()
+                .map(|r| r.baseline)
+                .fold(f32::INFINITY, f32::min);
+            l.runs
+                .iter()
+                .filter(|r| (r.baseline - min_baseline).abs() < 0.5)
+                .map(|r| r.x + font.measure(&r.text, r.size_px))
+                .fold(0.0, f32::max)
+        };
+        let left = first_line_right("left");
+        let just = first_line_right("justify");
+        // The justified first line fills to the content's right edge
+        // (PAGE_MARGIN + content width = 8 + (200 - 16) = 192); left-aligned does not.
+        let right_edge = PAGE_MARGIN + (200.0 - 2.0 * PAGE_MARGIN);
+        assert!(
+            (just - right_edge).abs() < 1.5,
+            "justified right {just} vs edge {right_edge}"
+        );
+        assert!(
+            just > left + 1.0,
+            "justify {just} should exceed left {left}"
         );
     }
 

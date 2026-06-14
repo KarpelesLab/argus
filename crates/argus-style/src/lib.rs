@@ -36,6 +36,7 @@ pub enum TextAlign {
     Left,
     Center,
     Right,
+    Justify,
 }
 
 /// `list-style-type` — the marker drawn beside a list item.
@@ -429,6 +430,7 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         cs.text_align = match v.as_str() {
             "center" => TextAlign::Center,
             "right" | "end" => TextAlign::Right,
+            "justify" => TextAlign::Justify,
             _ => TextAlign::Left,
         };
     }
