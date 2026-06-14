@@ -15,8 +15,8 @@
 use argus_dom::{Document, ElementData, NodeData, NodeId};
 use argus_gfx::{Font, RectFill, TextRun};
 use argus_style::{
-    author_stylesheet, computed_style, AuthorStylesheet, ComputedStyle, Display, ListStyle,
-    TextAlign, TextTransform,
+    author_stylesheet, computed_style, AuthorStylesheet, BoxSizing, ComputedStyle, Display,
+    ListStyle, TextAlign, TextTransform,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -90,6 +90,19 @@ fn roman_marker(n: u32) -> String {
         }
     }
     out
+}
+
+/// Convert a specified `width` into a content-box width, honoring `box-sizing`.
+/// For `border-box`, the horizontal padding and border are subtracted.
+fn border_box_to_content(style: &ComputedStyle, width: f32) -> f32 {
+    match style.box_sizing {
+        BoxSizing::ContentBox => width,
+        BoxSizing::BorderBox => {
+            let chrome =
+                style.padding.left + style.padding.right + style.border.left + style.border.right;
+            (width - chrome).max(0.0)
+        }
+    }
 }
 
 /// A word in an inline formatting context, carrying its own style so spans, links,
@@ -239,7 +252,7 @@ impl Ctx<'_> {
             + style.padding.left
             + style.padding.right;
         let content_w = match style.width {
-            Some(len) => len.to_px(style.font_size, avail),
+            Some(len) => border_box_to_content(&style, len.to_px(style.font_size, avail)),
             None => (avail - h_extra).max(0.0),
         };
         let content_left = border_box_left + style.border.left + style.padding.left;
@@ -538,7 +551,7 @@ impl Ctx<'_> {
             + style.padding.left
             + style.padding.right;
         let content_w = match style.width {
-            Some(len) => len.to_px(style.font_size, avail),
+            Some(len) => border_box_to_content(&style, len.to_px(style.font_size, avail)),
             None => (avail - h_extra).max(0.0),
         };
         let content_left = border_box_left + style.border.left + style.padding.left;
@@ -604,7 +617,7 @@ impl Ctx<'_> {
             + style.padding.left
             + style.padding.right;
         let content_w = match style.width {
-            Some(len) => len.to_px(style.font_size, avail),
+            Some(len) => border_box_to_content(&style, len.to_px(style.font_size, avail)),
             None => (avail - h_extra).max(0.0),
         };
         let content_left = border_box_left + style.border.left + style.padding.left;
@@ -661,7 +674,7 @@ impl Ctx<'_> {
         let num_cols = rows.iter().map(|r| r.len()).max().unwrap_or(1).max(1);
         let table_left = x + style.margin.left;
         let table_w = match style.width {
-            Some(len) => len.to_px(style.font_size, avail),
+            Some(len) => border_box_to_content(&style, len.to_px(style.font_size, avail)),
             None => (avail - style.margin.left - style.margin.right).max(0.0),
         };
         let col_w = table_w / num_cols as f32;
@@ -997,6 +1010,43 @@ mod tests {
                 .count()
                 >= 1
         );
+    }
+
+    #[test]
+    fn box_sizing_border_box_subtracts_padding_and_border() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Same specified width (200px), padding 20, border 5; the content-box div's
+        // border box is wider (250) than the border-box div's (200).
+        let html = "<style>\
+            div { width: 200px; padding: 20px; border: 5px solid #000 }\
+            .cb { box-sizing: content-box; background-color: #ff0000 }\
+            .bb { box-sizing: border-box; background-color: #00ff00 }\
+            </style>\
+            <div class=\"cb\">content box</div>\
+            <div class=\"bb\">border box</div>";
+        let doc = parse(html);
+        let layout = layout(&doc, &font, 600.0, &ImageSizes::new());
+
+        let bg_w = |r: u8, g: u8| -> f32 {
+            layout
+                .rects
+                .iter()
+                .find(|rect| rect.color.r == r && rect.color.g == g && rect.color.b == 0)
+                .map(|rect| rect.w)
+                .expect("background rect")
+        };
+        let content_box = bg_w(255, 0);
+        let border_box = bg_w(0, 255);
+        // content-box: 200 + 2*20 padding + 2*5 border = 250.
+        assert!(
+            (content_box - 250.0).abs() < 0.5,
+            "content-box {content_box}"
+        );
+        // border-box: the 200 includes padding + border.
+        assert!((border_box - 200.0).abs() < 0.5, "border-box {border_box}");
     }
 
     #[test]

@@ -59,6 +59,13 @@ pub enum TextTransform {
     Capitalize,
 }
 
+/// `box-sizing` — whether `width` measures the content box or the border box.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BoxSizing {
+    ContentBox,
+    BorderBox,
+}
+
 /// Four edge values (top/right/bottom/left) in CSS pixels.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Edges {
@@ -111,6 +118,8 @@ pub struct ComputedStyle {
     pub list_style: ListStyle,
     /// `text-transform` case mapping (inherited).
     pub text_transform: TextTransform,
+    /// `box-sizing` — how `width` maps to the box model (not inherited).
+    pub box_sizing: BoxSizing,
 }
 
 impl ComputedStyle {
@@ -136,6 +145,7 @@ impl ComputedStyle {
             white_space_pre: false,
             list_style: ListStyle::Disc,
             text_transform: TextTransform::None,
+            box_sizing: BoxSizing::ContentBox,
         }
     }
 
@@ -397,6 +407,12 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             "lowercase" => TextTransform::Lowercase,
             "capitalize" => TextTransform::Capitalize,
             _ => TextTransform::None,
+        };
+    }
+    if let Some(v) = map.get("box-sizing") {
+        cs.box_sizing = match v.as_str() {
+            "border-box" => BoxSizing::BorderBox,
+            _ => BoxSizing::ContentBox,
         };
     }
 
