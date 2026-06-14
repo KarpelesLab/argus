@@ -109,6 +109,9 @@ var s = document.getElementById('js-status');\
 s.textContent = 'JavaScript ran and edited the DOM via getElementById: fib(20) = ' + fib(20) + '.';\
 s.style.color = '#2e7d32';\
 document.getElementById('js-list').innerHTML = '<li>built by</li><li>document</li><li>.innerHTML</li>';\
+var li = document.createElement('li');\
+li.textContent = 'and one more via createElement + appendChild';\
+document.querySelector('#js-list').appendChild(li);\
 console.log('kataan ran: fib(20) = ' + fib(20));\
 </script>\
 </body></html>"

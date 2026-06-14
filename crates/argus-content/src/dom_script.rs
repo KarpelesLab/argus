@@ -189,23 +189,27 @@ fn apply_ops(doc: &mut Document, json: &str) {
     let mut created: HashMap<String, NodeId> = HashMap::new();
 
     // Resolve a `tgt` descriptor ({kind, val}) to a node (created nodes included).
-    let resolve = |doc: &Document, created: &HashMap<String, NodeId>, tgt: Option<&Json>| -> Option<NodeId> {
-        let Some(Json::Obj(t)) = tgt else { return None };
-        let f = |k: &str| t.iter().find(|(n, _)| n == k).and_then(|(_, v)| v.as_str());
-        match (f("kind"), f("val")) {
-            (Some("id"), Some(v)) => find_by_id(doc, v),
-            (Some("sel"), Some(v)) => find_by_selector(doc, v),
-            (Some("new"), Some(v)) => created.get(v).copied(),
-            _ => None,
-        }
-    };
+    let resolve =
+        |doc: &Document, created: &HashMap<String, NodeId>, tgt: Option<&Json>| -> Option<NodeId> {
+            let Some(Json::Obj(t)) = tgt else { return None };
+            let f = |k: &str| t.iter().find(|(n, _)| n == k).and_then(|(_, v)| v.as_str());
+            match (f("kind"), f("val")) {
+                (Some("id"), Some(v)) => find_by_id(doc, v),
+                (Some("sel"), Some(v)) => find_by_selector(doc, v),
+                (Some("new"), Some(v)) => created.get(v).copied(),
+                _ => None,
+            }
+        };
 
     for op in ops {
         let Json::Obj(fields) = op else { continue };
         let get =
             |k: &str| -> Option<&Json> { fields.iter().find(|(n, _)| n == k).map(|(_, v)| v) };
         let op_kind = get("op").and_then(Json::as_str).unwrap_or("");
-        let value = get("value").and_then(Json::as_str).unwrap_or("").to_string();
+        let value = get("value")
+            .and_then(Json::as_str)
+            .unwrap_or("")
+            .to_string();
         let key = get("key").and_then(Json::as_str).unwrap_or("").to_string();
 
         if op_kind == "create" {
