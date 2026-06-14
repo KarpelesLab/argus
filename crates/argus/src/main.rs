@@ -24,6 +24,17 @@ fn main() {
             }
             return;
         }
+        // `--dump-dom`: print the parsed DOM (headless automation) and exit.
+        if has_flag("--dump-dom") {
+            match argus_browser::dump_dom(url.as_deref()) {
+                Ok(dom) => print!("{dom}"),
+                Err(err) => {
+                    eprintln!("[browser] dump-dom failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
     }
 
     let result = match role {

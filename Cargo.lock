@@ -22,7 +22,9 @@ name = "argus-browser"
 version = "0.0.0"
 dependencies = [
  "argus-compositor",
+ "argus-dom",
  "argus-geometry",
+ "argus-html",
  "argus-ipc",
  "argus-platform",
  "argus-protocol",

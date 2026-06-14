@@ -177,6 +177,18 @@ fn resolve_html(net: &Child, url: Option<&str>) -> String {
     }
 }
 
+/// Headless automation: fetch a page (or the sample) and return its parsed DOM
+/// serialized in the html5lib `#document` format. Used by the `--dump-dom` tool.
+pub fn dump_dom(url: Option<&str>) -> io::Result<String> {
+    log::set_role(Role::Browser);
+    let mut net = spawn_child(Role::NetService)?;
+    proto::parent_handshake(net.channel(), Size::new(800, 600))?;
+    let html = resolve_html(&net, url);
+    proto::send(net.channel(), Msg::Shutdown, &[])?;
+    net.wait()?;
+    Ok(argus_html::parse(&html).serialize())
+}
+
 /// Render a page (a fetched `url`, or the sample) to pixels once, off-screen.
 /// Returns the framebuffer size and RGBA bytes. Used by the `--dump-page` tool.
 pub fn render_once(url: Option<&str>, viewport: Size) -> io::Result<(Size, Vec<u8>)> {
