@@ -45,7 +45,7 @@ fn dump_page(path: &str, url: Option<&str>) -> std::io::Result<()> {
     use argus_geometry::Size;
     use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
 
-    let viewport = Size::new(800, 600);
+    let viewport = Size::new(800, 1100);
     let (size, rgba) = argus_browser::render_once(url, viewport)?;
 
     let frame = VideoFrame {
