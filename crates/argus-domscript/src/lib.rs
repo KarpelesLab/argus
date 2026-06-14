@@ -11,8 +11,9 @@
 //! real chunk of the DOM API actually change the rendered page, plus discrete
 //! `click` handlers (via deterministic replay through [`apply_scripts_with_events`]),
 //! `setTimeout`/`setInterval` callbacks (drained synchronously, earliest delay
-//! first, no wall clock), and `localStorage`/`sessionStorage` (session-scoped, not
-//! yet persisted across navigations). The DOM API surface includes:
+//! first, no wall clock), and `localStorage` (persisted across navigations within
+//! the content process via [`apply_scripts_session`]) / `sessionStorage`
+//! (per-page). The DOM API surface includes:
 //! `document.getElementById` / `querySelector` (full CSS selector engine) /
 //! `createElement` / `body` / `write`, and on elements `textContent`/`innerText`,
 //! `innerHTML`, `className`, `setAttribute`/`getAttribute`, `style.<camelCase>`,
@@ -175,21 +176,35 @@ function __argus_drain() {
   }
 }
 
-// Storage. Backed by an in-execution map, so it is consistent within a page's
-// script run + replayed events (set-then-read works), but is NOT yet persisted
-// across navigations — a documented limitation until the storage service is wired.
-function __Storage() {
+// Storage. `localStorage` is seeded from the persistent store and records mutation
+// ops, so writes survive across navigations within the session (reconciled in Rust,
+// like the DOM). `sessionStorage` is in-execution only. Both are consistent within a
+// run + replayed events.
+var __storage_seed = __STORAGE__;
+function __mkStorage(persist) {
   var data = {};
+  for (var k in __storage_seed) {
+    if (__storage_seed.hasOwnProperty(k)) data[k] = __storage_seed[k];
+  }
   return {
     getItem: function(k) { var v = data["" + k]; return v == null ? null : v; },
-    setItem: function(k, v) { data["" + k] = "" + v; },
-    removeItem: function(k) { delete data["" + k]; },
-    clear: function() { data = {}; },
+    setItem: function(k, v) {
+      data["" + k] = "" + v;
+      if (persist) __argus_ops.push({op: "storage", key: "set", value: "" + k, value2: "" + v});
+    },
+    removeItem: function(k) {
+      delete data["" + k];
+      if (persist) __argus_ops.push({op: "storage", key: "remove", value: "" + k});
+    },
+    clear: function() {
+      data = {};
+      if (persist) __argus_ops.push({op: "storage", key: "clear"});
+    },
     key: function(i) { var ks = Object.keys(data); return i < ks.length ? ks[i] : null; }
   };
 }
-var localStorage = __Storage();
-var sessionStorage = __Storage();
+var localStorage = __mkStorage(true);
+var sessionStorage = __mkStorage(false);
 window.localStorage = localStorage;
 window.sessionStorage = sessionStorage;
 "#;
@@ -207,21 +222,43 @@ pub struct Interaction {
 /// Run a document's inline scripts and apply their DOM mutations in place.
 /// Returns the console output (minus the internal ops line) for logging.
 pub fn apply_scripts(doc: &mut Document) -> Option<String> {
-    apply_scripts_with_events(doc, &[])
+    let mut storage = std::collections::HashMap::new();
+    run_scripts(doc, &[], &mut storage)
 }
 
-/// Like [`apply_scripts`], but after running the scripts (which register event
-/// listeners), replay `events` in order within the same execution, then apply the
-/// resulting DOM mutations. `events` should be the full interaction history so
-/// stateful handlers accumulate correctly (deterministic event replay).
+/// Like [`apply_scripts`], but also replays `events` (deterministic event replay)
+/// with a throwaway storage (no cross-call persistence).
 pub fn apply_scripts_with_events(doc: &mut Document, events: &[Interaction]) -> Option<String> {
+    let mut storage = std::collections::HashMap::new();
+    run_scripts(doc, events, &mut storage)
+}
+
+/// The full session entry point: run scripts, replay `events`, and persist
+/// `localStorage` writes into `storage` (seeded from it), so a long-lived caller
+/// (the content process) keeps storage across navigations.
+pub fn apply_scripts_session(
+    doc: &mut Document,
+    events: &[Interaction],
+    storage: &mut std::collections::HashMap<String, String>,
+) -> Option<String> {
+    run_scripts(doc, events, storage)
+}
+
+fn run_scripts(
+    doc: &mut Document,
+    events: &[Interaction],
+    storage: &mut std::collections::HashMap<String, String>,
+) -> Option<String> {
     let scripts = collect_scripts(doc);
     if scripts.is_empty() {
         return None;
     }
 
     let seed = seed_json(doc);
-    let mut src = PRELUDE.replace("__SEED__", &seed);
+    let storage_seed = storage_json(storage);
+    let mut src = PRELUDE
+        .replace("__SEED__", &seed)
+        .replace("__STORAGE__", &storage_seed);
     for s in &scripts {
         src.push('\n');
         src.push_str(s);
@@ -246,13 +283,22 @@ pub fn apply_scripts_with_events(doc: &mut Document, events: &[Interaction]) -> 
             .strip_prefix('\u{1}')
             .and_then(|l| l.strip_prefix("ARGUSOPS"))
         {
-            apply_ops(doc, json);
+            apply_ops(doc, json, storage);
         } else {
             console.push_str(line);
             console.push('\n');
         }
     }
     Some(console)
+}
+
+/// Serialize the storage map to a JSON object for the prelude seed.
+fn storage_json(storage: &std::collections::HashMap<String, String>) -> String {
+    let entries: Vec<String> = storage
+        .iter()
+        .map(|(k, v)| format!("{}:{}", json_string(k), json_string(v)))
+        .collect();
+    format!("{{{}}}", entries.join(","))
 }
 
 /// Collect inline (`src`-less) `<script>` text in document order.
@@ -327,7 +373,11 @@ fn text_content(doc: &Document, id: NodeId) -> String {
 }
 
 /// Apply the ops array (parsed from JSON) to the document.
-fn apply_ops(doc: &mut Document, json: &str) {
+fn apply_ops(
+    doc: &mut Document,
+    json: &str,
+    storage: &mut std::collections::HashMap<String, String>,
+) {
     use std::collections::HashMap;
     let Some(Json::Arr(ops)) = parse_json(json) else {
         return;
@@ -346,6 +396,24 @@ fn apply_ops(doc: &mut Document, json: &str) {
             .to_string();
         let key = get("key").and_then(Json::as_str).unwrap_or("").to_string();
 
+        if op_kind == "storage" {
+            // localStorage mutation: key="set"/"remove"/"clear", value=storage key.
+            match key.as_str() {
+                "set" => {
+                    let v2 = get("value2")
+                        .and_then(Json::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    storage.insert(value, v2);
+                }
+                "remove" => {
+                    storage.remove(&value);
+                }
+                "clear" => storage.clear(),
+                _ => {}
+            }
+            continue;
+        }
         if op_kind == "create" {
             let nid = get("nid").and_then(Json::as_str).unwrap_or("");
             let tag = get("tag").and_then(Json::as_str).unwrap_or("div");
@@ -1026,7 +1094,8 @@ mod tests {
                 })
                 .collect();
             let mut doc = argus_html::parse("<div id=d><span id=s>x</span></div>");
-            apply_ops(&mut doc, &s); // must not panic
+            let mut storage = std::collections::HashMap::new();
+            apply_ops(&mut doc, &s, &mut storage); // must not panic
             let _ = doc.serialize();
         }
     }
@@ -1098,6 +1167,29 @@ mod tests {
         let mut doc = argus_html::parse(html);
         apply_scripts_with_events(&mut doc, &[click]);
         assert_eq!(text_of(&doc, "out"), "hi");
+    }
+
+    #[test]
+    fn local_storage_persists_across_navigations() {
+        // A shared storage map (as the content process keeps) carries localStorage
+        // writes from one page load to the next.
+        let mut storage = std::collections::HashMap::new();
+
+        // Page 1 writes a value.
+        let mut page1 = argus_html::parse(
+            "<div id=\"a\"></div><script>localStorage.setItem('user', 'mark');</script>",
+        );
+        apply_scripts_session(&mut page1, &[], &mut storage);
+        assert_eq!(storage.get("user").map(String::as_str), Some("mark"));
+
+        // Page 2 (a fresh document) reads it back through the persisted map.
+        let mut page2 = argus_html::parse(
+            "<div id=\"b\"></div>\
+             <script>document.getElementById('b').textContent = \
+               localStorage.getItem('user') || 'none';</script>",
+        );
+        apply_scripts_session(&mut page2, &[], &mut storage);
+        assert_eq!(text_of(&page2, "b"), "mark");
     }
 
     #[test]

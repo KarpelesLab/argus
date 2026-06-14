@@ -31,6 +31,7 @@ pub fn run(channel: Channel) -> io::Result<()> {
         html: None,
         doc: None,
         events: Vec::new(),
+        storage: std::collections::HashMap::new(),
         links: Vec::new(),
         bounds: Vec::new(),
         scroll_y: 0,
@@ -56,13 +57,16 @@ pub fn run(channel: Channel) -> io::Result<()> {
                 // Parse once, run the page's scripts against a JS-side DOM shim, and
                 // apply their mutations so layout sees the post-script tree.
                 let mut doc = argus_html::parse(&html);
-                if let Some(console) = argus_domscript::apply_scripts(&mut doc) {
+                // localStorage persists across navigations; the event history resets.
+                content.events.clear();
+                if let Some(console) =
+                    argus_domscript::apply_scripts_session(&mut doc, &[], &mut content.storage)
+                {
                     for line in console.lines() {
                         log!("console.log: {line}");
                     }
                 }
                 content.html = Some(html);
-                content.events.clear();
                 content.doc = Some(doc);
             }
             Msg::RequestFrame => {
@@ -115,6 +119,8 @@ struct Content {
     doc: Option<argus_dom::Document>,
     /// The interaction history replayed on every script run (event sourcing).
     events: Vec<argus_domscript::Interaction>,
+    /// `localStorage`, persisted across navigations in this content process.
+    storage: std::collections::HashMap<String, String>,
     /// Clickable link regions from the last render (in screen coords), for input.
     links: Vec<argus_layout::LinkBox>,
     /// Id'd element boxes from the last render (screen coords), for click dispatch.
@@ -246,7 +252,9 @@ impl Content {
             event: "click".into(),
         });
         let mut doc = argus_html::parse(html);
-        if let Some(console) = argus_domscript::apply_scripts_with_events(&mut doc, &self.events) {
+        if let Some(console) =
+            argus_domscript::apply_scripts_session(&mut doc, &self.events, &mut self.storage)
+        {
             for line in console.lines() {
                 log!("console.log: {line}");
             }
