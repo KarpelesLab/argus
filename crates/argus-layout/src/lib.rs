@@ -785,6 +785,14 @@ impl Ctx<'_> {
         let table_w = clamp_content_width(&style, table_w, avail);
         let col_w = table_w / num_cols as f32;
 
+        // A `<caption>` renders as a block spanning the table width, above the rows.
+        if let Some(cap) = self.doc.children(id).find(|&c| {
+            matches!(&self.doc.node(c).data, NodeData::Element(e) if e.name.is_html("caption"))
+        }) {
+            let cap_style = computed_style(self.doc, cap, &style, self.author);
+            self.layout_block(cap, cap_style, table_left, table_w, None);
+        }
+
         for row in &rows {
             let row_top = self.cursor_y;
             let mut max_h = 0.0f32;
@@ -1467,6 +1475,29 @@ mod tests {
         );
         // border-box: the 200 includes padding + border.
         assert!((border_box - 200.0).abs() < 0.5, "border-box {border_box}");
+    }
+
+    #[test]
+    fn table_caption_renders_above_rows() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let html = "<table><caption>My Caption</caption>\
+            <tr><td>cell</td></tr></table>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 300.0, &ImageSizes::new());
+        let cap_y = l
+            .runs
+            .iter()
+            .find(|r| r.text == "Caption")
+            .map(|r| r.baseline);
+        let cell_y = l.runs.iter().find(|r| r.text == "cell").map(|r| r.baseline);
+        let (cap_y, cell_y) = (cap_y.expect("caption"), cell_y.expect("cell"));
+        assert!(
+            cap_y < cell_y,
+            "caption {cap_y} should sit above cell {cell_y}"
+        );
     }
 
     #[test]
