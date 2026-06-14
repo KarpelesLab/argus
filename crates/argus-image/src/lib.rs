@@ -73,6 +73,10 @@ fn decode_bmp(bytes: &[u8]) -> Option<DecodedImage> {
     if compression != 0 || (bpp != 24 && bpp != 32) || width <= 0 || height_raw == 0 {
         return None;
     }
+    // Guard against absurd dimensions before allocating (malicious headers).
+    if width as i64 * height_raw.unsigned_abs() as i64 > 64_000_000 {
+        return None;
+    }
     let top_down = height_raw < 0;
     let width = width as usize;
     let height = height_raw.unsigned_abs() as usize;
