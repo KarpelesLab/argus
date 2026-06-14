@@ -37,6 +37,28 @@ pub enum TextAlign {
     Right,
 }
 
+/// `list-style-type` — the marker drawn beside a list item.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ListStyle {
+    Disc,
+    Circle,
+    Square,
+    Decimal,
+    LowerAlpha,
+    UpperAlpha,
+    LowerRoman,
+    None,
+}
+
+/// `text-transform` — case mapping applied to rendered text.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TextTransform {
+    None,
+    Uppercase,
+    Lowercase,
+    Capitalize,
+}
+
 /// Four edge values (top/right/bottom/left) in CSS pixels.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Edges {
@@ -85,6 +107,10 @@ pub struct ComputedStyle {
     pub opacity: f32,
     /// `white-space: pre*` — preserve whitespace and honor newlines (inherited).
     pub white_space_pre: bool,
+    /// `list-style-type` for list items (inherited).
+    pub list_style: ListStyle,
+    /// `text-transform` case mapping (inherited).
+    pub text_transform: TextTransform,
 }
 
 impl ComputedStyle {
@@ -108,6 +134,8 @@ impl ComputedStyle {
             border_radius: 0.0,
             opacity: 1.0,
             white_space_pre: false,
+            list_style: ListStyle::Disc,
+            text_transform: TextTransform::None,
         }
     }
 
@@ -144,6 +172,8 @@ u, ins { text-decoration: underline }
 s, del, strike { text-decoration: line-through }
 ul, ol, blockquote, figure, pre { margin: 1em 0 }
 pre { white-space: pre }
+ul { list-style-type: disc }
+ol { list-style-type: decimal }
 ul, ol { padding-left: 40px }
 blockquote { margin: 1em 40px }
 hr { margin: 8px 0; border-top: 1px solid #c0c0c0 }
@@ -154,6 +184,21 @@ th { font-weight: bold; text-align: center }
 fn ua_stylesheet() -> &'static Stylesheet {
     static UA: OnceLock<Stylesheet> = OnceLock::new();
     UA.get_or_init(|| parse_stylesheet(UA_CSS))
+}
+
+/// Map a `list-style-type` keyword to a [`ListStyle`] (ignoring unknown tokens).
+fn parse_list_style(token: &str) -> Option<ListStyle> {
+    Some(match token {
+        "disc" => ListStyle::Disc,
+        "circle" => ListStyle::Circle,
+        "square" => ListStyle::Square,
+        "decimal" => ListStyle::Decimal,
+        "lower-alpha" | "lower-latin" => ListStyle::LowerAlpha,
+        "upper-alpha" | "upper-latin" => ListStyle::UpperAlpha,
+        "lower-roman" => ListStyle::LowerRoman,
+        "none" => ListStyle::None,
+        _ => return None,
+    })
 }
 
 /// Parse the document's author stylesheet by concatenating every `<style>`
@@ -256,6 +301,8 @@ pub fn computed_style(
         color: parent.color,
         text_align: parent.text_align,           // text-align inherits
         white_space_pre: parent.white_space_pre, // white-space inherits
+        list_style: parent.list_style,           // list-style-type inherits
+        text_transform: parent.text_transform,   // text-transform inherits
         ..ComputedStyle::initial()
     };
     apply(&mut cs, &map, parent);
@@ -336,6 +383,21 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     {
         cs.underline = v.split_whitespace().any(|t| t == "underline");
         cs.strike = v.split_whitespace().any(|t| t == "line-through");
+    }
+    if let Some(v) = map
+        .get("list-style-type")
+        .or_else(|| map.get("list-style"))
+        .and_then(|v| v.split_whitespace().find_map(parse_list_style))
+    {
+        cs.list_style = v;
+    }
+    if let Some(v) = map.get("text-transform") {
+        cs.text_transform = match v.as_str() {
+            "uppercase" => TextTransform::Uppercase,
+            "lowercase" => TextTransform::Lowercase,
+            "capitalize" => TextTransform::Capitalize,
+            _ => TextTransform::None,
+        };
     }
 
     let fs = cs.font_size;

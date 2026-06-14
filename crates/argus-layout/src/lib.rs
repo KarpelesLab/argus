@@ -15,7 +15,8 @@
 use argus_dom::{Document, ElementData, NodeData, NodeId};
 use argus_gfx::{Font, RectFill, TextRun};
 use argus_style::{
-    author_stylesheet, computed_style, AuthorStylesheet, ComputedStyle, Display, TextAlign,
+    author_stylesheet, computed_style, AuthorStylesheet, ComputedStyle, Display, ListStyle,
+    TextAlign, TextTransform,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -23,20 +24,72 @@ use std::rc::Rc;
 const LINE_HEIGHT: f32 = 1.2;
 const PAGE_MARGIN: f32 = 8.0;
 
-/// A list container kind, for `<li>` marker generation.
-#[derive(Clone, Copy)]
-enum ListKind {
-    Unordered,
-    Ordered,
+/// A list-item marker: either a glyph string (numbers/letters) or a geometric
+/// bullet drawn as a shape (font-independent, like real browsers).
+enum Marker {
+    Text(String),
+    Disc,
+    Circle,
+    Square,
 }
 
-impl ListKind {
-    fn marker(self, index: u32) -> String {
-        match self {
-            ListKind::Unordered => "\u{2022}".to_string(), // •
-            ListKind::Ordered => format!("{index}."),
+/// The marker for a list item, given its `list-style-type` and 1-based index
+/// among siblings. Returns `None` for `list-style-type: none`.
+fn list_marker(style: ListStyle, index: u32) -> Option<Marker> {
+    Some(match style {
+        ListStyle::Disc => Marker::Disc,
+        ListStyle::Circle => Marker::Circle,
+        ListStyle::Square => Marker::Square,
+        ListStyle::Decimal => Marker::Text(format!("{index}.")),
+        ListStyle::LowerAlpha => Marker::Text(format!("{}.", alpha_marker(index, false))),
+        ListStyle::UpperAlpha => Marker::Text(format!("{}.", alpha_marker(index, true))),
+        ListStyle::LowerRoman => Marker::Text(format!("{}.", roman_marker(index))),
+        ListStyle::None => return None,
+    })
+}
+
+/// Bijective base-26 alphabetic counter: 1→a, 26→z, 27→aa.
+fn alpha_marker(mut n: u32, upper: bool) -> String {
+    let base = if upper { b'A' } else { b'a' };
+    let mut out = Vec::new();
+    while n > 0 {
+        n -= 1;
+        out.push(base + (n % 26) as u8);
+        n /= 26;
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// Lowercase Roman numeral for `n` (falls back to decimal outside 1..=3999).
+fn roman_marker(n: u32) -> String {
+    if n == 0 || n > 3999 {
+        return n.to_string();
+    }
+    const VALS: [(u32, &str); 13] = [
+        (1000, "m"),
+        (900, "cm"),
+        (500, "d"),
+        (400, "cd"),
+        (100, "c"),
+        (90, "xc"),
+        (50, "l"),
+        (40, "xl"),
+        (10, "x"),
+        (9, "ix"),
+        (5, "v"),
+        (4, "iv"),
+        (1, "i"),
+    ];
+    let mut n = n;
+    let mut out = String::new();
+    for (v, s) in VALS {
+        while n >= v {
+            out.push_str(s);
+            n -= v;
         }
     }
+    out
 }
 
 /// A word in an inline formatting context, carrying its own style so spans, links,
@@ -174,7 +227,7 @@ impl Ctx<'_> {
         style: ComputedStyle,
         x: f32,
         avail: f32,
-        marker: Option<String>,
+        marker: Option<Marker>,
     ) {
         let border_box_top = self.cursor_y;
         let border_box_left = x + style.margin.left;
@@ -230,27 +283,50 @@ impl Ctx<'_> {
 
         // A list-item marker sits on the first line, just left of the content.
         if let Some(marker) = &marker {
-            let baseline = self.cursor_y + self.font.ascent_px(style.font_size);
-            let mw = self.font.measure(marker, style.font_size);
-            self.runs.push(TextRun {
-                x: content_left - mw - 8.0,
-                baseline,
-                text: marker.clone(),
-                size_px: style.font_size,
-                color: style.color,
-            });
+            let fs = style.font_size;
+            match marker {
+                Marker::Text(s) => {
+                    let baseline = self.cursor_y + self.font.ascent_px(fs);
+                    let mw = self.font.measure(s, fs);
+                    self.runs.push(TextRun {
+                        x: content_left - mw - 8.0,
+                        baseline,
+                        text: s.clone(),
+                        size_px: fs,
+                        color: style.color,
+                    });
+                }
+                bullet => {
+                    // Geometric bullets are drawn as shapes (font-independent).
+                    let d = (fs * 0.42).max(3.0);
+                    let bx = content_left - d - 10.0;
+                    let by = self.cursor_y + (fs - d) * 0.5;
+                    let round = matches!(bullet, Marker::Disc | Marker::Circle);
+                    self.rects.push(RectFill {
+                        x: bx,
+                        y: by,
+                        w: d,
+                        h: d,
+                        color: style.color,
+                        radius: if round { d * 0.5 } else { 0.0 },
+                    });
+                    if matches!(bullet, Marker::Circle) {
+                        // Punch out the centre so the ring reads as hollow.
+                        let t = (d * 0.22).max(1.0);
+                        self.rects.push(RectFill {
+                            x: bx + t,
+                            y: by + t,
+                            w: d - 2.0 * t,
+                            h: d - 2.0 * t,
+                            color: argus_geometry::Color::WHITE,
+                            radius: (d - 2.0 * t) * 0.5,
+                        });
+                    }
+                }
+            }
         }
 
-        // Is this a list container? Its <li> children get markers.
-        let list_kind = self.doc.node(id).as_element().and_then(|e| {
-            if e.name.is_html("ul") {
-                Some(ListKind::Unordered)
-            } else if e.name.is_html("ol") {
-                Some(ListKind::Ordered)
-            } else {
-                None
-            }
-        });
+        // List items get a marker from their own `list-style-type`, counted 1-based.
         let mut item_index = 0u32;
 
         // Preformatted (`white-space: pre`): emit raw lines, preserving whitespace
@@ -323,12 +399,11 @@ impl Ctx<'_> {
                             Display::Block => {
                                 self.flush_words(&mut words, &style, content_left, content_w);
                                 pending_space = false;
-                                let child_marker = match list_kind {
-                                    Some(kind) if self.is_li(child) => {
-                                        item_index += 1;
-                                        Some(kind.marker(item_index))
-                                    }
-                                    _ => None,
+                                let child_marker = if self.is_li(child) {
+                                    item_index += 1;
+                                    list_marker(cstyle.list_style, item_index)
+                                } else {
+                                    None
                                 };
                                 self.cursor_y += cstyle.margin.top;
                                 self.layout_block(
@@ -674,7 +749,7 @@ impl Ctx<'_> {
                 let mut first = true;
                 for word in t.split_whitespace() {
                     words.push(InlineWord {
-                        text: word.to_string(),
+                        text: transform_text(word, style.text_transform),
                         font_size: style.font_size,
                         color: style.fade(style.color),
                         // Words within a text node are separated by whitespace.
@@ -829,6 +904,22 @@ impl Ctx<'_> {
                 pen_x += word_w;
             }
             self.cursor_y += line_h;
+        }
+    }
+}
+
+/// Apply a `text-transform` to one whitespace-delimited word.
+fn transform_text(word: &str, transform: TextTransform) -> String {
+    match transform {
+        TextTransform::None => word.to_string(),
+        TextTransform::Uppercase => word.to_uppercase(),
+        TextTransform::Lowercase => word.to_lowercase(),
+        TextTransform::Capitalize => {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
         }
     }
 }

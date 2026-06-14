@@ -65,6 +65,13 @@ blue link</a> all flow inside this paragraph with correct spacing.</p>\
 <li>Navigation, tabs, and history</li>\
 <li>More CSS: flexbox, grid, and the long tail</li>\
 </ol>\
+<ol style=\"list-style-type: lower-roman\">\
+<li>Roman one</li><li>Roman two</li><li>Roman three</li>\
+</ol>\
+<ul style=\"list-style-type: square\">\
+<li>Square bullet</li><li>Another square</li>\
+</ul>\
+<p style=\"text-transform: uppercase\">text-transform makes this uppercase.</p>\
 <h3>A table</h3>\
 <table class=\"tbl\"><thead><tr><th>Subsystem</th><th>Crate</th><th>Status</th></tr></thead>\
 <tbody>\
