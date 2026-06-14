@@ -980,7 +980,13 @@ impl Ctx<'_> {
                 0.0
             };
             let ww = self.font.measure(&w.text, w.font_size);
-            if !block.nowrap && i > line_start && pen + space + ww > width {
+            // The first line has less room when `text-indent` is set.
+            let line_width = if line_start == 0 {
+                (width - block.text_indent).max(0.0)
+            } else {
+                width
+            };
+            if !block.nowrap && i > line_start && pen + space + ww > line_width {
                 lines.push(line_start..i);
                 line_start = i;
                 pen = ww;
@@ -1026,9 +1032,15 @@ impl Ctx<'_> {
             };
             let baseline = self.cursor_y + self.font.ascent_px(max_size);
 
+            // `text-indent` shifts the block's first line only.
+            let indent = if line_idx == 0 {
+                block.text_indent
+            } else {
+                0.0
+            };
             let line_top = self.cursor_y;
             let line_h = max_size * block.line_height;
-            let mut pen_x = x + offset;
+            let mut pen_x = x + offset + indent;
             for (j, w) in line.iter().enumerate() {
                 // The <br> sentinel only contributes line height, no glyphs.
                 if w.text.is_empty() {
@@ -1182,6 +1194,35 @@ mod tests {
         assert!(
             up < base,
             "superscript {up} should sit above baseline {base}"
+        );
+    }
+
+    #[test]
+    fn text_indent_shifts_first_line_only() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let doc = parse(
+            "<p style=\"text-indent: 40px\">one two three four five six seven eight \
+             nine ten eleven twelve thirteen fourteen fifteen</p>",
+        );
+        let l = layout(&doc, &font, 200.0, &ImageSizes::new());
+        let mut by_line: std::collections::BTreeMap<i32, f32> = std::collections::BTreeMap::new();
+        for r in &l.runs {
+            let y = r.baseline as i32;
+            by_line.entry(y).or_insert(f32::INFINITY);
+            let e = by_line.get_mut(&y).unwrap();
+            *e = e.min(r.x);
+        }
+        let xs: Vec<f32> = by_line.values().copied().collect();
+        assert!(xs.len() >= 2, "paragraph should wrap to multiple lines");
+        // First line starts ~40px further right than the second line.
+        assert!(
+            (xs[0] - xs[1] - 40.0).abs() < 1.0,
+            "indent: {} vs {}",
+            xs[0],
+            xs[1]
         );
     }
 
