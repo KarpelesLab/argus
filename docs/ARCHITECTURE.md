@@ -66,9 +66,16 @@ lower layers.** This is the load-bearing architectural constraint.
 
 | Crate | Responsibility |
 |-------|----------------|
-| `argus-text` | OpenType/TrueType parsing, shaping, bidi, line breaking, glyph outlines |
-| `argus-gfx` | paths, fills/strokes, the CPU rasterizer, image buffers, blending |
-| `argus-image` | image format decoders (PNG/JPEG/GIF/WebP/AVIF via the media stack) |
+| `argus-text` | text shaping, bidi, line breaking, font metrics — wraps **`oxideav-scribe`** |
+| `argus-gfx` | paths, fills, the CPU rasterizer, glyph/run rendering — wraps **`oxideav-raster`** over `oxideav-core` scenes |
+| `argus-image` | image format decoders (PNG/JPEG/GIF/WebP/AVIF) — via the **oxideav** codecs |
+
+> Text and 2D rasterization reuse the first-party **oxideav** graphics stack
+> (`oxideav-scribe` shaping, `oxideav-raster` rendering, `oxideav-core` scene model)
+> rather than being hand-written. This is consistent with "in-house, OS-thin": they
+> are first-party pure-Rust crates. `argus-text`/`argus-gfx` are thin Argus-facing
+> wrappers. (Initially `argus-text`/`argus-gfx` are a single `argus-gfx` crate;
+> they split when the text layer grows.)
 
 ### Layer 2 — Engine core (the web platform)
 

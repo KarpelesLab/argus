@@ -44,11 +44,12 @@ involved subsystem.
 
 ## Design decisions
 
-1. **In-house text from the metal up.** Per the project's pure-Rust ethos,
-   `argus-text` parses font files, shapes, does bidi and line breaking itself
-   rather than binding HarfBuzz/ICU/FreeType. This is a large effort and is
-   sequenced deliberately (Latin/LTR first; complex-script shaping and full bidi
-   later).
+1. **Text via the first-party oxideav stack.** `argus-text` wraps
+   **`oxideav-scribe`** (pure-Rust TTF/OTF parsing, shaping, bidi, line wrapping,
+   glyph outlines) rather than binding HarfBuzz/ICU/FreeType or hand-writing it.
+   Still consistent with the pure-Rust ethos — scribe is first-party. Glyph outlines
+   feed `argus-gfx`/`oxideav-raster` for rendering. Latin/LTR is solid today;
+   complex-script and full bidi ride on scribe's coverage.
 2. **Fragment tree as a hard boundary.** Layout's only output is fragments. Paint
    and hit testing read fragments and never re-derive geometry — this keeps paint
    simple and the eventual GPU compositor decoupled from CSS semantics.

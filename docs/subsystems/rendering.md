@@ -29,11 +29,13 @@ opacity/blend/filter). It also builds the **hit-test tree** used by
 process boundary to the compositor — it carries no DOM or CSS, just drawing.
 
 ### 2. Raster — `argus-gfx`
-An in-house 2D rasterizer: anti-aliased path filling (scanline/coverage with
-nonzero & even-odd), stroking, gradients, image sampling with filtering, clipping,
-group opacity/blend modes, and glyph rendering (rasterizing outlines from
-`argus-text`, with a glyph atlas cache). Renders a display list (or a layer's
-slice of it) into an RGBA bitmap. Tiling allows multi-threaded raster.
+A 2D rasterizer built on the first-party **`oxideav-raster`** kernel (anti-aliased
+scanline fills with nonzero/even-odd, gradients, blend modes, compositing) over the
+**`oxideav-core`** scene model, with glyph runs shaped by **`oxideav-scribe`** (via
+`argus-text`). `argus-gfx` translates a display list / fragment paint into an
+`oxideav` `VectorFrame` and rasterizes to an RGBA bitmap. Determinism and the stable
+paint API are unchanged; we just don't hand-write the rasterizer. See the
+`oxideav-graphics-stack` decision.
 
 ### 3. Composite — `argus-compositor`
 Assembles layer bitmaps into the final window surface (or off-screen buffer for
