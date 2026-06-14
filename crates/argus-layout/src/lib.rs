@@ -446,33 +446,48 @@ impl Ctx<'_> {
             // style); block-level children flush the line box and lay out separately.
             let mut words: Vec<InlineWord> = Vec::new();
             let mut pending_space = false;
-            // `<input>` has no children: render its `value` (or `placeholder`) text.
+            // Form controls render synthesized text: a text `<input>`'s value (or
+            // grey placeholder) or a `<select>`'s selected option. Checkbox/radio
+            // render no text (a checked mark is drawn after the box).
             if let Some(e) = self.doc.node(id).as_element() {
-                if e.name.is_html("input") {
-                    let placeholder = e.attr("value").map(|v| v.is_empty()).unwrap_or(true);
-                    let text = e
-                        .attr("value")
-                        .filter(|v| !v.is_empty())
-                        .or_else(|| e.attr("placeholder"))
-                        .unwrap_or("");
-                    let color = if placeholder {
-                        argus_geometry::Color::rgb(0x80, 0x80, 0x80)
+                let (text, placeholder) = if e.name.is_html("input") {
+                    let ty = e.attr("type").unwrap_or("text");
+                    if matches!(ty, "checkbox" | "radio") {
+                        (String::new(), false)
                     } else {
-                        style.fade(style.color)
-                    };
-                    for (i, word) in text.split_whitespace().enumerate() {
-                        words.push(InlineWord {
-                            text: word.to_string(),
-                            font_size: style.font_size,
-                            color,
-                            space_before: i > 0,
-                            underline: false,
-                            strike: false,
-                            href: None,
-                            hard_break: false,
-                            baseline_shift: 0.0,
-                        });
+                        match e.attr("value").filter(|v| !v.is_empty()) {
+                            Some(v) => (v.to_string(), false),
+                            None => (e.attr("placeholder").unwrap_or("").to_string(), true),
+                        }
                     }
+                } else if e.name.is_html("select") {
+                    (self.selected_option_text(id), false)
+                } else {
+                    (String::new(), false)
+                };
+                let color = if placeholder {
+                    argus_geometry::Color::rgb(0x80, 0x80, 0x80)
+                } else {
+                    style.fade(style.color)
+                };
+                for (i, word) in text.split_whitespace().enumerate() {
+                    words.push(InlineWord {
+                        text: word.to_string(),
+                        font_size: style.font_size,
+                        color,
+                        space_before: i > 0,
+                        underline: false,
+                        strike: false,
+                        href: None,
+                        hard_break: false,
+                        baseline_shift: 0.0,
+                    });
+                }
+                // Checkbox/radio have no content, so give them a square content box.
+                if e.name.is_html("input")
+                    && matches!(e.attr("type"), Some("checkbox") | Some("radio"))
+                {
+                    self.cursor_y += content_w.max(8.0);
                 }
             }
             for child in self.doc.children(id) {
@@ -600,6 +615,31 @@ impl Ctx<'_> {
             );
         }
 
+        // A checked checkbox/radio: fill the inner box with the text color.
+        if let Some(e) = self.doc.node(id).as_element() {
+            let ty = e.attr("type").unwrap_or("");
+            if e.name.is_html("input")
+                && matches!(ty, "checkbox" | "radio")
+                && e.attr("checked").is_some()
+                && !style.hidden
+            {
+                let inset = 3.0;
+                let radius = if ty == "radio" {
+                    (border_box_w - 2.0 * inset) * 0.5
+                } else {
+                    0.0
+                };
+                self.rects.push(RectFill {
+                    x: border_box_left + inset,
+                    y: border_box_top + inset,
+                    w: (border_box_w - 2.0 * inset).max(0.0),
+                    h: (border_box_h - 2.0 * inset).max(0.0),
+                    color: style.color,
+                    radius,
+                });
+            }
+        }
+
         // `outline`: four rects just outside the border box (no layout effect).
         if style.outline_width > 0.0 && style.outline_color.a > 0 && !style.hidden {
             let ow = style.outline_width;
@@ -696,6 +736,46 @@ impl Ctx<'_> {
 
     fn is_li(&self, id: NodeId) -> bool {
         matches!(&self.doc.node(id).data, NodeData::Element(e) if e.name.is_html("li"))
+    }
+
+    /// The text of a `<select>`'s selected `<option>` (the one with a `selected`
+    /// attribute, else the first option).
+    fn selected_option_text(&self, select: NodeId) -> String {
+        let mut first: Option<NodeId> = None;
+        fn walk(doc: &Document, id: NodeId, first: &mut Option<NodeId>) -> Option<NodeId> {
+            for c in doc.children(id) {
+                if let NodeData::Element(e) = &doc.node(c).data {
+                    if e.name.is_html("option") {
+                        if first.is_none() {
+                            *first = Some(c);
+                        }
+                        if e.attr("selected").is_some() {
+                            return Some(c);
+                        }
+                    }
+                }
+                if let Some(found) = walk(doc, c, first) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        let chosen = walk(self.doc, select, &mut first).or(first);
+        let mut text = String::new();
+        if let Some(opt) = chosen {
+            fn collect(doc: &Document, id: NodeId, out: &mut String) {
+                match &doc.node(id).data {
+                    NodeData::Text(t) => out.push_str(t),
+                    _ => {
+                        for c in doc.children(id) {
+                            collect(doc, c, out);
+                        }
+                    }
+                }
+            }
+            collect(self.doc, opt, &mut text);
+        }
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
     /// Lay out a `display: flex` container: block-level children are placed in a
@@ -1316,6 +1396,34 @@ mod tests {
         assert!(
             l.rects.iter().filter(|r| r.w > 0.0 && r.h > 0.0).count() >= 3,
             "expected boxes for the fields"
+        );
+    }
+
+    #[test]
+    fn select_shows_selected_option_and_checkbox_checks() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let doc = parse(
+            "<select><option>Alpha</option><option selected>Beta</option><option>Gamma</option></select>\
+             <input type=checkbox checked><input type=checkbox>",
+        );
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let texts: Vec<&str> = l.runs.iter().map(|r| r.text.as_str()).collect();
+        // Only the selected option renders; the others (display:none) do not.
+        assert!(texts.contains(&"Beta"), "selected option: {texts:?}");
+        assert!(
+            !texts.contains(&"Alpha") && !texts.contains(&"Gamma"),
+            "others hidden: {texts:?}"
+        );
+        // A checked checkbox adds an inner fill rect; the unchecked one does not —
+        // so there is at least one small filled mark.
+        assert!(
+            l.rects
+                .iter()
+                .any(|r| r.w > 2.0 && r.w < 16.0 && r.h > 2.0 && r.h < 16.0),
+            "checked checkbox should draw a small mark"
         );
     }
 

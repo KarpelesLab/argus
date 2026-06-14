@@ -257,6 +257,9 @@ input, textarea, select { display: block; border: 1px solid #999; background: #f
   padding: 4px 6px; width: 220px; margin: 4px 0; white-space: nowrap }
 button { display: block; border: 1px solid #888; background: #e8e8e8; padding: 4px 12px; \
   width: 120px; text-align: center; margin: 4px 0; border-radius: 4px }
+option { display: none }
+input[type=checkbox], input[type=radio] { width: 14px; padding: 1px; margin: 4px 6px 4px 0 }
+input[type=radio] { border-radius: 8px }
 ";
 
 fn ua_stylesheet() -> &'static Stylesheet {

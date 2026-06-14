@@ -54,6 +54,10 @@ all inside a sandboxed content process.</p>\
 <p>clicked <strong id=\"counter\">0</strong> times (try it in the window).</p>\
 <input value=\"an editable text field\">\
 <input placeholder=\"...or a grey placeholder\">\
+<select><option>First choice</option><option selected>Selected choice (rendered)</option></select>\
+<input type=\"checkbox\" checked>\
+<input type=\"checkbox\">\
+<input type=\"radio\" checked>\
 <button>A button</button>\
 </div>\
 <h2>Box model &amp; images</h2>\
