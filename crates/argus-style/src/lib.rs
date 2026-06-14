@@ -134,6 +134,8 @@ pub struct ComputedStyle {
     pub opacity: f32,
     /// `white-space: pre*` — preserve whitespace and honor newlines (inherited).
     pub white_space_pre: bool,
+    /// `white-space: nowrap`/`pre` — suppress automatic line wrapping (inherited).
+    pub nowrap: bool,
     /// `list-style-type` for list items (inherited).
     pub list_style: ListStyle,
     /// `text-transform` case mapping (inherited).
@@ -180,6 +182,7 @@ impl ComputedStyle {
             border_radius: 0.0,
             opacity: 1.0,
             white_space_pre: false,
+            nowrap: false,
             list_style: ListStyle::Disc,
             text_transform: TextTransform::None,
             box_sizing: BoxSizing::ContentBox,
@@ -360,6 +363,7 @@ pub fn computed_style(
         color: parent.color,
         text_align: parent.text_align,           // text-align inherits
         white_space_pre: parent.white_space_pre, // white-space inherits
+        nowrap: parent.nowrap,                   // white-space inherits
         list_style: parent.list_style,           // list-style-type inherits
         text_transform: parent.text_transform,   // text-transform inherits
         line_height: parent.line_height,         // line-height inherits
@@ -609,6 +613,8 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             ws.as_str(),
             "pre" | "pre-wrap" | "pre-line" | "break-spaces"
         );
+        // `nowrap` and `pre` both suppress automatic wrapping.
+        cs.nowrap = matches!(ws.as_str(), "nowrap" | "pre");
     }
 }
 

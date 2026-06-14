@@ -957,7 +957,7 @@ impl Ctx<'_> {
                 0.0
             };
             let ww = self.font.measure(&w.text, w.font_size);
-            if i > line_start && pen + space + ww > width {
+            if !block.nowrap && i > line_start && pen + space + ww > width {
                 lines.push(line_start..i);
                 line_start = i;
                 pen = ww;
@@ -1159,6 +1159,32 @@ mod tests {
         assert!(
             up < base,
             "superscript {up} should sit above baseline {base}"
+        );
+    }
+
+    #[test]
+    fn nowrap_keeps_text_on_one_line() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let line_count = |css: &str| -> usize {
+            let html = format!(
+                "<p style=\"{css}\">one two three four five six seven eight nine ten \
+                 eleven twelve thirteen fourteen fifteen sixteen seventeen</p>"
+            );
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 160.0, &ImageSizes::new());
+            let mut ys: Vec<i32> = l.runs.iter().map(|r| r.baseline as i32).collect();
+            ys.sort_unstable();
+            ys.dedup();
+            ys.len()
+        };
+        assert!(line_count("") > 1, "default text should wrap");
+        assert_eq!(
+            line_count("white-space: nowrap"),
+            1,
+            "nowrap stays on one line"
         );
     }
 
