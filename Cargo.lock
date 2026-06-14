@@ -95,6 +95,7 @@ dependencies = [
 name = "argus-image"
 version = "0.0.0"
 dependencies = [
+ "oxideav-gif",
  "oxideav-png",
 ]
 
@@ -555,6 +556,15 @@ dependencies = [
  "bytemuck",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "oxideav-gif"
+version = "0.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73f2d324fc3bbff4cd4456fec2d418812f9fd355e31b813b0395942893422b34"
+dependencies = [
+ "oxideav-core",
 ]
 
 [[package]]

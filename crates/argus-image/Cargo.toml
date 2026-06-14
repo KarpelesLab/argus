@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 oxideav-png = "0.1"
+oxideav-gif = "0.0"
 
 [lints]
 workspace = true

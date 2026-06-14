@@ -24,8 +24,19 @@ pub fn decode(bytes: &[u8]) -> Option<DecodedImage> {
             rgba: bmp.data,
         });
     }
-    // Other signatures (JPEG FF D8, GIF, RIFF/WEBP, …) decode here as the codecs
-    // are added.
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        // Decode and compose the first frame to RGBA (lenient on minor spec quirks).
+        let img = oxideav_gif::decode(bytes)
+            .or_else(|_| oxideav_gif::decode_lenient(bytes))
+            .ok()?;
+        let frame = oxideav_gif::compose(&img).ok()?.into_iter().next()?;
+        return Some(DecodedImage {
+            width: frame.canvas.width as u32,
+            height: frame.canvas.height as u32,
+            rgba: frame.canvas.pixels,
+        });
+    }
+    // JPEG (FF D8) and WebP (RIFF…WEBP) decode here as those codecs are wired in.
     None
 }
 
@@ -87,6 +98,16 @@ mod tests {
     #[test]
     fn rejects_non_png() {
         assert!(decode(b"not an image").is_none());
+    }
+
+    #[test]
+    fn decodes_a_gif() {
+        // Minimal 1x1 red GIF (GIF87a).
+        let url = "data:image/gif;base64,R0lGODdhAQABAIAAAP8AAAAA/ywAAAAAAQABAAACAkQBADs=";
+        let img = decode_data_url(url).expect("decode gif");
+        assert_eq!((img.width, img.height), (1, 1));
+        assert_eq!(img.rgba.len(), 4);
+        assert_eq!(img.rgba[3], 255); // opaque
     }
 
     #[test]
