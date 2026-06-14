@@ -18,6 +18,8 @@ argus-ipc = { path = "crates/argus-ipc" }
 argus-protocol = { path = "crates/argus-protocol" }
 argus-platform = { path = "crates/argus-platform" }
 argus-compositor = { path = "crates/argus-compositor" }
+argus-dom = { path = "crates/argus-dom" }
+argus-html = { path = "crates/argus-html" }
 argus-browser = { path = "crates/argus-browser" }
 argus-content = { path = "crates/argus-content" }
 argus-services = { path = "crates/argus-services" }
