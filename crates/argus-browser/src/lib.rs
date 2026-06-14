@@ -21,11 +21,12 @@ const SAMPLE_IMAGE: &str = include_str!("../sample_image.txt");
 pub fn sample_html() -> String {
     format!(
         "<!DOCTYPE html><html><head><title>Argus</title><style>\
-body {{ background-color: #f4f6fb; color: #1c2430 }}\
-h1 {{ color: #2e86de; text-align: center }}\
+:root {{ --accent: #2e86de; --ink: #1c2430 }}\
+body {{ background-color: #f4f6fb; color: var(--ink) }}\
+h1 {{ color: var(--accent); text-align: center }}\
 h2 {{ color: #444 }}\
 .card {{ background-color: #ffffff; border: 1px solid #d0d7e2; padding: 16px; margin: 12px 0; border-radius: 10px }}\
-.pill {{ background-color: #2e86de; color: #ffffff; padding: 6px 14px; border-radius: 14px; width: 180px; text-align: center; margin: 8px 0 }}\
+.pill {{ background-color: var(--accent); color: #ffffff; padding: 6px 14px; border-radius: 14px; width: 180px; text-align: center; margin: 8px 0 }}\
 .note {{ background-color: #fff3cd; color: #5a4b00; border: 1px solid #f0d000; padding: 12px }}\
 .brand {{ color: #c0392b }}\
 .center {{ text-align: center }}\

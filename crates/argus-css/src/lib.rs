@@ -62,7 +62,108 @@ pub fn parse_stylesheet(css: &str) -> Stylesheet {
     let tokens = tokenizer::tokenize(css);
     let mut rules = Vec::new();
     parse_rules_into(&tokens, None, &mut rules);
-    Stylesheet { rules }
+    let mut sheet = Stylesheet { rules };
+    resolve_custom_properties(&mut sheet);
+    sheet
+}
+
+/// Resolve CSS custom properties (`--name`) and substitute `var(--name, fallback)`
+/// references in all declaration values. Variables are gathered globally
+/// (last declaration wins) — an approximation of `:root`-scoped design tokens that
+/// covers the common case without per-element inheritance.
+fn resolve_custom_properties(sheet: &mut Stylesheet) {
+    use std::collections::HashMap;
+    // Gather, in source order, every custom property declaration.
+    let mut vars: HashMap<String, String> = HashMap::new();
+    let mut any = false;
+    for rule in &sheet.rules {
+        for d in &rule.declarations {
+            if d.name.starts_with("--") {
+                vars.insert(d.name.clone(), d.value.clone());
+                any = true;
+            }
+        }
+    }
+    if !any {
+        return;
+    }
+    // Resolve variables that reference other variables (bounded passes).
+    for _ in 0..10 {
+        let snapshot = vars.clone();
+        let mut changed = false;
+        for v in vars.values_mut() {
+            if v.contains("var(") {
+                let resolved = substitute_vars(v, &snapshot, 0);
+                if resolved != *v {
+                    *v = resolved;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    // Substitute into every non-custom declaration value.
+    for rule in &mut sheet.rules {
+        for d in &mut rule.declarations {
+            if !d.name.starts_with("--") && d.value.contains("var(") {
+                d.value = substitute_vars(&d.value, &vars, 0);
+            }
+        }
+    }
+}
+
+/// Replace `var(--name)` / `var(--name, fallback)` occurrences in `value`.
+fn substitute_vars(
+    value: &str,
+    vars: &std::collections::HashMap<String, String>,
+    depth: u32,
+) -> String {
+    if depth > 16 {
+        return value.to_string();
+    }
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(pos) = rest.find("var(") {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos + 4..];
+        // Find the matching ')' for this var( accounting for nested parens.
+        let mut depth_p = 1;
+        let mut end = None;
+        for (k, ch) in after.char_indices() {
+            match ch {
+                '(' => depth_p += 1,
+                ')' => {
+                    depth_p -= 1;
+                    if depth_p == 0 {
+                        end = Some(k);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            // Unbalanced — emit the rest verbatim and stop.
+            out.push_str(rest);
+            return out;
+        };
+        let inner = &after[..end];
+        let (name, fallback) = match inner.split_once(',') {
+            Some((n, f)) => (n.trim(), Some(f.trim())),
+            None => (inner.trim(), None),
+        };
+        let replacement = match vars.get(name) {
+            Some(v) => v.clone(),
+            None => fallback.unwrap_or("").to_string(),
+        };
+        // Resolve nested var() inside the replacement/fallback.
+        out.push_str(&substitute_vars(&replacement, vars, depth + 1));
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Parse qualified rules from `tokens`, tagging each with `media` (the enclosing
@@ -337,6 +438,29 @@ mod tests {
         assert_eq!(p.declarations[0].value, "red");
         let h1 = sheet.rules.iter().find(|r| r.media.is_none()).unwrap();
         assert_eq!(h1.declarations[0].value, "blue");
+    }
+
+    #[test]
+    fn custom_properties_substitution() {
+        let css = ":root { --brand: #ff0000; --pad: 8px; --accent: var(--brand) }\
+                   .a { color: var(--brand); padding: var(--pad) }\
+                   .b { color: var(--missing, #00ff00); border-color: var(--accent) }";
+        let sheet = parse_stylesheet(css);
+        let decl = |sel_idx: usize, name: &str| -> String {
+            sheet.rules[sel_idx]
+                .declarations
+                .iter()
+                .find(|d| d.name == name)
+                .map(|d| d.value.clone())
+                .unwrap_or_default()
+        };
+        // .a is the second rule (index 1).
+        assert_eq!(decl(1, "color"), "#ff0000");
+        assert_eq!(decl(1, "padding"), "8px");
+        // Fallback used when the variable is undefined.
+        assert_eq!(decl(2, "color"), "#00ff00");
+        // Variable referencing another variable resolves transitively.
+        assert_eq!(decl(2, "border-color"), "#ff0000");
     }
 
     #[test]
