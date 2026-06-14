@@ -1,0 +1,20 @@
+[package]
+name = "argus-gfx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+argus-geometry.workspace = true
+oxideav-scribe = "0.1"
+oxideav-raster = "0.1"
+oxideav-core = "0.1"
+
+[dev-dependencies]
+oxideav-png = "0.1"
+
+[lints]
+workspace = true
