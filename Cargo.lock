@@ -53,6 +53,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus-css"
+version = "0.0.0"
+dependencies = [
+ "argus-dom",
+ "argus-geometry",
+]
+
+[[package]]
 name = "argus-dom"
 version = "0.0.0"
 

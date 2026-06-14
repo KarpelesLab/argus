@@ -1,0 +1,15 @@
+[package]
+name = "argus-css"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+argus-dom.workspace = true
+argus-geometry.workspace = true
+
+[lints]
+workspace = true
