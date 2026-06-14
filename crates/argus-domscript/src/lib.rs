@@ -63,6 +63,13 @@ function __argus_el(tgt) {
           return child;
         };
       }
+      if (k === "insertBefore") {
+        return function(child, ref) {
+          __argus_ops.push({op: "insertBefore", tgt: tgt,
+            child: child ? child.__tgt : null, ref: ref ? ref.__tgt : null});
+          return child;
+        };
+      }
       if (k === "remove") {
         return function() { __argus_ops.push({op: "remove", tgt: tgt}); };
       }
@@ -249,6 +256,14 @@ fn apply_ops(doc: &mut Document, json: &str) {
             "append" => {
                 if let Some(child) = resolve_target(doc, &created, get("child")) {
                     doc.append(node, child);
+                }
+            }
+            "insertBefore" => {
+                if let Some(child) = resolve_target(doc, &created, get("child")) {
+                    match resolve_target(doc, &created, get("ref")) {
+                        Some(reference) => doc.insert_before(reference, child),
+                        None => doc.append(node, child),
+                    }
                 }
             }
             _ => {}
@@ -820,6 +835,35 @@ mod tests {
         // Only the .x inside #b is changed; the one in #a is untouched.
         assert_eq!(text_of(&doc, "bx"), "hit");
         assert_eq!(text_of(&doc, "ax"), "1");
+    }
+
+    #[test]
+    fn insert_before_orders_children() {
+        let mut doc = argus_html::parse(
+            "<ul id=\"l\"><li id=\"ref\">existing</li></ul>\
+             <script>\
+               var li = document.createElement('li');\
+               li.textContent = 'inserted';\
+               li.setAttribute('id', 'ins');\
+               document.getElementById('l').insertBefore(li, document.getElementById('ref'));\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        let list = find_by_id(&doc, "l").unwrap();
+        let order: Vec<String> = doc
+            .children(list)
+            .filter_map(|c| {
+                doc.node(c)
+                    .as_element()
+                    .and_then(|e| e.attr("id"))
+                    .map(String::from)
+            })
+            .collect();
+        assert_eq!(
+            order,
+            vec!["ins", "ref"],
+            "inserted node should precede ref"
+        );
     }
 
     #[test]
