@@ -311,7 +311,8 @@ impl Ctx<'_> {
             + style.border.right;
 
         // Reserve background + border rect slots up front so ancestors paint first.
-        let bg_idx = (style.background_color.a > 0).then(|| {
+        // `visibility: hidden` keeps the box's geometry but paints no ink.
+        let bg_idx = (style.background_color.a > 0 && !style.hidden).then(|| {
             self.rects.push(RectFill {
                 x: border_box_left,
                 y: border_box_top,
@@ -323,6 +324,7 @@ impl Ctx<'_> {
             self.rects.len() - 1
         });
         let has_border = style.border_color.a > 0
+            && !style.hidden
             && (style.border.top + style.border.right + style.border.bottom + style.border.left)
                 > 0.0;
         let border_idx = has_border.then(|| {
@@ -343,7 +345,7 @@ impl Ctx<'_> {
         self.cursor_y += style.border.top + style.padding.top;
 
         // A list-item marker sits on the first line, just left of the content.
-        if let Some(marker) = &marker {
+        if let Some(marker) = marker.as_ref().filter(|_| !style.hidden) {
             let fs = style.font_size;
             match marker {
                 Marker::Text(s) => {
@@ -402,7 +404,11 @@ impl Ctx<'_> {
                     baseline,
                     text: line.to_string(),
                     size_px: style.font_size,
-                    color: style.fade(style.color),
+                    color: if style.hidden {
+                        argus_geometry::Color::TRANSPARENT
+                    } else {
+                        style.fade(style.color)
+                    },
                 });
                 self.cursor_y += style.font_size * style.line_height;
             }
@@ -419,7 +425,7 @@ impl Ctx<'_> {
                     NodeData::Element(e) if e.name.is_html("img") => {
                         self.flush_words(&mut words, &style, content_left, content_w);
                         pending_space = false;
-                        self.place_image(e, content_left, content_w);
+                        self.place_image(e, content_left, content_w, style.hidden);
                     }
                     NodeData::Element(e) if e.name.is_html("hr") => {
                         self.flush_words(&mut words, &style, content_left, content_w);
@@ -567,7 +573,7 @@ impl Ctx<'_> {
     }
 
     /// Place an `<img>` as a block-level replaced box on its own line.
-    fn place_image(&mut self, e: &ElementData, x: f32, avail: f32) {
+    fn place_image(&mut self, e: &ElementData, x: f32, avail: f32, hidden: bool) {
         let Some(src) = e.attr("src") else { return };
         let (iw, ih) = self.image_sizes.get(src).copied().unwrap_or((0, 0));
 
@@ -586,13 +592,16 @@ impl Ctx<'_> {
             h = if iw == 0 { 0.0 } else { ih as f32 };
         }
         if w > 0.0 && h > 0.0 {
-            self.images.push(ImageBox {
-                x,
-                y: self.cursor_y,
-                w,
-                h,
-                src: src.to_string(),
-            });
+            // `visibility: hidden` reserves the image's box but paints nothing.
+            if !hidden {
+                self.images.push(ImageBox {
+                    x,
+                    y: self.cursor_y,
+                    w,
+                    h,
+                    src: src.to_string(),
+                });
+            }
             self.cursor_y += h;
         }
     }
@@ -854,17 +863,23 @@ impl Ctx<'_> {
                     VerticalAlign::Super => -style.font_size * 0.4,
                     VerticalAlign::Baseline => 0.0,
                 };
+                // `visibility: hidden` keeps the words' space but paints nothing.
+                let color = if style.hidden {
+                    argus_geometry::Color::TRANSPARENT
+                } else {
+                    style.fade(style.color)
+                };
                 let mut first = true;
                 for word in t.split_whitespace() {
                     words.push(InlineWord {
                         text: transform_text(word, style.text_transform),
                         font_size: style.font_size,
-                        color: style.fade(style.color),
+                        color,
                         // Words within a text node are separated by whitespace.
                         space_before: *pending_space || !first,
-                        underline: style.underline,
-                        strike: style.strike,
-                        href: link.clone(),
+                        underline: style.underline && !style.hidden,
+                        strike: style.strike && !style.hidden,
+                        href: if style.hidden { None } else { link.clone() },
                         hard_break: false,
                         baseline_shift: shift,
                     });
@@ -1213,6 +1228,47 @@ mod tests {
             double > single * 1.6,
             "line-height:2 gap {double} should far exceed line-height:1 gap {single}"
         );
+    }
+
+    #[test]
+    fn visibility_hidden_keeps_space_but_no_ink() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A hidden paragraph with a background paints no rect and no visible runs,
+        // but a visible child still shows and the following block keeps its position.
+        let html = "<p style=\"visibility:hidden; background-color:#ff0000\">hidden \
+                    <span style=\"visibility:visible\">shown</span></p><p>after</p>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        // No red background rect from the hidden paragraph.
+        assert!(
+            !l.rects
+                .iter()
+                .any(|r| r.color.r == 255 && r.color.g == 0 && r.color.a > 0),
+            "hidden bg should not paint"
+        );
+        // The hidden words are transparent; the visible child and "after" are opaque.
+        let opaque: Vec<&str> = l
+            .runs
+            .iter()
+            .filter(|r| r.color.a > 0)
+            .map(|r| r.text.as_str())
+            .collect();
+        assert!(opaque.contains(&"shown"), "visible child shows: {opaque:?}");
+        assert!(
+            opaque.contains(&"after"),
+            "following block shows: {opaque:?}"
+        );
+        assert!(
+            !opaque.contains(&"hidden"),
+            "hidden word painted: {opaque:?}"
+        );
+        // "after" still sits below the (space-reserving) hidden paragraph.
+        let y_after = l.runs.iter().find(|r| r.text == "after").unwrap().baseline;
+        let y_shown = l.runs.iter().find(|r| r.text == "shown").unwrap().baseline;
+        assert!(y_after > y_shown, "after should be below the hidden block");
     }
 
     #[test]

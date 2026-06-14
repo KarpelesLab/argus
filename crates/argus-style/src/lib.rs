@@ -146,6 +146,9 @@ pub struct ComputedStyle {
     pub vertical_align: VerticalAlign,
     /// `gap` between flex/grid items in pixels (not inherited).
     pub gap: f32,
+    /// `visibility: hidden` — the box keeps its space but paints nothing
+    /// (inherited; a descendant may set `visibility: visible` to reappear).
+    pub hidden: bool,
     /// `position` and its inset offsets (resolved during layout; not inherited).
     pub position: Position,
     pub inset_top: Option<Length>,
@@ -183,6 +186,7 @@ impl ComputedStyle {
             line_height: 1.2,
             vertical_align: VerticalAlign::Baseline,
             gap: 0.0,
+            hidden: false,
             position: Position::Static,
             inset_top: None,
             inset_right: None,
@@ -359,6 +363,7 @@ pub fn computed_style(
         list_style: parent.list_style,           // list-style-type inherits
         text_transform: parent.text_transform,   // text-transform inherits
         line_height: parent.line_height,         // line-height inherits
+        hidden: parent.hidden,                   // visibility inherits
         ..ComputedStyle::initial()
     };
     apply(&mut cs, &map, parent);
@@ -478,6 +483,9 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             "super" => VerticalAlign::Super,
             _ => VerticalAlign::Baseline,
         };
+    }
+    if let Some(v) = map.get("visibility") {
+        cs.hidden = matches!(v.as_str(), "hidden" | "collapse");
     }
     if let Some(v) = map.get("position") {
         // Only `relative` is honored; absolute/fixed/sticky fall back to static.
