@@ -132,6 +132,8 @@ pub struct ComputedStyle {
     pub line_height: f32,
     /// `vertical-align` for inline content (not inherited).
     pub vertical_align: VerticalAlign,
+    /// `gap` between flex/grid items in pixels (not inherited).
+    pub gap: f32,
 }
 
 impl ComputedStyle {
@@ -160,6 +162,7 @@ impl ComputedStyle {
             box_sizing: BoxSizing::ContentBox,
             line_height: 1.2,
             vertical_align: VerticalAlign::Baseline,
+            gap: 0.0,
         }
     }
 
@@ -432,6 +435,16 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             "border-box" => BoxSizing::BorderBox,
             _ => BoxSizing::ContentBox,
         };
+    }
+    if let Some(px) = map
+        .get("gap")
+        .or_else(|| map.get("column-gap"))
+        .or_else(|| map.get("grid-gap"))
+        .and_then(|v| v.split_whitespace().next())
+        .and_then(parse_length)
+        .map(|l| l.to_px(cs.font_size, 0.0))
+    {
+        cs.gap = px.max(0.0);
     }
     if let Some(v) = map.get("vertical-align") {
         cs.vertical_align = match v.as_str() {

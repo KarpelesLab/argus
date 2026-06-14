@@ -578,12 +578,15 @@ impl Ctx<'_> {
 
         self.cursor_y += style.border.top + style.padding.top;
         let row_top = self.cursor_y;
-        let item_w = content_w / items.len() as f32;
+        let n = items.len() as f32;
+        let total_gap = style.gap * (n - 1.0);
+        let item_w = ((content_w - total_gap) / n).max(0.0);
         let mut max_h = 0.0f32;
         for (i, &item) in items.iter().enumerate() {
             self.cursor_y = row_top;
             let istyle = computed_style(self.doc, item, &style, self.author);
-            self.layout_block(item, istyle, content_left + i as f32 * item_w, item_w, None);
+            let item_x = content_left + i as f32 * (item_w + style.gap);
+            self.layout_block(item, istyle, item_x, item_w, None);
             max_h = max_h.max(self.cursor_y - row_top);
         }
         self.cursor_y = row_top + max_h + style.padding.bottom + style.border.bottom;
@@ -643,9 +646,15 @@ impl Ctx<'_> {
         });
 
         self.cursor_y += style.border.top + style.padding.top;
-        let col_w = content_w / cols as f32;
+        let col_w =
+            ((content_w - style.gap * (cols.saturating_sub(1)) as f32) / cols as f32).max(0.0);
         let mut idx = 0;
+        let mut first_row = true;
         while idx < items.len() {
+            if !first_row {
+                self.cursor_y += style.gap; // row gap
+            }
+            first_row = false;
             let row_top = self.cursor_y;
             let mut max_h = 0.0f32;
             for c in 0..cols {
@@ -656,7 +665,8 @@ impl Ctx<'_> {
                 idx += 1;
                 self.cursor_y = row_top;
                 let istyle = computed_style(self.doc, item, &style, self.author);
-                self.layout_block(item, istyle, content_left + c as f32 * col_w, col_w, None);
+                let item_x = content_left + c as f32 * (col_w + style.gap);
+                self.layout_block(item, istyle, item_x, col_w, None);
                 max_h = max_h.max(self.cursor_y - row_top);
             }
             self.cursor_y = row_top + max_h;
@@ -1129,6 +1139,33 @@ mod tests {
         // Three distinct column x-positions.
         let xs: std::collections::BTreeSet<i32> = cell_runs.iter().map(|r| r.x as i32).collect();
         assert_eq!(xs.len(), 3, "expected 3 columns, got {xs:?}");
+    }
+
+    #[test]
+    fn gap_spaces_flex_items() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Two flex items: with a gap, the second item starts further right than
+        // it would with no gap (item width shrinks and a gap is inserted).
+        let second_x = |gap: &str| -> f32 {
+            let html = format!(
+                "<div style=\"display:flex; gap:{gap}\">\
+                 <div>aaa</div><div id=second>bbb</div></div>"
+            );
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+            l.runs
+                .iter()
+                .find(|r| r.text == "bbb")
+                .map(|r| r.x)
+                .expect("second item run")
+        };
+        assert!(
+            second_x("40px") > second_x("0px") + 10.0,
+            "gap should push the second item rightward"
+        );
     }
 
     #[test]

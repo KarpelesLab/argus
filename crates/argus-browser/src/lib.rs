@@ -87,7 +87,7 @@ blue link</a> all flow inside this paragraph with correct spacing.</p>\
 <div class=\"col\">Third column of the flex container.</div>\
 </div>\
 <h3>Grid</h3>\
-<div style=\"display:grid; grid-template-columns: repeat(2, 1fr)\">\
+<div style=\"display:grid; grid-template-columns: repeat(2, 1fr); gap: 12px\">\
 <div class=\"col\">Grid cell one</div>\
 <div class=\"col\">Grid cell two</div>\
 <div class=\"col\">Grid cell three</div>\
