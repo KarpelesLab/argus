@@ -7,7 +7,11 @@ use std::process::Command;
 #[test]
 fn phase0_end_to_end() {
     let exe = env!("CARGO_BIN_EXE_argus");
-    let out = Command::new(exe).output().expect("spawn argus binary");
+    // `--headless` runs the verifier and exits (no window) so this is CI-safe.
+    let out = Command::new(exe)
+        .arg("--headless")
+        .output()
+        .expect("spawn argus binary");
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);

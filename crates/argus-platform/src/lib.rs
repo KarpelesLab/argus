@@ -6,5 +6,7 @@
 
 pub mod process;
 pub mod sandbox;
+#[cfg(target_os = "macos")]
+pub mod window;
 
 pub use process::{spawn_child, Child, CHILD_CHANNEL_FD};

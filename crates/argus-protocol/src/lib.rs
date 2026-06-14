@@ -97,6 +97,8 @@ pub enum Msg {
     /// content → browser: a framebuffer of `size` is attached as one fd; its
     /// bytes are RGBA8, `size.area() * 4` long.
     FrameReady { size: Size },
+    /// browser → content: a primary-button press at content pixel `(x, y)`.
+    InputClick { x: u32, y: u32 },
     /// browser → child: exit cleanly.
     Shutdown,
 }
@@ -126,7 +128,8 @@ const TAG_HELLO: u8 = 1;
 const TAG_READY: u8 = 2;
 const TAG_REQUEST_FRAME: u8 = 3;
 const TAG_FRAME_READY: u8 = 4;
-const TAG_SHUTDOWN: u8 = 5;
+const TAG_INPUT_CLICK: u8 = 5;
+const TAG_SHUTDOWN: u8 = 6;
 
 impl Msg {
     /// Number of file descriptors that accompany this message out-of-band.
@@ -155,6 +158,11 @@ impl Msg {
                 buf.push(TAG_FRAME_READY);
                 put_size(&mut buf, size);
             }
+            Msg::InputClick { x, y } => {
+                buf.push(TAG_INPUT_CLICK);
+                buf.extend_from_slice(&x.to_le_bytes());
+                buf.extend_from_slice(&y.to_le_bytes());
+            }
             Msg::Shutdown => buf.push(TAG_SHUTDOWN),
         }
         buf
@@ -172,6 +180,10 @@ impl Msg {
             TAG_READY => Msg::Ready { version: c.u16()? },
             TAG_REQUEST_FRAME => Msg::RequestFrame,
             TAG_FRAME_READY => Msg::FrameReady { size: c.size()? },
+            TAG_INPUT_CLICK => Msg::InputClick {
+                x: c.u32()?,
+                y: c.u32()?,
+            },
             TAG_SHUTDOWN => Msg::Shutdown,
             other => return Err(DecodeError::BadTag(other)),
         };
@@ -242,6 +254,7 @@ mod tests {
         round_trip(Msg::FrameReady {
             size: Size::new(800, 600),
         });
+        round_trip(Msg::InputClick { x: 12, y: 345 });
         round_trip(Msg::Shutdown);
     }
 

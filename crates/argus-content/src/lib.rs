@@ -45,6 +45,11 @@ pub fn run(channel: Channel) -> io::Result<()> {
                 );
                 _frame = Some(fb);
             }
+            Msg::InputClick { x, y } => {
+                // Phase 0: prove input reaches the sandboxed content process. Real
+                // hit-testing + DOM event dispatch (argus-events) arrives in Phase 2.
+                log!("received click at ({x}, {y})");
+            }
             Msg::Shutdown => {
                 log!("shutting down");
                 return Ok(());

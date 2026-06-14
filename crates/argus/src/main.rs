@@ -14,7 +14,9 @@ fn main() {
     argus_util::log::set_role(role);
 
     let result = match role {
-        Role::Browser => argus_browser::run(),
+        // Default to an on-screen window; `--headless` runs the verifier and exits.
+        Role::Browser if has_flag("--headless") => argus_browser::run(),
+        Role::Browser => argus_browser::run_default(),
         Role::Content => argus_content::run(child_channel()),
         Role::NetService | Role::StorageService => argus_services::run(role, child_channel()),
     };
@@ -36,6 +38,11 @@ fn parse_role() -> Role {
         }
     }
     Role::Browser
+}
+
+/// Whether `flag` appears in the process arguments.
+fn has_flag(flag: &str) -> bool {
+    std::env::args().any(|a| a == flag)
 }
 
 /// Reconstruct the IPC channel a child inherited from its parent.

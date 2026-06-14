@@ -10,7 +10,13 @@ rust-version.workspace = true
 [dependencies]
 argus-util.workspace = true
 argus-ipc.workspace = true
+argus-geometry.workspace = true
 libc.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
 
 [lints]
 workspace = true

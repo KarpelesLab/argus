@@ -37,7 +37,9 @@ pub fn run() -> io::Result<()> {
     );
 
     // Ask content to paint, then verify the framebuffer it shared back.
-    let (size, color) = request_and_verify_frame(&content)?;
+    let frame = request_frame(&content)?;
+    let color = verify_uniform(&frame)?;
+    let size = frame.size();
     log!(
         "verified {}x{} frame, uniform rgba({},{},{},{})",
         size.width,
@@ -70,9 +72,8 @@ pub fn run() -> io::Result<()> {
     Ok(())
 }
 
-/// Ask `content` for a frame, map the shared framebuffer, and verify it is a
-/// single opaque color. Returns the size and color observed.
-fn request_and_verify_frame(content: &Child) -> io::Result<(Size, Color)> {
+/// Ask `content` to paint, and map the shared framebuffer it hands back.
+fn request_frame(content: &Child) -> io::Result<Framebuffer> {
     proto::send(content.channel(), Msg::RequestFrame, &[])?;
     let (msg, mut fds) = proto::recv(content.channel())?;
     let size = match msg {
@@ -90,9 +91,69 @@ fn request_and_verify_frame(content: &Child) -> io::Result<(Size, Color)> {
             "FrameReady carried no framebuffer fd",
         )
     })?;
-    let fb = Framebuffer::from_fd(fd, size)?;
-    let color = verify_uniform(&fb)?;
-    Ok((size, color))
+    Framebuffer::from_fd(fd, size)
+}
+
+/// Run the browser in its default mode for this platform: a real window where one
+/// is available, the headless verifier otherwise.
+#[cfg(target_os = "macos")]
+pub fn run_default() -> io::Result<()> {
+    run_windowed()
+}
+
+/// See [`run_default`].
+#[cfg(not(target_os = "macos"))]
+pub fn run_default() -> io::Result<()> {
+    run()
+}
+
+/// Run the browser with an on-screen window (macOS). Spawns content + net, opens
+/// a window, presents content's framebuffer, forwards clicks into the sandboxed
+/// content process, and repaints — until the window is closed.
+#[cfg(target_os = "macos")]
+pub fn run_windowed() -> io::Result<()> {
+    use argus_platform::window::{Event, Window};
+
+    log::set_role(Role::Browser);
+    let viewport = Size::new(800, 600);
+    log!(
+        "starting (windowed); viewport {}x{}",
+        viewport.width,
+        viewport.height
+    );
+
+    let mut content = spawn_child(Role::Content)?;
+    let mut net = spawn_child(Role::NetService)?;
+    proto::parent_handshake(content.channel(), viewport)?;
+    proto::parent_handshake(net.channel(), viewport)?;
+    log!("children handshook; opening window");
+
+    // Present the first frame.
+    let mut frame = request_frame(&content)?;
+    let window = Window::open("Argus", viewport);
+    window.present(frame.pixels(), frame.size());
+    log!("window open — click to send input to content, close to quit");
+
+    loop {
+        match window.next_event() {
+            Event::MouseDown { x, y } => {
+                proto::send(content.channel(), Msg::InputClick { x, y }, &[])?;
+                // Repaint (Phase 0 content paints the same color each time).
+                frame = request_frame(&content)?;
+                window.present(frame.pixels(), frame.size());
+            }
+            Event::CloseRequested => {
+                log!("window closed; shutting down");
+                break;
+            }
+        }
+    }
+
+    proto::send(content.channel(), Msg::Shutdown, &[])?;
+    proto::send(net.channel(), Msg::Shutdown, &[])?;
+    content.wait()?;
+    net.wait()?;
+    Ok(())
 }
 
 /// Confirm every sampled pixel is identical and opaque, returning that color.
