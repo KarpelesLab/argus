@@ -10,9 +10,9 @@
 //! This is a pragmatic subset — no live reflow, events, or timers — but it makes a
 //! real chunk of the DOM API actually change the rendered page:
 //! `document.getElementById` / `querySelector` (full CSS selector engine) /
-//! `createElement` / `body`, and on elements `textContent`/`innerText`,
+//! `createElement` / `body` / `write`, and on elements `textContent`/`innerText`,
 //! `innerHTML`, `className`, `setAttribute`/`getAttribute`, `style.<camelCase>`,
-//! and `appendChild`/`append`/`remove`.
+//! `classList`, scoped `querySelector`, and `appendChild`/`append`/`remove`.
 
 use argus_dom::{Attribute, Document, NodeData, NodeId, QualName};
 
@@ -65,6 +65,9 @@ function __argus_el(tgt) {
       }
       if (k === "remove") {
         return function() { __argus_ops.push({op: "remove", tgt: tgt}); };
+      }
+      if (k === "querySelector") {
+        return function(sel) { return __argus_el({kind: "scoped", parent: tgt, val: "" + sel}); };
       }
       if (seed && seed[k] != null) return seed[k];
       return "";
@@ -200,19 +203,6 @@ fn apply_ops(doc: &mut Document, json: &str) {
     // Detached elements created by `document.createElement`, keyed by synthetic id.
     let mut created: HashMap<String, NodeId> = HashMap::new();
 
-    // Resolve a `tgt` descriptor ({kind, val}) to a node (created nodes included).
-    let resolve =
-        |doc: &Document, created: &HashMap<String, NodeId>, tgt: Option<&Json>| -> Option<NodeId> {
-            let Some(Json::Obj(t)) = tgt else { return None };
-            let f = |k: &str| t.iter().find(|(n, _)| n == k).and_then(|(_, v)| v.as_str());
-            match (f("kind"), f("val")) {
-                (Some("id"), Some(v)) => find_by_id(doc, v),
-                (Some("sel"), Some(v)) => find_by_selector(doc, v),
-                (Some("new"), Some(v)) => created.get(v).copied(),
-                _ => None,
-            }
-        };
-
     for op in ops {
         let Json::Obj(fields) = op else { continue };
         let get =
@@ -247,7 +237,7 @@ fn apply_ops(doc: &mut Document, json: &str) {
             continue;
         }
 
-        let Some(node) = resolve(doc, &created, get("tgt")) else {
+        let Some(node) = resolve_target(doc, &created, get("tgt")) else {
             continue;
         };
         match op_kind {
@@ -257,12 +247,35 @@ fn apply_ops(doc: &mut Document, json: &str) {
             "class" => apply_class_list(doc, node, &key, &value),
             "remove" => doc.detach(node),
             "append" => {
-                if let Some(child) = resolve(doc, &created, get("child")) {
+                if let Some(child) = resolve_target(doc, &created, get("child")) {
                     doc.append(node, child);
                 }
             }
             _ => {}
         }
+    }
+}
+
+/// Resolve a target descriptor to a node. `id`/`sel` resolve globally, `new`
+/// looks up a created element, and `scoped` finds the first descendant of a
+/// (recursively resolved) parent matching a selector.
+fn resolve_target(
+    doc: &Document,
+    created: &std::collections::HashMap<String, NodeId>,
+    tgt: Option<&Json>,
+) -> Option<NodeId> {
+    let Some(Json::Obj(t)) = tgt else { return None };
+    let f = |k: &str| t.iter().find(|(n, _)| n == k).and_then(|(_, v)| v.as_str());
+    let obj = |k: &str| t.iter().find(|(n, _)| n == k).map(|(_, v)| v);
+    match f("kind") {
+        Some("id") => f("val").and_then(|v| find_by_id(doc, v)),
+        Some("sel") => f("val").and_then(|v| find_by_selector(doc, v)),
+        Some("new") => f("val").and_then(|v| created.get(v).copied()),
+        Some("scoped") => {
+            let parent = resolve_target(doc, created, obj("parent"))?;
+            find_by_selector_within(doc, parent, f("val")?)
+        }
+        _ => None,
     }
 }
 
@@ -283,6 +296,24 @@ fn find_by_selector(doc: &Document, sel: &str) -> Option<NodeId> {
         None
     }
     walk(doc, doc.root(), &selector)
+}
+
+/// The first descendant of `root` (excluding `root` itself) matching `sel`.
+fn find_by_selector_within(doc: &Document, root: NodeId, sel: &str) -> Option<NodeId> {
+    let selectors = argus_css::selector::parse_selector_list(&argus_css::tokenizer::tokenize(sel));
+    let selector = selectors.into_iter().next()?;
+    fn walk(doc: &Document, n: NodeId, sel: &argus_css::Selector) -> Option<NodeId> {
+        if matches!(&doc.node(n).data, NodeData::Element(_)) && argus_css::matches(doc, n, sel) {
+            return Some(n);
+        }
+        for c in doc.children(n) {
+            if let Some(found) = walk(doc, c, sel) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    doc.children(root).find_map(|c| walk(doc, c, &selector))
 }
 
 /// Interpret a JS property assignment (`el.<key> = value`).
@@ -773,6 +804,22 @@ mod tests {
                 .collect::<std::collections::BTreeSet<_>>(),
             "class was {class:?}"
         );
+    }
+
+    #[test]
+    fn scoped_element_query_selector() {
+        // el.querySelector resolves within the element's own subtree.
+        let mut doc = argus_html::parse(
+            "<div id=\"a\"><span class=\"x\" id=\"ax\">1</span></div>\
+             <div id=\"b\"><span class=\"x\" id=\"bx\">2</span></div>\
+             <script>\
+               document.getElementById('b').querySelector('.x').textContent = 'hit';\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        // Only the .x inside #b is changed; the one in #a is untouched.
+        assert_eq!(text_of(&doc, "bx"), "hit");
+        assert_eq!(text_of(&doc, "ax"), "1");
     }
 
     #[test]
