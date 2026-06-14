@@ -85,6 +85,8 @@ blue link</a> all flow inside this paragraph with correct spacing.</p>\
 <div class=\"col\">Grid cell three</div>\
 <div class=\"col\">Grid cell four</div>\
 </div>\
+<h3>Preformatted</h3>\
+<pre>  line one (two leading spaces)\n    line two (four)\ntab\tafter\nfn main() {{ println!(); }}</pre>\
 <script>\
 function fib(n){{ return n < 2 ? n : fib(n-1) + fib(n-2); }}\
 console.log('kataan ran: fib(20) = ' + fib(20));\

@@ -81,6 +81,8 @@ pub struct ComputedStyle {
     pub border_radius: f32,
     /// Element `opacity` in `0.0..=1.0`.
     pub opacity: f32,
+    /// `white-space: pre*` — preserve whitespace and honor newlines (inherited).
+    pub white_space_pre: bool,
 }
 
 impl ComputedStyle {
@@ -102,6 +104,7 @@ impl ComputedStyle {
             grid_columns: 1,
             border_radius: 0.0,
             opacity: 1.0,
+            white_space_pre: false,
         }
     }
 
@@ -135,6 +138,7 @@ p { margin: 1em 0 }
 b, strong { font-weight: bold }
 a { color: #0645ad; text-decoration: underline }
 ul, ol, blockquote, figure, pre { margin: 1em 0 }
+pre { white-space: pre }
 ul, ol { padding-left: 40px }
 blockquote { margin: 1em 40px }
 hr { margin: 8px 0; border-top: 1px solid #c0c0c0 }
@@ -245,7 +249,8 @@ pub fn computed_style(
         font_size: parent.font_size,
         bold: parent.bold,
         color: parent.color,
-        text_align: parent.text_align, // text-align inherits
+        text_align: parent.text_align,           // text-align inherits
+        white_space_pre: parent.white_space_pre, // white-space inherits
         ..ComputedStyle::initial()
     };
     apply(&mut cs, &map, parent);
@@ -382,6 +387,12 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         .and_then(|v| v.trim().parse::<f32>().ok())
     {
         cs.opacity = o.clamp(0.0, 1.0);
+    }
+    if let Some(ws) = map.get("white-space") {
+        cs.white_space_pre = matches!(
+            ws.as_str(),
+            "pre" | "pre-wrap" | "pre-line" | "break-spaces"
+        );
     }
 }
 

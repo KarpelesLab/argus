@@ -249,90 +249,114 @@ impl Ctx<'_> {
         });
         let mut item_index = 0u32;
 
-        // Children. Inline-level content accumulates into `words` (each with its own
-        // style); block-level children flush the line box and lay out separately.
-        let mut words: Vec<InlineWord> = Vec::new();
-        let mut pending_space = false;
-        for child in self.doc.children(id) {
-            match &self.doc.node(child).data {
-                NodeData::Text(_) => {
-                    self.gather_inline(child, &style, None, &mut words, &mut pending_space);
-                }
-                NodeData::Element(e) if e.name.is_html("img") => {
-                    self.flush_words(&mut words, &style, content_left, content_w);
-                    pending_space = false;
-                    self.place_image(e, content_left, content_w);
-                }
-                NodeData::Element(e) if e.name.is_html("hr") => {
-                    self.flush_words(&mut words, &style, content_left, content_w);
-                    pending_space = false;
-                    let hr = computed_style(self.doc, child, &style, self.author);
-                    self.cursor_y += hr.margin.top;
-                    let h = hr.border.top.max(1.0);
-                    self.rects.push(rect(
-                        content_left,
-                        self.cursor_y,
-                        content_w,
-                        h,
-                        hr.border_color,
-                    ));
-                    self.cursor_y += h + hr.margin.bottom;
-                }
-                NodeData::Element(e) if e.name.is_html("table") => {
-                    self.flush_words(&mut words, &style, content_left, content_w);
-                    pending_space = false;
-                    let tstyle = computed_style(self.doc, child, &style, self.author);
-                    self.cursor_y += tstyle.margin.top;
-                    self.layout_table(child, tstyle, content_left, content_w);
-                    self.cursor_y += tstyle.margin.bottom;
-                }
-                NodeData::Element(_) => {
-                    let cstyle = computed_style(self.doc, child, &style, self.author);
-                    match cstyle.display {
-                        Display::None => {}
-                        Display::Inline => {
-                            self.gather_inline(
-                                child,
-                                &cstyle,
-                                None,
-                                &mut words,
-                                &mut pending_space,
-                            );
-                        }
-                        Display::Block => {
-                            self.flush_words(&mut words, &style, content_left, content_w);
-                            pending_space = false;
-                            let child_marker = match list_kind {
-                                Some(kind) if self.is_li(child) => {
-                                    item_index += 1;
-                                    Some(kind.marker(item_index))
-                                }
-                                _ => None,
-                            };
-                            self.cursor_y += cstyle.margin.top;
-                            self.layout_block(child, cstyle, content_left, content_w, child_marker);
-                            self.cursor_y += cstyle.margin.bottom;
-                        }
-                        Display::Flex => {
-                            self.flush_words(&mut words, &style, content_left, content_w);
-                            pending_space = false;
-                            self.cursor_y += cstyle.margin.top;
-                            self.layout_flex(child, cstyle, content_left, content_w);
-                            self.cursor_y += cstyle.margin.bottom;
-                        }
-                        Display::Grid => {
-                            self.flush_words(&mut words, &style, content_left, content_w);
-                            pending_space = false;
-                            self.cursor_y += cstyle.margin.top;
-                            self.layout_grid(child, cstyle, content_left, content_w);
-                            self.cursor_y += cstyle.margin.bottom;
+        // Preformatted (`white-space: pre`): emit raw lines, preserving whitespace
+        // and breaking only on newlines (no collapsing, no wrapping).
+        if style.white_space_pre {
+            let mut raw = String::new();
+            self.gather_raw_text(id, &mut raw);
+            for line in raw.trim_end_matches('\n').split('\n') {
+                let baseline = self.cursor_y + self.font.ascent_px(style.font_size);
+                self.runs.push(TextRun {
+                    x: content_left,
+                    baseline,
+                    text: line.to_string(),
+                    size_px: style.font_size,
+                    color: style.fade(style.color),
+                });
+                self.cursor_y += style.font_size * LINE_HEIGHT;
+            }
+        } else {
+            // Children. Inline-level content accumulates into `words` (each with its own
+            // style); block-level children flush the line box and lay out separately.
+            let mut words: Vec<InlineWord> = Vec::new();
+            let mut pending_space = false;
+            for child in self.doc.children(id) {
+                match &self.doc.node(child).data {
+                    NodeData::Text(_) => {
+                        self.gather_inline(child, &style, None, &mut words, &mut pending_space);
+                    }
+                    NodeData::Element(e) if e.name.is_html("img") => {
+                        self.flush_words(&mut words, &style, content_left, content_w);
+                        pending_space = false;
+                        self.place_image(e, content_left, content_w);
+                    }
+                    NodeData::Element(e) if e.name.is_html("hr") => {
+                        self.flush_words(&mut words, &style, content_left, content_w);
+                        pending_space = false;
+                        let hr = computed_style(self.doc, child, &style, self.author);
+                        self.cursor_y += hr.margin.top;
+                        let h = hr.border.top.max(1.0);
+                        self.rects.push(rect(
+                            content_left,
+                            self.cursor_y,
+                            content_w,
+                            h,
+                            hr.border_color,
+                        ));
+                        self.cursor_y += h + hr.margin.bottom;
+                    }
+                    NodeData::Element(e) if e.name.is_html("table") => {
+                        self.flush_words(&mut words, &style, content_left, content_w);
+                        pending_space = false;
+                        let tstyle = computed_style(self.doc, child, &style, self.author);
+                        self.cursor_y += tstyle.margin.top;
+                        self.layout_table(child, tstyle, content_left, content_w);
+                        self.cursor_y += tstyle.margin.bottom;
+                    }
+                    NodeData::Element(_) => {
+                        let cstyle = computed_style(self.doc, child, &style, self.author);
+                        match cstyle.display {
+                            Display::None => {}
+                            Display::Inline => {
+                                self.gather_inline(
+                                    child,
+                                    &cstyle,
+                                    None,
+                                    &mut words,
+                                    &mut pending_space,
+                                );
+                            }
+                            Display::Block => {
+                                self.flush_words(&mut words, &style, content_left, content_w);
+                                pending_space = false;
+                                let child_marker = match list_kind {
+                                    Some(kind) if self.is_li(child) => {
+                                        item_index += 1;
+                                        Some(kind.marker(item_index))
+                                    }
+                                    _ => None,
+                                };
+                                self.cursor_y += cstyle.margin.top;
+                                self.layout_block(
+                                    child,
+                                    cstyle,
+                                    content_left,
+                                    content_w,
+                                    child_marker,
+                                );
+                                self.cursor_y += cstyle.margin.bottom;
+                            }
+                            Display::Flex => {
+                                self.flush_words(&mut words, &style, content_left, content_w);
+                                pending_space = false;
+                                self.cursor_y += cstyle.margin.top;
+                                self.layout_flex(child, cstyle, content_left, content_w);
+                                self.cursor_y += cstyle.margin.bottom;
+                            }
+                            Display::Grid => {
+                                self.flush_words(&mut words, &style, content_left, content_w);
+                                pending_space = false;
+                                self.cursor_y += cstyle.margin.top;
+                                self.layout_grid(child, cstyle, content_left, content_w);
+                                self.cursor_y += cstyle.margin.bottom;
+                            }
                         }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
-        }
-        self.flush_words(&mut words, &style, content_left, content_w);
+            self.flush_words(&mut words, &style, content_left, content_w);
+        } // end !white_space_pre
 
         self.cursor_y += style.padding.bottom + style.border.bottom;
         let border_box_h = self.cursor_y - border_box_top;
@@ -617,6 +641,19 @@ impl Ctx<'_> {
 
     /// Flatten an inline subtree into styled words, collapsing whitespace and
     /// tracking break opportunities via `space_before`.
+    /// Concatenate all descendant text verbatim (for `white-space: pre`), with no
+    /// whitespace collapsing. Element boundaries contribute no spacing.
+    fn gather_raw_text(&self, id: NodeId, out: &mut String) {
+        match &self.doc.node(id).data {
+            NodeData::Text(t) => out.push_str(t),
+            _ => {
+                for child in self.doc.children(id) {
+                    self.gather_raw_text(child, out);
+                }
+            }
+        }
+    }
+
     fn gather_inline(
         &self,
         id: NodeId,
