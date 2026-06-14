@@ -999,7 +999,7 @@ impl Ctx<'_> {
                 continue;
             }
             let space = if i > line_start && w.space_before {
-                self.font.measure(" ", w.font_size)
+                self.font.measure(" ", w.font_size) + block.word_spacing
             } else {
                 0.0
             };
@@ -1030,7 +1030,7 @@ impl Ctx<'_> {
             for (j, w) in line.iter().enumerate() {
                 let has_space = j > 0 && w.space_before;
                 let space = if has_space {
-                    self.font.measure(" ", w.font_size)
+                    self.font.measure(" ", w.font_size) + block.word_spacing
                 } else {
                     0.0
                 };
@@ -1071,7 +1071,8 @@ impl Ctx<'_> {
                     continue;
                 }
                 if j > 0 && w.space_before {
-                    pen_x += self.font.measure(" ", w.font_size) + justify_extra;
+                    pen_x +=
+                        self.font.measure(" ", w.font_size) + block.word_spacing + justify_extra;
                 }
                 let word_w = self.font.measure(&w.text, w.font_size);
                 let wb = baseline + w.baseline_shift;
@@ -1218,6 +1219,27 @@ mod tests {
         assert!(
             up < base,
             "superscript {up} should sit above baseline {base}"
+        );
+    }
+
+    #[test]
+    fn word_spacing_widens_gaps() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let second_word_x = |css: &str| -> f32 {
+            let doc = parse(&format!("<p style=\"{css}\">alpha beta</p>"));
+            let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+            l.runs
+                .iter()
+                .find(|r| r.text == "beta")
+                .map(|r| r.x)
+                .unwrap()
+        };
+        assert!(
+            second_word_x("word-spacing: 20px") > second_word_x("") + 15.0,
+            "word-spacing should push later words right"
         );
     }
 

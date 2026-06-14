@@ -146,6 +146,8 @@ pub struct ComputedStyle {
     pub line_height: f32,
     /// `text-indent` for the first line, in pixels (inherited).
     pub text_indent: f32,
+    /// `word-spacing` extra pixels added between words (inherited).
+    pub word_spacing: f32,
     /// `vertical-align` for inline content (not inherited).
     pub vertical_align: VerticalAlign,
     /// `gap` between flex/grid items in pixels (not inherited).
@@ -193,6 +195,7 @@ impl ComputedStyle {
             box_sizing: BoxSizing::ContentBox,
             line_height: 1.2,
             text_indent: 0.0,
+            word_spacing: 0.0,
             vertical_align: VerticalAlign::Baseline,
             gap: 0.0,
             hidden: false,
@@ -377,6 +380,7 @@ pub fn computed_style(
         text_transform: parent.text_transform,   // text-transform inherits
         line_height: parent.line_height,         // line-height inherits
         text_indent: parent.text_indent,         // text-indent inherits
+        word_spacing: parent.word_spacing,       // word-spacing inherits
         hidden: parent.hidden,                   // visibility inherits
         ..ComputedStyle::initial()
     };
@@ -543,6 +547,11 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         .map(|l| l.to_px(cs.font_size, 0.0))
     {
         cs.text_indent = px;
+    }
+    if let Some(v) = map.get("word-spacing").filter(|v| v.as_str() != "normal") {
+        if let Some(px) = parse_length(v).map(|l| l.to_px(cs.font_size, 0.0)) {
+            cs.word_spacing = px;
+        }
     }
     if let Some(v) = map.get("line-height") {
         let v = v.trim();
