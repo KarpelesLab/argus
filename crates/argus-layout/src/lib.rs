@@ -49,8 +49,12 @@ struct InlineWord {
     space_before: bool,
     /// Whether this word is underlined (`text-decoration: underline`).
     underline: bool,
+    /// Whether this word has a strike-through (`text-decoration: line-through`).
+    strike: bool,
     /// The hyperlink target, if this word is inside an `<a href>`.
     href: Option<Rc<str>>,
+    /// Force a line break before this word (an `<br>` element).
+    hard_break: bool,
 }
 
 /// A clickable hyperlink region in canvas pixels.
@@ -676,7 +680,9 @@ impl Ctx<'_> {
                         // Words within a text node are separated by whitespace.
                         space_before: *pending_space || !first,
                         underline: style.underline,
+                        strike: style.strike,
                         href: link.clone(),
+                        hard_break: false,
                     });
                     *pending_space = false;
                     first = false;
@@ -688,6 +694,21 @@ impl Ctx<'_> {
             NodeData::Element(e) => {
                 let cstyle = computed_style(self.doc, id, style, self.author);
                 if cstyle.display == Display::None {
+                    return;
+                }
+                // A <br> forces a line break in the inline flow.
+                if e.name.is_html("br") {
+                    words.push(InlineWord {
+                        text: String::new(),
+                        font_size: style.font_size,
+                        color: style.fade(style.color),
+                        space_before: false,
+                        underline: false,
+                        strike: false,
+                        href: link.clone(),
+                        hard_break: true,
+                    });
+                    *pending_space = false;
                     return;
                 }
                 // An <a href> sets the link target for its descendants.
@@ -723,6 +744,13 @@ impl Ctx<'_> {
         let mut line_start = 0usize;
         let mut pen = 0.0f32;
         for (i, w) in taken.iter().enumerate() {
+            // A <br> forces a line break before it (without itself being placed).
+            if w.hard_break && i > line_start {
+                lines.push(line_start..i);
+                line_start = i;
+                pen = 0.0;
+                continue;
+            }
             let space = if i > line_start && w.space_before {
                 self.font.measure(" ", w.font_size)
             } else {
@@ -764,6 +792,10 @@ impl Ctx<'_> {
             let line_h = max_size * LINE_HEIGHT;
             let mut pen_x = x + offset;
             for (j, w) in line.iter().enumerate() {
+                // The <br> sentinel only contributes line height, no glyphs.
+                if w.text.is_empty() {
+                    continue;
+                }
                 if j > 0 && w.space_before {
                     pen_x += self.font.measure(" ", w.font_size);
                 }
@@ -779,6 +811,11 @@ impl Ctx<'_> {
                     let uy = baseline + (w.font_size * 0.08).max(1.0);
                     let uh = (w.font_size / 16.0).max(1.0);
                     self.rects.push(rect(pen_x, uy, word_w, uh, w.color));
+                }
+                if w.strike {
+                    let sy = baseline - self.font.ascent_px(w.font_size) * 0.32;
+                    let sh = (w.font_size / 16.0).max(1.0);
+                    self.rects.push(rect(pen_x, sy, word_w, sh, w.color));
                 }
                 if let Some(href) = &w.href {
                     self.links.push(LinkBox {

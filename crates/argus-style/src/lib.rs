@@ -75,6 +75,8 @@ pub struct ComputedStyle {
     pub text_align: TextAlign,
     /// `text-decoration: underline`.
     pub underline: bool,
+    /// `text-decoration: line-through`.
+    pub strike: bool,
     /// Column count for a grid container (from `grid-template-columns`).
     pub grid_columns: u32,
     /// Uniform `border-radius` in pixels.
@@ -101,6 +103,7 @@ impl ComputedStyle {
             width: None,
             text_align: TextAlign::Left,
             underline: false,
+            strike: false,
             grid_columns: 1,
             border_radius: 0.0,
             opacity: 1.0,
@@ -137,6 +140,8 @@ h6 { font-size: 0.67em; font-weight: bold; margin: 2.33em 0 }
 p { margin: 1em 0 }
 b, strong { font-weight: bold }
 a { color: #0645ad; text-decoration: underline }
+u, ins { text-decoration: underline }
+s, del, strike { text-decoration: line-through }
 ul, ol, blockquote, figure, pre { margin: 1em 0 }
 pre { white-space: pre }
 ul, ol { padding-left: 40px }
@@ -330,6 +335,7 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         .or_else(|| map.get("text-decoration-line"))
     {
         cs.underline = v.split_whitespace().any(|t| t == "underline");
+        cs.strike = v.split_whitespace().any(|t| t == "line-through");
     }
 
     let fs = cs.font_size;

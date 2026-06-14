@@ -85,6 +85,7 @@ blue link</a> all flow inside this paragraph with correct spacing.</p>\
 <div class=\"col\">Grid cell three</div>\
 <div class=\"col\">Grid cell four</div>\
 </div>\
+<p>Line breaks<br>split a paragraph,<br>and <s>struck-out</s> or <del>deleted</del> text renders with a line through it.</p>\
 <h3>Preformatted</h3>\
 <pre>  line one (two leading spaces)\n    line two (four)\ntab\tafter\nfn main() {{ println!(); }}</pre>\
 <script>\
