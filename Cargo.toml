@@ -25,6 +25,7 @@ argus-image = { path = "crates/argus-image" }
 argus-css = { path = "crates/argus-css" }
 argus-style = { path = "crates/argus-style" }
 argus-layout = { path = "crates/argus-layout" }
+argus-script = { path = "crates/argus-script" }
 argus-browser = { path = "crates/argus-browser" }
 argus-content = { path = "crates/argus-content" }
 argus-services = { path = "crates/argus-services" }

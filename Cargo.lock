@@ -51,6 +51,7 @@ dependencies = [
  "argus-layout",
  "argus-platform",
  "argus-protocol",
+ "argus-script",
  "argus-util",
 ]
 
@@ -132,6 +133,13 @@ version = "0.0.0"
 dependencies = [
  "argus-geometry",
  "argus-ipc",
+]
+
+[[package]]
+name = "argus-script"
+version = "0.0.0"
+dependencies = [
+ "kataan",
 ]
 
 [[package]]
@@ -333,10 +341,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "intl"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5bfae726bb3f672d4f4b1f29cee6c74898a35230a4c794d8292c21129107f21"
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+
+[[package]]
+name = "kataan"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f36c85b7e040c09a19559659173d1869b1f41eb6885327c3817cf8de18c4c095"
+dependencies = [
+ "intl",
+ "purecrypto",
+]
 
 [[package]]
 name = "libc"

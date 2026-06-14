@@ -58,6 +58,10 @@ blue link</a> all flow inside this paragraph with correct spacing.</p>\
 <li>Navigation, tabs, and history</li>\
 <li>More CSS: flexbox, grid, and the long tail</li>\
 </ol>\
+<script>\
+function fib(n){{ return n < 2 ? n : fib(n-1) + fib(n-2); }}\
+console.log('kataan ran: fib(20) = ' + fib(20));\
+</script>\
 </body></html>"
     )
 }

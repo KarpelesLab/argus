@@ -47,6 +47,7 @@ pub fn run(channel: Channel) -> io::Result<()> {
             }
             Msg::LoadDocument { html } => {
                 log!("loaded document ({} bytes)", html.len());
+                run_page_scripts(&argus_html::parse(&html));
                 content.html = Some(html);
             }
             Msg::RequestFrame => {
@@ -146,6 +147,43 @@ impl Content {
             layout.images.len()
         );
         Ok(fb)
+    }
+}
+
+/// Run every inline `<script>` (no `src`) in document order through kataan,
+/// logging its console output. Phase 2 is computation + console only — there are
+/// no DOM bindings yet (see `argus-script`).
+fn run_page_scripts(doc: &argus_dom::Document) {
+    fn collect(doc: &argus_dom::Document, id: argus_dom::NodeId, out: &mut Vec<String>) {
+        if let argus_dom::NodeData::Element(e) = &doc.node(id).data {
+            if e.name.is_html("script") && e.attr("src").is_none() {
+                let mut src = String::new();
+                for child in doc.children(id) {
+                    if let argus_dom::NodeData::Text(t) = &doc.node(child).data {
+                        src.push_str(t);
+                    }
+                }
+                if !src.trim().is_empty() {
+                    out.push(src);
+                }
+            }
+        }
+        for child in doc.children(id) {
+            collect(doc, child, out);
+        }
+    }
+
+    let mut scripts = Vec::new();
+    collect(doc, doc.root(), &mut scripts);
+    for src in scripts {
+        match argus_script::run_script(&src) {
+            Ok(result) => {
+                for line in result.console.lines() {
+                    log!("console.log: {line}");
+                }
+            }
+            Err(e) => log!("script error: {e}"),
+        }
     }
 }
 
