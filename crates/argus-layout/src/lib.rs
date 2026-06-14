@@ -769,7 +769,13 @@ impl Ctx<'_> {
         if rows.is_empty() {
             return;
         }
-        let num_cols = rows.iter().map(|r| r.len()).max().unwrap_or(1).max(1);
+        // Column count is the widest row once each cell's `colspan` is counted.
+        let num_cols = rows
+            .iter()
+            .map(|r| r.iter().map(|&c| self.cell_colspan(c)).sum::<u32>())
+            .max()
+            .unwrap_or(1)
+            .max(1);
         let table_left = x + style.margin.left;
         let table_w = match style.width {
             Some(len) => border_box_to_content(&style, len.to_px(style.font_size, avail)),
@@ -781,15 +787,32 @@ impl Ctx<'_> {
         for row in &rows {
             let row_top = self.cursor_y;
             let mut max_h = 0.0f32;
-            for (i, &cell) in row.iter().enumerate() {
-                let cell_x = table_left + i as f32 * col_w;
+            let mut col = 0u32;
+            for &cell in row {
+                let span = self
+                    .cell_colspan(cell)
+                    .min(num_cols - col.min(num_cols - 1));
+                let cell_x = table_left + col as f32 * col_w;
+                let cell_w = span as f32 * col_w;
                 self.cursor_y = row_top;
                 let cell_style = computed_style(self.doc, cell, &style, self.author);
-                self.layout_block(cell, cell_style, cell_x, col_w, None);
+                self.layout_block(cell, cell_style, cell_x, cell_w, None);
                 max_h = max_h.max(self.cursor_y - row_top);
+                col += span.max(1);
             }
             self.cursor_y = row_top + max_h;
         }
+    }
+
+    /// The `colspan` of a table cell (defaults to 1, clamped to `>= 1`).
+    fn cell_colspan(&self, cell: NodeId) -> u32 {
+        self.doc
+            .node(cell)
+            .as_element()
+            .and_then(|e| e.attr("colspan"))
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(1)
+            .max(1)
     }
 
     /// Collect a table's rows (flattening `thead`/`tbody`/`tfoot`); each row is the
@@ -1380,6 +1403,36 @@ mod tests {
         );
         // border-box: the 200 includes padding + border.
         assert!((border_box - 200.0).abs() < 0.5, "border-box {border_box}");
+    }
+
+    #[test]
+    fn table_colspan_spans_columns() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // 3-column table; second row's first cell spans 2 columns, so the second
+        // cell ("y") starts in column 3 — aligned with "c" from the first row.
+        let html = "<table>\
+            <tr><td>a</td><td>b</td><td>c</td></tr>\
+            <tr><td colspan=2>x</td><td>y</td></tr></table>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 300.0, &ImageSizes::new());
+        let x_of = |t: &str| l.runs.iter().find(|r| r.text == t).map(|r| r.x).unwrap();
+        // "y" aligns with the third column ("c"); "x" starts at the first ("a").
+        assert!(
+            (x_of("y") - x_of("c")).abs() < 1.0,
+            "y {} vs c {}",
+            x_of("y"),
+            x_of("c")
+        );
+        assert!(
+            (x_of("x") - x_of("a")).abs() < 1.0,
+            "x {} vs a {}",
+            x_of("x"),
+            x_of("a")
+        );
+        assert!(x_of("y") > x_of("b"), "y should be past column 2");
     }
 
     #[test]
