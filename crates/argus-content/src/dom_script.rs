@@ -36,6 +36,7 @@ function __argus_el(tgt) {
           get: function(t2, k2) { return ""; }
         });
       }
+      if (k === "__tgt") return tgt;
       if (k === "setAttribute") {
         return function(name, val) {
           __argus_ops.push({op: "attr", tgt: tgt, key: "" + name, value: "" + val});
@@ -44,16 +45,33 @@ function __argus_el(tgt) {
       if (k === "getAttribute") {
         return function(name) { return (seed && seed[name] != null) ? seed[name] : null; };
       }
+      if (k === "appendChild" || k === "append") {
+        return function(child) {
+          __argus_ops.push({op: "append", tgt: tgt, child: child ? child.__tgt : null});
+          return child;
+        };
+      }
+      if (k === "remove") {
+        return function() { __argus_ops.push({op: "remove", tgt: tgt}); };
+      }
       if (seed && seed[k] != null) return seed[k];
       return "";
     }
   });
 }
+var __newCount = 0;
 var document = {
   getElementById: function(id) { return __argus_el({kind: "id", val: "" + id}); },
   querySelector: function(sel) { return __argus_el({kind: "sel", val: "" + sel}); },
+  createElement: function(tag) {
+    var nid = "n" + (__newCount++);
+    __argus_ops.push({op: "create", nid: nid, tag: "" + tag});
+    return __argus_el({kind: "new", val: nid});
+  },
   write: function(s) { __argus_ops.push({op: "write", value: "" + s}); }
 };
+document.body = __argus_el({kind: "sel", val: "body"});
+document.documentElement = __argus_el({kind: "sel", val: "html"});
 var window = document.window = document;
 "#;
 
@@ -163,35 +181,56 @@ fn text_content(doc: &Document, id: NodeId) -> String {
 
 /// Apply the ops array (parsed from JSON) to the document.
 fn apply_ops(doc: &mut Document, json: &str) {
+    use std::collections::HashMap;
     let Some(Json::Arr(ops)) = parse_json(json) else {
         return;
     };
+    // Detached elements created by `document.createElement`, keyed by synthetic id.
+    let mut created: HashMap<String, NodeId> = HashMap::new();
+
+    // Resolve a `tgt` descriptor ({kind, val}) to a node (created nodes included).
+    let resolve = |doc: &Document, created: &HashMap<String, NodeId>, tgt: Option<&Json>| -> Option<NodeId> {
+        let Some(Json::Obj(t)) = tgt else { return None };
+        let f = |k: &str| t.iter().find(|(n, _)| n == k).and_then(|(_, v)| v.as_str());
+        match (f("kind"), f("val")) {
+            (Some("id"), Some(v)) => find_by_id(doc, v),
+            (Some("sel"), Some(v)) => find_by_selector(doc, v),
+            (Some("new"), Some(v)) => created.get(v).copied(),
+            _ => None,
+        }
+    };
+
     for op in ops {
         let Json::Obj(fields) = op else { continue };
         let get =
             |k: &str| -> Option<&Json> { fields.iter().find(|(n, _)| n == k).map(|(_, v)| v) };
         let op_kind = get("op").and_then(Json::as_str).unwrap_or("");
-        let value = get("value")
-            .and_then(Json::as_str)
-            .unwrap_or("")
-            .to_string();
+        let value = get("value").and_then(Json::as_str).unwrap_or("").to_string();
         let key = get("key").and_then(Json::as_str).unwrap_or("").to_string();
-        let node = match get("tgt") {
-            Some(Json::Obj(t)) => {
-                let f = |k: &str| t.iter().find(|(n, _)| n == k).and_then(|(_, v)| v.as_str());
-                match (f("kind"), f("val")) {
-                    (Some("id"), Some(v)) => find_by_id(doc, v),
-                    (Some("sel"), Some(v)) => find_by_selector(doc, v),
-                    _ => None,
-                }
+
+        if op_kind == "create" {
+            let nid = get("nid").and_then(Json::as_str).unwrap_or("");
+            let tag = get("tag").and_then(Json::as_str).unwrap_or("div");
+            let node = doc.create_element(QualName::html(tag.to_ascii_lowercase()), vec![]);
+            if !nid.is_empty() {
+                created.insert(nid.to_string(), node);
             }
-            _ => None,
+            continue;
+        }
+
+        let Some(node) = resolve(doc, &created, get("tgt")) else {
+            continue;
         };
-        let Some(node) = node else { continue };
         match op_kind {
             "prop" => apply_prop(doc, node, &key, &value),
             "style" => merge_style(doc, node, &key, &value),
             "attr" => set_attribute(doc, node, &key, &value),
+            "remove" => doc.detach(node),
+            "append" => {
+                if let Some(child) = resolve(doc, &created, get("child")) {
+                    doc.append(node, child);
+                }
+            }
             _ => {}
         }
     }
@@ -632,6 +671,26 @@ mod tests {
         assert_eq!(text_of(&doc, "p1"), "X");
         // The 2nd <p> in document order is p2.
         assert_eq!(text_of(&doc, "p2"), "Y");
+    }
+
+    #[test]
+    fn create_element_and_append_child() {
+        let mut doc = argus_html::parse(
+            "<div id=\"root\"></div>\
+             <script>\
+               var p = document.createElement('p');\
+               p.textContent = 'created node';\
+               p.className = 'made';\
+               document.getElementById('root').appendChild(p);\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        let root = find_by_id(&doc, "root").unwrap();
+        let child = doc.children(root).next().expect("appended child");
+        let e = doc.node(child).as_element().expect("element");
+        assert!(e.name.is_html("p"));
+        assert_eq!(e.attr("class"), Some("made"));
+        assert_eq!(text_content(&doc, child), "created node");
     }
 
     #[test]
