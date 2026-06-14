@@ -55,6 +55,13 @@ name = "argus-geometry"
 version = "0.0.0"
 
 [[package]]
+name = "argus-html"
+version = "0.0.0"
+dependencies = [
+ "argus-dom",
+]
+
+[[package]]
 name = "argus-ipc"
 version = "0.0.0"
 dependencies = [
