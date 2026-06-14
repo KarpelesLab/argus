@@ -80,6 +80,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "argus-layout"
+version = "0.0.0"
+dependencies = [
+ "argus-dom",
+ "argus-gfx",
+ "argus-html",
+ "argus-style",
+]
+
+[[package]]
 name = "argus-platform"
 version = "0.0.0"
 dependencies = [
