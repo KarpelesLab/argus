@@ -40,6 +40,15 @@ function __argus_el(tgt) {
         });
       }
       if (k === "__tgt") return tgt;
+      if (k === "classList") {
+        var cur = (seed && seed["class"]) ? (" " + seed["class"] + " ") : " ";
+        return {
+          add: function(c) { __argus_ops.push({op: "class", tgt: tgt, key: "add", value: "" + c}); },
+          remove: function(c) { __argus_ops.push({op: "class", tgt: tgt, key: "remove", value: "" + c}); },
+          toggle: function(c) { __argus_ops.push({op: "class", tgt: tgt, key: "toggle", value: "" + c}); },
+          contains: function(c) { return cur.indexOf(" " + c + " ") >= 0; }
+        };
+      }
       if (k === "setAttribute") {
         return function(name, val) {
           __argus_ops.push({op: "attr", tgt: tgt, key: "" + name, value: "" + val});
@@ -232,6 +241,7 @@ fn apply_ops(doc: &mut Document, json: &str) {
             "prop" => apply_prop(doc, node, &key, &value),
             "style" => merge_style(doc, node, &key, &value),
             "attr" => set_attribute(doc, node, &key, &value),
+            "class" => apply_class_list(doc, node, &key, &value),
             "remove" => doc.detach(node),
             "append" => {
                 if let Some(child) = resolve(doc, &created, get("child")) {
@@ -351,6 +361,33 @@ fn import_subtree(src: &Document, src_node: NodeId, dst: &mut Document, dst_pare
     for c in kids {
         import_subtree(src, c, dst, new);
     }
+}
+
+/// Apply a `classList` mutation (`add`/`remove`/`toggle`) to an element's class.
+fn apply_class_list(doc: &mut Document, node: NodeId, action: &str, class: &str) {
+    if class.is_empty() {
+        return;
+    }
+    let current = doc
+        .node(node)
+        .as_element()
+        .and_then(|e| e.attr("class"))
+        .unwrap_or("")
+        .to_string();
+    let mut classes: Vec<&str> = current.split_whitespace().collect();
+    let present = classes.contains(&class);
+    let want = match action {
+        "add" => true,
+        "remove" => false,
+        "toggle" => !present,
+        _ => present,
+    };
+    if want && !present {
+        classes.push(class);
+    } else if !want && present {
+        classes.retain(|c| *c != class);
+    }
+    set_attribute(doc, node, "class", &classes.join(" "));
 }
 
 /// Set or replace an attribute on an element.
@@ -698,6 +735,31 @@ mod tests {
         assert!(e.name.is_html("p"));
         assert_eq!(e.attr("class"), Some("made"));
         assert_eq!(text_content(&doc, child), "created node");
+    }
+
+    #[test]
+    fn class_list_add_remove_toggle() {
+        let mut doc = argus_html::parse(
+            "<div id=\"d\" class=\"a b\">x</div>\
+             <script>\
+               var e = document.getElementById('d');\
+               e.classList.add('c');\
+               e.classList.remove('a');\
+               e.classList.toggle('b');\
+               e.classList.toggle('z');\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        let class = attr_of(&doc, "d", "class").unwrap_or_default();
+        let set: std::collections::BTreeSet<&str> = class.split_whitespace().collect();
+        // start a,b → +c, -a, toggle b (off), toggle z (on) → {c, z}
+        assert_eq!(
+            set,
+            ["c", "z"]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            "class was {class:?}"
+        );
     }
 
     #[test]
