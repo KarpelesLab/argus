@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+authors = ["MagicalTux"]
+repository = "https://github.com/KarpelesLab/argus"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Internal crates (path deps; never published)
+argus-util = { path = "crates/argus-util" }
+argus-geometry = { path = "crates/argus-geometry" }
+argus-ipc = { path = "crates/argus-ipc" }
+argus-platform = { path = "crates/argus-platform" }
+argus-compositor = { path = "crates/argus-compositor" }
+argus-browser = { path = "crates/argus-browser" }
+argus-content = { path = "crates/argus-content" }
+argus-services = { path = "crates/argus-services" }
+
+# OS-thin external deps (bindings to the system, no bundled C/C++).
+libc = "0.2"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+# Pragmatic for an early-stage engine; tightened over time.
+too_many_arguments = "allow"
+
+[profile.release]
+debug = 1
