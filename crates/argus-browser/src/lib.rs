@@ -228,7 +228,7 @@ pub fn render_once(url: Option<&str>, viewport: Size) -> io::Result<(Size, Vec<u
     }
     proto::send(content.channel(), Msg::LoadDocument { html }, &[])?;
 
-    let frame = request_frame(&content, &net, url)?;
+    let (frame, _) = request_frame(&content, &net, url)?;
     let pixels = frame.pixels().to_vec();
     let size = frame.size();
 
@@ -262,7 +262,7 @@ pub fn run() -> io::Result<()> {
     );
 
     // Ask content to paint, then verify the framebuffer it shared back.
-    let frame = request_frame(&content, &net, None)?;
+    let (frame, _) = request_frame(&content, &net, None)?;
     let color = verify_uniform(&frame)?;
     let size = frame.size();
     log!(
@@ -299,7 +299,11 @@ pub fn run() -> io::Result<()> {
 
 /// Ask `content` to paint, serving any subresource fetches it makes through the
 /// `net` service while it renders, and map the shared framebuffer it hands back.
-fn request_frame(content: &Child, net: &Child, base: Option<&str>) -> io::Result<Framebuffer> {
+fn request_frame(
+    content: &Child,
+    net: &Child,
+    base: Option<&str>,
+) -> io::Result<(Framebuffer, u32)> {
     proto::send(content.channel(), Msg::RequestFrame, &[])?;
     let (msg, mut fds) = loop {
         let (msg, fds) = proto::recv(content.channel())?;
@@ -314,8 +318,11 @@ fn request_frame(content: &Child, net: &Child, base: Option<&str>) -> io::Result
             other => break (other, fds),
         }
     };
-    let size = match msg {
-        Msg::FrameReady { size } => size,
+    let (size, content_height) = match msg {
+        Msg::FrameReady {
+            size,
+            content_height,
+        } => (size, content_height),
         other => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -329,7 +336,7 @@ fn request_frame(content: &Child, net: &Child, base: Option<&str>) -> io::Result
             "FrameReady carried no framebuffer fd",
         )
     })?;
-    Framebuffer::from_fd(fd, size)
+    Ok((Framebuffer::from_fd(fd, size)?, content_height))
 }
 
 /// Run the browser in its default mode for this platform: a real window where one
@@ -372,11 +379,12 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
     log!("children handshook; page sent; opening window");
 
     // Present the first frame.
-    let frame = request_frame(&content, &net, current_url.as_deref())?;
+    let (frame, mut content_height) = request_frame(&content, &net, current_url.as_deref())?;
     let window = Window::open("Argus", viewport);
     window.present(frame.pixels(), frame.size());
-    log!("window open — click links to navigate, close to quit");
+    log!("window open — click links to navigate, scroll the wheel, close to quit");
 
+    let mut scroll_y: u32 = 0;
     loop {
         match window.next_event() {
             Event::MouseDown { x, y } => {
@@ -390,9 +398,23 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
                             .unwrap_or_else(|e| error_page(&target, &e.to_string()));
                         provide_page(&content, &page)?;
                         current_url = Some(target);
-                        let frame = request_frame(&content, &net, current_url.as_deref())?;
+                        scroll_y = 0;
+                        proto::send(content.channel(), Msg::SetScroll { y: 0 }, &[])?;
+                        let (frame, h) = request_frame(&content, &net, current_url.as_deref())?;
+                        content_height = h;
                         window.present(frame.pixels(), frame.size());
                     }
+                }
+            }
+            Event::Scroll { dy } => {
+                let max_scroll = content_height.saturating_sub(viewport.height);
+                let next = (scroll_y as i64 - dy as i64).clamp(0, max_scroll as i64) as u32;
+                if next != scroll_y {
+                    scroll_y = next;
+                    proto::send(content.channel(), Msg::SetScroll { y: scroll_y }, &[])?;
+                    let (frame, h) = request_frame(&content, &net, current_url.as_deref())?;
+                    content_height = h;
+                    window.present(frame.pixels(), frame.size());
                 }
             }
             Event::CloseRequested => {

@@ -30,6 +30,8 @@ pub fn run(channel: Channel) -> io::Result<()> {
         font: None,
         html: None,
         links: Vec::new(),
+        scroll_y: 0,
+        content_height: viewport.height,
         _frame: None,
     };
 
@@ -53,8 +55,19 @@ pub fn run(channel: Channel) -> io::Result<()> {
             }
             Msg::RequestFrame => {
                 let fb = content.render(&channel)?;
-                proto::send(&channel, Msg::FrameReady { size: viewport }, &[fb.as_fd()])?;
+                let content_height = content.content_height;
+                proto::send(
+                    &channel,
+                    Msg::FrameReady {
+                        size: viewport,
+                        content_height,
+                    },
+                    &[fb.as_fd()],
+                )?;
                 content._frame = Some(fb);
+            }
+            Msg::SetScroll { y } => {
+                content.scroll_y = y;
             }
             Msg::InputClick { x, y } => {
                 let url = content
@@ -81,8 +94,12 @@ struct Content {
     viewport: Size,
     font: Option<Font>,
     html: Option<String>,
-    /// Clickable link regions from the last render, for hit-testing input.
+    /// Clickable link regions from the last render (in screen coords), for input.
     links: Vec<argus_layout::LinkBox>,
+    /// Vertical scroll offset in pixels.
+    scroll_y: u32,
+    /// Full page height from the last layout (reported to the browser for clamping).
+    content_height: u32,
     /// Keeps the last framebuffer mapped so its shared memory stays valid for the
     /// browser after `FrameReady`.
     _frame: Option<Framebuffer>,
@@ -125,7 +142,26 @@ impl Content {
             .collect();
 
         fb.fill(Color::WHITE);
-        let layout = argus_layout::layout(&doc, font, self.viewport.width as f32, &sizes);
+        let mut layout = argus_layout::layout(&doc, font, self.viewport.width as f32, &sizes);
+
+        // Apply the scroll offset: shift everything up by the clamped scroll amount
+        // so the visible window of the (taller) page is rendered. Links shift too so
+        // hit-testing matches what's on screen. The page height is reported back.
+        self.content_height = layout.height as u32;
+        let max_scroll = (layout.height - self.viewport.height as f32).max(0.0);
+        let scroll = (self.scroll_y as f32).min(max_scroll);
+        for r in &mut layout.rects {
+            r.y -= scroll;
+        }
+        for r in &mut layout.runs {
+            r.baseline -= scroll;
+        }
+        for im in &mut layout.images {
+            im.y -= scroll;
+        }
+        for l in &mut layout.links {
+            l.y -= scroll;
+        }
         let list = argus_gfx::DisplayList {
             rects: layout.rects,
             runs: layout.runs,

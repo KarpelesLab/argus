@@ -94,11 +94,14 @@ pub enum Msg {
     Ready { version: u16 },
     /// browser → content: please paint a frame at the current viewport.
     RequestFrame,
-    /// content → browser: a framebuffer of `size` is attached as one fd; its
-    /// bytes are RGBA8, `size.area() * 4` long.
-    FrameReady { size: Size },
+    /// content → browser: a framebuffer of `size` is attached as one fd; its bytes
+    /// are RGBA8, `size.area() * 4` long. `content_height` is the full page height
+    /// (for the browser to clamp scrolling).
+    FrameReady { size: Size, content_height: u32 },
     /// browser → content: a primary-button press at content pixel `(x, y)`.
     InputClick { x: u32, y: u32 },
+    /// browser → content: set the vertical scroll offset for the next frame.
+    SetScroll { y: u32 },
     /// browser → content: font file bytes for text rendering (the sandboxed content
     /// process cannot read fonts from disk itself).
     ProvideFont { bytes: Vec<u8> },
@@ -153,6 +156,7 @@ const TAG_RESOURCE_LOADED: u8 = 10;
 const TAG_FETCH_RESOURCE: u8 = 11;
 const TAG_RESOURCE_DATA: u8 = 12;
 const TAG_CLICK_RESULT: u8 = 13;
+const TAG_SET_SCROLL: u8 = 14;
 
 impl Msg {
     /// Number of file descriptors that accompany this message out-of-band.
@@ -177,9 +181,13 @@ impl Msg {
                 buf.extend_from_slice(&version.to_le_bytes());
             }
             Msg::RequestFrame => buf.push(TAG_REQUEST_FRAME),
-            Msg::FrameReady { size } => {
+            Msg::FrameReady {
+                size,
+                content_height,
+            } => {
                 buf.push(TAG_FRAME_READY);
                 put_size(&mut buf, *size);
+                buf.extend_from_slice(&content_height.to_le_bytes());
             }
             Msg::InputClick { x, y } => {
                 buf.push(TAG_INPUT_CLICK);
@@ -215,6 +223,10 @@ impl Msg {
                 buf.push(TAG_CLICK_RESULT);
                 put_bytes(&mut buf, url.as_bytes());
             }
+            Msg::SetScroll { y } => {
+                buf.push(TAG_SET_SCROLL);
+                buf.extend_from_slice(&y.to_le_bytes());
+            }
             Msg::Shutdown => buf.push(TAG_SHUTDOWN),
         }
         buf
@@ -231,7 +243,10 @@ impl Msg {
             },
             TAG_READY => Msg::Ready { version: c.u16()? },
             TAG_REQUEST_FRAME => Msg::RequestFrame,
-            TAG_FRAME_READY => Msg::FrameReady { size: c.size()? },
+            TAG_FRAME_READY => Msg::FrameReady {
+                size: c.size()?,
+                content_height: c.u32()?,
+            },
             TAG_INPUT_CLICK => Msg::InputClick {
                 x: c.u32()?,
                 y: c.u32()?,
@@ -258,6 +273,7 @@ impl Msg {
             TAG_CLICK_RESULT => Msg::ClickResult {
                 url: String::from_utf8_lossy(c.bytes()?).into_owned(),
             },
+            TAG_SET_SCROLL => Msg::SetScroll { y: c.u32()? },
             TAG_SHUTDOWN => Msg::Shutdown,
             other => return Err(DecodeError::BadTag(other)),
         };
@@ -337,7 +353,9 @@ mod tests {
         round_trip(Msg::RequestFrame);
         round_trip(Msg::FrameReady {
             size: Size::new(800, 600),
+            content_height: 1234,
         });
+        round_trip(Msg::SetScroll { y: 50 });
         round_trip(Msg::InputClick { x: 12, y: 345 });
         round_trip(Msg::ProvideFont {
             bytes: vec![0, 1, 2, 250, 255],
@@ -368,7 +386,8 @@ mod tests {
     fn frame_ready_expects_one_fd() {
         assert_eq!(
             Msg::FrameReady {
-                size: Size::new(1, 1)
+                size: Size::new(1, 1),
+                content_height: 1,
             }
             .expected_fds(),
             1

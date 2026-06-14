@@ -24,6 +24,9 @@ use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize};
 pub enum Event {
     /// A primary-button press at the given content pixel (top-left origin).
     MouseDown { x: u32, y: u32 },
+    /// A scroll-wheel movement; `dy` is the vertical delta in pixels (positive =
+    /// content moves up, i.e. scroll down).
+    Scroll { dy: i32 },
     /// The user asked to close the window.
     CloseRequested,
 }
@@ -152,6 +155,15 @@ impl Window {
                 if kind == NSEventType::LeftMouseDown {
                     if let Some(mapped) = self.map_mouse_down(&event) {
                         return mapped;
+                    }
+                } else if kind == NSEventType::ScrollWheel {
+                    // scrollingDeltaY: positive = content should move down (wheel up).
+                    let dy = event.scrollingDeltaY();
+                    if dy != 0.0 {
+                        // A small multiplier makes wheel/trackpad scrolling feel right.
+                        return Event::Scroll {
+                            dy: (dy * 3.0) as i32,
+                        };
                     }
                 }
             }
