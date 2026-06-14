@@ -17,8 +17,8 @@
 use argus_dom::{Document, ElementData, NodeData, NodeId};
 use argus_gfx::{Font, RectFill, TextRun};
 use argus_style::{
-    author_stylesheet, computed_style, AuthorStylesheet, BoxSizing, ComputedStyle, Display,
-    ListStyle, TextAlign, TextTransform, VerticalAlign,
+    author_stylesheet, computed_style, AuthorStylesheet, BoxSizing, ComputedStyle, Display, Length,
+    ListStyle, Position, TextAlign, TextTransform, VerticalAlign,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -91,6 +91,25 @@ fn roman_marker(n: u32) -> String {
         }
     }
     out
+}
+
+/// Resolve a `position: relative` element's net `(dx, dy)` shift from its inset
+/// offsets. `left`/`top` win over `right`/`bottom`; lengths resolve against the
+/// containing block width `avail`.
+fn relative_offset(style: &ComputedStyle, avail: f32) -> (f32, f32) {
+    let fs = style.font_size;
+    let axis = |a: Option<Length>, b: Option<Length>| -> f32 {
+        if let Some(l) = a {
+            l.to_px(fs, avail)
+        } else if let Some(r) = b {
+            -r.to_px(fs, avail)
+        } else {
+            0.0
+        }
+    };
+    let dx = axis(style.inset_left, style.inset_right);
+    let dy = axis(style.inset_top, style.inset_bottom);
+    (dx, dy)
 }
 
 /// Clamp a content-box `width` to the `min-width`/`max-width` constraints,
@@ -260,6 +279,15 @@ impl Ctx<'_> {
         avail: f32,
         marker: Option<Marker>,
     ) {
+        // For `position: relative`, remember where this subtree's display-list
+        // items begin so they can all be shifted by the inset offset at the end.
+        let ds_start = (
+            self.rects.len(),
+            self.runs.len(),
+            self.images.len(),
+            self.links.len(),
+        );
+
         let border_box_top = self.cursor_y;
         let border_box_left = x + style.margin.left;
 
@@ -505,6 +533,35 @@ impl Ctx<'_> {
                 border_box_h,
                 style.border_color,
             );
+        }
+
+        // `position: relative` paints the box (and its subtree) shifted by its
+        // inset, without affecting the normal flow of following siblings.
+        if style.position == Position::Relative {
+            let (dx, dy) = relative_offset(&style, avail);
+            if dx != 0.0 || dy != 0.0 {
+                self.shift_display_list(ds_start, dx, dy);
+            }
+        }
+    }
+
+    /// Shift every display-list item appended since `start` by `(dx, dy)`.
+    fn shift_display_list(&mut self, start: (usize, usize, usize, usize), dx: f32, dy: f32) {
+        for r in &mut self.rects[start.0..] {
+            r.x += dx;
+            r.y += dy;
+        }
+        for r in &mut self.runs[start.1..] {
+            r.x += dx;
+            r.baseline += dy;
+        }
+        for im in &mut self.images[start.2..] {
+            im.x += dx;
+            im.y += dy;
+        }
+        for l in &mut self.links[start.3..] {
+            l.x += dx;
+            l.y += dy;
         }
     }
 
@@ -1099,6 +1156,32 @@ mod tests {
             double > single * 1.6,
             "line-height:2 gap {double} should far exceed line-height:1 gap {single}"
         );
+    }
+
+    #[test]
+    fn position_relative_shifts_the_subtree() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let bg = |css: &str| -> (f32, f32) {
+            let html = format!("<div style=\"background-color:#ff0000; {css}\">hi</div>");
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+            let r = l
+                .rects
+                .iter()
+                .find(|r| r.color.r == 255 && r.color.g == 0)
+                .expect("bg rect");
+            (r.x, r.y)
+        };
+        let (sx, sy) = bg("");
+        let (rx, ry) = bg("position: relative; left: 30px; top: 10px");
+        assert!((rx - sx - 30.0).abs() < 0.5, "dx: {} vs {}", rx, sx);
+        assert!((ry - sy - 10.0).abs() < 0.5, "dy: {} vs {}", ry, sy);
+        // `right` shifts left (negative dx).
+        let (rx2, _) = bg("position: relative; right: 20px");
+        assert!((rx2 - sx + 20.0).abs() < 0.5, "right dx: {} vs {}", rx2, sx);
     }
 
     #[test]

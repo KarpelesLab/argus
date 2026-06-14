@@ -9,12 +9,13 @@
 //! `docs/subsystems/style.md`.
 
 use argus_css::{matches, parse_color, parse_declaration_block, parse_length, parse_stylesheet};
-use argus_css::{Length, Specificity, Stylesheet};
+use argus_css::{Specificity, Stylesheet};
 use argus_dom::{Document, NodeData, NodeId};
 use argus_geometry::Color;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+pub use argus_css::Length;
 pub use argus_css::Stylesheet as AuthorStylesheet;
 
 /// The `display` value, reduced to what layout understands.
@@ -72,6 +73,13 @@ pub enum VerticalAlign {
     Baseline,
     Sub,
     Super,
+}
+
+/// `position` (the subset layout honors: static flow vs. a relative offset).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Position {
+    Static,
+    Relative,
 }
 
 /// Four edge values (top/right/bottom/left) in CSS pixels.
@@ -137,6 +145,12 @@ pub struct ComputedStyle {
     pub vertical_align: VerticalAlign,
     /// `gap` between flex/grid items in pixels (not inherited).
     pub gap: f32,
+    /// `position` and its inset offsets (resolved during layout; not inherited).
+    pub position: Position,
+    pub inset_top: Option<Length>,
+    pub inset_right: Option<Length>,
+    pub inset_bottom: Option<Length>,
+    pub inset_left: Option<Length>,
 }
 
 impl ComputedStyle {
@@ -168,6 +182,11 @@ impl ComputedStyle {
             line_height: 1.2,
             vertical_align: VerticalAlign::Baseline,
             gap: 0.0,
+            position: Position::Static,
+            inset_top: None,
+            inset_right: None,
+            inset_bottom: None,
+            inset_left: None,
         }
     }
 
@@ -457,6 +476,42 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             "super" => VerticalAlign::Super,
             _ => VerticalAlign::Baseline,
         };
+    }
+    if let Some(v) = map.get("position") {
+        // Only `relative` is honored; absolute/fixed/sticky fall back to static.
+        cs.position = if v == "relative" {
+            Position::Relative
+        } else {
+            Position::Static
+        };
+    }
+    if let Some(v) = map
+        .get("top")
+        .filter(|v| v.as_str() != "auto")
+        .and_then(|v| parse_length(v))
+    {
+        cs.inset_top = Some(v);
+    }
+    if let Some(v) = map
+        .get("right")
+        .filter(|v| v.as_str() != "auto")
+        .and_then(|v| parse_length(v))
+    {
+        cs.inset_right = Some(v);
+    }
+    if let Some(v) = map
+        .get("bottom")
+        .filter(|v| v.as_str() != "auto")
+        .and_then(|v| parse_length(v))
+    {
+        cs.inset_bottom = Some(v);
+    }
+    if let Some(v) = map
+        .get("left")
+        .filter(|v| v.as_str() != "auto")
+        .and_then(|v| parse_length(v))
+    {
+        cs.inset_left = Some(v);
     }
     if let Some(v) = map.get("line-height") {
         let v = v.trim();
