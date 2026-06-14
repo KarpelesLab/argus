@@ -1210,6 +1210,17 @@ mod tests {
     }
 
     #[test]
+    fn setting_input_value_updates_the_value_attribute() {
+        // `input.value = ...` sets the `value` attribute, which the layout renders.
+        let mut doc = argus_html::parse(
+            "<input id=\"f\" value=\"old\">\
+             <script>document.getElementById('f').value = 'typed text';</script>",
+        );
+        apply_scripts(&mut doc);
+        assert_eq!(attr_of(&doc, "f", "value").as_deref(), Some("typed text"));
+    }
+
+    #[test]
     fn no_scripts_is_noop() {
         let mut doc = argus_html::parse("<p id=p>hi</p>");
         assert!(apply_scripts(&mut doc).is_none());
