@@ -29,6 +29,7 @@ pub fn run(channel: Channel) -> io::Result<()> {
         viewport,
         font: None,
         html: None,
+        links: Vec::new(),
         _frame: None,
     };
 
@@ -56,7 +57,16 @@ pub fn run(channel: Channel) -> io::Result<()> {
                 content._frame = Some(fb);
             }
             Msg::InputClick { x, y } => {
-                log!("received click at ({x}, {y})");
+                let url = content
+                    .links
+                    .iter()
+                    .find(|l| l.contains(x as f32, y as f32))
+                    .map(|l| l.href.clone())
+                    .unwrap_or_default();
+                if !url.is_empty() {
+                    log!("link clicked at ({x}, {y}) -> {url}");
+                }
+                proto::send(&channel, Msg::ClickResult { url }, &[])?;
             }
             Msg::Shutdown => {
                 log!("shutting down");
@@ -71,6 +81,8 @@ struct Content {
     viewport: Size,
     font: Option<Font>,
     html: Option<String>,
+    /// Clickable link regions from the last render, for hit-testing input.
+    links: Vec<argus_layout::LinkBox>,
     /// Keeps the last framebuffer mapped so its shared memory stays valid for the
     /// browser after `FrameReady`.
     _frame: Option<Framebuffer>,
@@ -79,7 +91,8 @@ struct Content {
 impl Content {
     /// Paint the current document (or the fallback color) into a fresh framebuffer.
     /// `channel` is used to fetch image subresources from the browser.
-    fn render(&self, channel: &Channel) -> io::Result<Framebuffer> {
+    fn render(&mut self, channel: &Channel) -> io::Result<Framebuffer> {
+        self.links.clear();
         let mut fb = Framebuffer::create(self.viewport)?;
         let (Some(font), Some(html)) = (&self.font, &self.html) else {
             fb.fill(PHASE0_PAINT);
@@ -141,11 +154,13 @@ impl Content {
         }
 
         log!(
-            "rendered page: {} rects, {} runs, {} images",
+            "rendered page: {} rects, {} runs, {} images, {} links",
             list.rects.len(),
             list.runs.len(),
-            layout.images.len()
+            layout.images.len(),
+            layout.links.len()
         );
+        self.links = layout.links;
         Ok(fb)
     }
 }

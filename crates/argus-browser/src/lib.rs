@@ -128,6 +128,39 @@ fn fetch_html(net: &Child, url: &str) -> io::Result<String> {
     }
 }
 
+/// Resolve `href` against the current page `base` (minimal: absolute, protocol-
+/// relative, root-relative, and same-directory relative URLs).
+fn resolve_url(base: Option<&str>, href: &str) -> String {
+    if href.starts_with("http://") || href.starts_with("https://") {
+        return href.to_string();
+    }
+    let Some(base) = base else {
+        return href.to_string();
+    };
+    if let Some(rest) = href.strip_prefix("//") {
+        let scheme = base.split("://").next().unwrap_or("https");
+        return format!("{scheme}://{rest}");
+    }
+    // Split base into scheme://authority and path.
+    let (scheme_auth, path) = match base.find("://") {
+        Some(i) => {
+            let after = &base[i + 3..];
+            match after.find('/') {
+                Some(j) => (&base[..i + 3 + j], &after[j..]),
+                None => (base, "/"),
+            }
+        }
+        None => return href.to_string(),
+    };
+    if let Some(abs) = href.strip_prefix('/') {
+        format!("{scheme_auth}/{abs}")
+    } else {
+        // Strip the last path segment (the "directory").
+        let dir = &path[..path.rfind('/').map(|i| i + 1).unwrap_or(0)];
+        format!("{scheme_auth}{dir}{href}")
+    }
+}
+
 fn error_page(url: &str, message: &str) -> String {
     format!(
         "<!DOCTYPE html><html><head><title>Error</title>\
@@ -295,23 +328,34 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
     let mut net = spawn_child(Role::NetService)?;
     proto::parent_handshake(content.channel(), viewport)?;
     proto::parent_handshake(net.channel(), viewport)?;
-    let html = resolve_html(&net, url.as_deref());
+    let mut current_url = url.clone();
+    let html = resolve_html(&net, current_url.as_deref());
     provide_page(&content, &html)?;
     log!("children handshook; page sent; opening window");
 
     // Present the first frame.
-    let mut frame = request_frame(&content, &net)?;
+    let frame = request_frame(&content, &net)?;
     let window = Window::open("Argus", viewport);
     window.present(frame.pixels(), frame.size());
-    log!("window open — click to send input to content, close to quit");
+    log!("window open — click links to navigate, close to quit");
 
     loop {
         match window.next_event() {
             Event::MouseDown { x, y } => {
                 proto::send(content.channel(), Msg::InputClick { x, y }, &[])?;
-                // Repaint (Phase 0 content paints the same color each time).
-                frame = request_frame(&content, &net)?;
-                window.present(frame.pixels(), frame.size());
+                // Content replies with the click result; navigate if a link was hit.
+                if let Msg::ClickResult { url } = proto::recv(content.channel())?.0 {
+                    if !url.is_empty() {
+                        let target = resolve_url(current_url.as_deref(), &url);
+                        log!("navigating to {target}");
+                        let page = fetch_html(&net, &target)
+                            .unwrap_or_else(|e| error_page(&target, &e.to_string()));
+                        provide_page(&content, &page)?;
+                        current_url = Some(target);
+                        let frame = request_frame(&content, &net)?;
+                        window.present(frame.pixels(), frame.size());
+                    }
+                }
             }
             Event::CloseRequested => {
                 log!("window closed; shutting down");
@@ -353,4 +397,28 @@ fn verify_uniform(fb: &Framebuffer) -> io::Result<Color> {
         ));
     }
     Ok(c0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_url;
+
+    #[test]
+    fn url_resolution() {
+        let base = Some("https://ex.com/a/b/page.html");
+        assert_eq!(
+            resolve_url(base, "https://other.com/x"),
+            "https://other.com/x"
+        );
+        assert_eq!(resolve_url(base, "/top"), "https://ex.com/top");
+        assert_eq!(
+            resolve_url(base, "sibling.html"),
+            "https://ex.com/a/b/sibling.html"
+        );
+        assert_eq!(resolve_url(base, "//cdn.com/x"), "https://cdn.com/x");
+        assert_eq!(
+            resolve_url(Some("https://ex.com"), "/p"),
+            "https://ex.com/p"
+        );
+    }
 }

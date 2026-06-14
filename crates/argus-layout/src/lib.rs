@@ -17,6 +17,7 @@ use argus_style::{
     author_stylesheet, computed_style, AuthorStylesheet, ComputedStyle, Display, TextAlign,
 };
 use std::collections::HashMap;
+use std::rc::Rc;
 
 const LINE_HEIGHT: f32 = 1.2;
 const PAGE_MARGIN: f32 = 8.0;
@@ -45,6 +46,25 @@ struct InlineWord {
     color: argus_geometry::Color,
     /// Whether whitespace precedes this word (a break opportunity + a space glyph).
     space_before: bool,
+    /// The hyperlink target, if this word is inside an `<a href>`.
+    href: Option<Rc<str>>,
+}
+
+/// A clickable hyperlink region in canvas pixels.
+#[derive(Clone, Debug)]
+pub struct LinkBox {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub href: String,
+}
+
+impl LinkBox {
+    /// Whether `(px, py)` falls inside this link region.
+    pub fn contains(&self, px: f32, py: f32) -> bool {
+        px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
+    }
 }
 
 /// A placed image: its box in canvas pixels and the source URL (key into the
@@ -66,6 +86,8 @@ pub struct Layout {
     pub runs: Vec<TextRun>,
     /// Placed images (blitted by the content process from decoded bytes).
     pub images: Vec<ImageBox>,
+    /// Clickable hyperlink regions.
+    pub links: Vec<LinkBox>,
     /// Total content height in pixels.
     pub height: f32,
 }
@@ -88,6 +110,7 @@ pub fn layout(doc: &Document, font: &Font, viewport_width: f32, images: &ImageSi
         rects: Vec::new(),
         runs: Vec::new(),
         images: Vec::new(),
+        links: Vec::new(),
         cursor_y: PAGE_MARGIN,
     };
 
@@ -102,6 +125,7 @@ pub fn layout(doc: &Document, font: &Font, viewport_width: f32, images: &ImageSi
         rects: ctx.rects,
         runs: ctx.runs,
         images: ctx.images,
+        links: ctx.links,
         height: ctx.cursor_y + PAGE_MARGIN,
     }
 }
@@ -129,6 +153,7 @@ struct Ctx<'a> {
     rects: Vec<RectFill>,
     runs: Vec<TextRun>,
     images: Vec<ImageBox>,
+    links: Vec<LinkBox>,
     cursor_y: f32,
 }
 
@@ -226,7 +251,7 @@ impl Ctx<'_> {
         for child in self.doc.children(id) {
             match &self.doc.node(child).data {
                 NodeData::Text(_) => {
-                    self.gather_inline(child, &style, &mut words, &mut pending_space);
+                    self.gather_inline(child, &style, None, &mut words, &mut pending_space);
                 }
                 NodeData::Element(e) if e.name.is_html("img") => {
                     self.flush_words(&mut words, &style, content_left, content_w);
@@ -253,7 +278,13 @@ impl Ctx<'_> {
                     match cstyle.display {
                         Display::None => {}
                         Display::Inline => {
-                            self.gather_inline(child, &cstyle, &mut words, &mut pending_space);
+                            self.gather_inline(
+                                child,
+                                &cstyle,
+                                None,
+                                &mut words,
+                                &mut pending_space,
+                            );
                         }
                         Display::Block => {
                             self.flush_words(&mut words, &style, content_left, content_w);
@@ -356,6 +387,7 @@ impl Ctx<'_> {
         &self,
         id: NodeId,
         style: &ComputedStyle,
+        link: Option<Rc<str>>,
         words: &mut Vec<InlineWord>,
         pending_space: &mut bool,
     ) {
@@ -372,6 +404,7 @@ impl Ctx<'_> {
                         color: style.color,
                         // Words within a text node are separated by whitespace.
                         space_before: *pending_space || !first,
+                        href: link.clone(),
                     });
                     *pending_space = false;
                     first = false;
@@ -380,13 +413,19 @@ impl Ctx<'_> {
                     *pending_space = true;
                 }
             }
-            NodeData::Element(_) => {
+            NodeData::Element(e) => {
                 let cstyle = computed_style(self.doc, id, style, self.author);
                 if cstyle.display == Display::None {
                     return;
                 }
+                // An <a href> sets the link target for its descendants.
+                let child_link = if e.name.is_html("a") {
+                    e.attr("href").map(Rc::from).or(link)
+                } else {
+                    link
+                };
                 for child in self.doc.children(id) {
-                    self.gather_inline(child, &cstyle, words, pending_space);
+                    self.gather_inline(child, &cstyle, child_link.clone(), words, pending_space);
                 }
             }
             _ => {}
@@ -449,11 +488,14 @@ impl Ctx<'_> {
             };
             let baseline = self.cursor_y + self.font.ascent_px(max_size);
 
+            let line_top = self.cursor_y;
+            let line_h = max_size * LINE_HEIGHT;
             let mut pen_x = x + offset;
             for (j, w) in line.iter().enumerate() {
                 if j > 0 && w.space_before {
                     pen_x += self.font.measure(" ", w.font_size);
                 }
+                let word_w = self.font.measure(&w.text, w.font_size);
                 self.runs.push(TextRun {
                     x: pen_x,
                     baseline,
@@ -461,9 +503,18 @@ impl Ctx<'_> {
                     size_px: w.font_size,
                     color: w.color,
                 });
-                pen_x += self.font.measure(&w.text, w.font_size);
+                if let Some(href) = &w.href {
+                    self.links.push(LinkBox {
+                        x: pen_x,
+                        y: line_top,
+                        w: word_w,
+                        h: line_h,
+                        href: href.to_string(),
+                    });
+                }
+                pen_x += word_w;
             }
-            self.cursor_y += max_size * LINE_HEIGHT;
+            self.cursor_y += line_h;
         }
     }
 }

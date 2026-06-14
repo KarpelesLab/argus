@@ -112,6 +112,9 @@ pub enum Msg {
     FetchResource { url: String },
     /// browser → content: subresource bytes (empty = not found / error).
     ResourceData { body: Vec<u8> },
+    /// content → browser: result of an [`Msg::InputClick`] — a non-empty `url`
+    /// means a link was hit and the browser should navigate.
+    ClickResult { url: String },
     /// browser → child: exit cleanly.
     Shutdown,
 }
@@ -149,6 +152,7 @@ const TAG_LOAD_URL: u8 = 9;
 const TAG_RESOURCE_LOADED: u8 = 10;
 const TAG_FETCH_RESOURCE: u8 = 11;
 const TAG_RESOURCE_DATA: u8 = 12;
+const TAG_CLICK_RESULT: u8 = 13;
 
 impl Msg {
     /// Number of file descriptors that accompany this message out-of-band.
@@ -207,6 +211,10 @@ impl Msg {
                 buf.push(TAG_RESOURCE_DATA);
                 put_bytes(&mut buf, body);
             }
+            Msg::ClickResult { url } => {
+                buf.push(TAG_CLICK_RESULT);
+                put_bytes(&mut buf, url.as_bytes());
+            }
             Msg::Shutdown => buf.push(TAG_SHUTDOWN),
         }
         buf
@@ -246,6 +254,9 @@ impl Msg {
             },
             TAG_RESOURCE_DATA => Msg::ResourceData {
                 body: c.bytes()?.to_vec(),
+            },
+            TAG_CLICK_RESULT => Msg::ClickResult {
+                url: String::from_utf8_lossy(c.bytes()?).into_owned(),
             },
             TAG_SHUTDOWN => Msg::Shutdown,
             other => return Err(DecodeError::BadTag(other)),
@@ -346,6 +357,9 @@ mod tests {
         });
         round_trip(Msg::ResourceData {
             body: vec![137, 80, 78, 71],
+        });
+        round_trip(Msg::ClickResult {
+            url: "/next".to_string(),
         });
         round_trip(Msg::Shutdown);
     }
