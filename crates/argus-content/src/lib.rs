@@ -15,6 +15,8 @@ use argus_util::{log, Role};
 use std::collections::HashMap;
 use std::io;
 
+mod dom_script;
+
 /// Fallback color painted when no document has been loaded yet (Argus blue).
 pub const PHASE0_PAINT: Color = Color::rgb(0x2E, 0x86, 0xDE);
 
@@ -28,7 +30,7 @@ pub fn run(channel: Channel) -> io::Result<()> {
     let mut content = Content {
         viewport,
         font: None,
-        html: None,
+        doc: None,
         links: Vec::new(),
         scroll_y: 0,
         content_height: viewport.height,
@@ -50,8 +52,15 @@ pub fn run(channel: Channel) -> io::Result<()> {
             }
             Msg::LoadDocument { html } => {
                 log!("loaded document ({} bytes)", html.len());
-                run_page_scripts(&argus_html::parse(&html));
-                content.html = Some(html);
+                // Parse once, run the page's scripts against a JS-side DOM shim, and
+                // apply their mutations so layout sees the post-script tree.
+                let mut doc = argus_html::parse(&html);
+                if let Some(console) = dom_script::apply_scripts(&mut doc) {
+                    for line in console.lines() {
+                        log!("console.log: {line}");
+                    }
+                }
+                content.doc = Some(doc);
             }
             Msg::RequestFrame => {
                 let fb = content.render(&channel)?;
@@ -93,7 +102,8 @@ pub fn run(channel: Channel) -> io::Result<()> {
 struct Content {
     viewport: Size,
     font: Option<Font>,
-    html: Option<String>,
+    /// The parsed document, already mutated by its scripts (Phase 2 DOM bindings).
+    doc: Option<argus_dom::Document>,
     /// Clickable link regions from the last render (in screen coords), for input.
     links: Vec<argus_layout::LinkBox>,
     /// Vertical scroll offset in pixels.
@@ -111,16 +121,14 @@ impl Content {
     fn render(&mut self, channel: &Channel) -> io::Result<Framebuffer> {
         self.links.clear();
         let mut fb = Framebuffer::create(self.viewport)?;
-        let (Some(font), Some(html)) = (&self.font, &self.html) else {
+        let (Some(font), Some(doc)) = (&self.font, &self.doc) else {
             fb.fill(PHASE0_PAINT);
             return Ok(fb);
         };
 
-        let doc = argus_html::parse(html);
-
         // Decode every <img> (data: URLs locally, http(s) via the browser).
         let mut images: HashMap<String, argus_image::DecodedImage> = HashMap::new();
-        for src in collect_img_srcs(&doc) {
+        for src in collect_img_srcs(doc) {
             if images.contains_key(&src) {
                 continue;
             }
@@ -142,7 +150,7 @@ impl Content {
             .collect();
 
         fb.fill(Color::WHITE);
-        let mut layout = argus_layout::layout(&doc, font, self.viewport.width as f32, &sizes);
+        let mut layout = argus_layout::layout(doc, font, self.viewport.width as f32, &sizes);
 
         // Apply the scroll offset: shift everything up by the clamped scroll amount
         // so the visible window of the (taller) page is rendered. Links shift too so
@@ -198,43 +206,6 @@ impl Content {
         );
         self.links = layout.links;
         Ok(fb)
-    }
-}
-
-/// Run every inline `<script>` (no `src`) in document order through kataan,
-/// logging its console output. Phase 2 is computation + console only — there are
-/// no DOM bindings yet (see `argus-script`).
-fn run_page_scripts(doc: &argus_dom::Document) {
-    fn collect(doc: &argus_dom::Document, id: argus_dom::NodeId, out: &mut Vec<String>) {
-        if let argus_dom::NodeData::Element(e) = &doc.node(id).data {
-            if e.name.is_html("script") && e.attr("src").is_none() {
-                let mut src = String::new();
-                for child in doc.children(id) {
-                    if let argus_dom::NodeData::Text(t) = &doc.node(child).data {
-                        src.push_str(t);
-                    }
-                }
-                if !src.trim().is_empty() {
-                    out.push(src);
-                }
-            }
-        }
-        for child in doc.children(id) {
-            collect(doc, child, out);
-        }
-    }
-
-    let mut scripts = Vec::new();
-    collect(doc, doc.root(), &mut scripts);
-    for src in scripts {
-        match argus_script::run_script(&src) {
-            Ok(result) => {
-                for line in result.console.lines() {
-                    log!("console.log: {line}");
-                }
-            }
-            Err(e) => log!("script error: {e}"),
-        }
     }
 }
 

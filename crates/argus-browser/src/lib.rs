@@ -46,6 +46,11 @@ with the box model, and painted with shaped, anti-aliased glyphs and decoded ima
 all inside a sandboxed content process.</p>\
 <img src=\"{SAMPLE_IMAGE}\" width=\"160\" height=\"90\">\
 </div>\
+<div class=\"card\">\
+<h3>Scripting (Phase 2): live DOM bindings</h3>\
+<p id=\"js-status\" style=\"color: #b00\">JavaScript has not run yet.</p>\
+<ul id=\"js-list\"><li>placeholder (replaced by innerHTML)</li></ul>\
+</div>\
 <h2>Box model &amp; images</h2>\
 <p class=\"note\">This box has a background, a border, and padding from a class \
 selector; the gradient above is a PNG decoded by argus-image. The cascade, inline \
@@ -100,6 +105,10 @@ blue link</a> all flow inside this paragraph with correct spacing.</p>\
 <pre>  line one (two leading spaces)\n    line two (four)\ntab\tafter\nfn main() {{ println!(); }}</pre>\
 <script>\
 function fib(n){{ return n < 2 ? n : fib(n-1) + fib(n-2); }}\
+var s = document.getElementById('js-status');\
+s.textContent = 'JavaScript ran and edited the DOM via getElementById: fib(20) = ' + fib(20) + '.';\
+s.style.color = '#2e7d32';\
+document.getElementById('js-list').innerHTML = '<li>built by</li><li>document</li><li>.innerHTML</li>';\
 console.log('kataan ran: fib(20) = ' + fib(20));\
 </script>\
 </body></html>"
