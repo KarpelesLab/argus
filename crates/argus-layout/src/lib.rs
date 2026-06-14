@@ -8,8 +8,9 @@
 //! font, and aligned per `text-align`. Styles come from the `argus-style` cascade.
 //!
 //! Covers block + inline formatting, the box model (with `box-sizing`,
-//! `min/max-width`, and `line-height`), `position: relative` offsets, lists
-//! (`list-style-type`), `<br>`, `<hr>`, tables, and basic flex/grid (with `gap`).
+//! `min/max-width`, `height`, and `line-height`), `position: relative` offsets,
+//! lists (`list-style-type`), form controls (`<input>`/`<textarea>`/`<button>`/
+//! `<select>`), `<br>`, `<hr>`, tables, and basic flex/grid (with `gap`).
 //! Still a subset of `docs/subsystems/layout.md`: no floats, no absolute/fixed
 //! positioning, no margin collapsing, no `flex-grow`/`justify`/`align` or grid
 //! spans, no inline-level boxes with their own geometry (inline runs adopt their
