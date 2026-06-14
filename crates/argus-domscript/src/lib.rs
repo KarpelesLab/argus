@@ -173,6 +173,24 @@ function __argus_drain() {
     iters++;
   }
 }
+
+// Storage. Backed by an in-execution map, so it is consistent within a page's
+// script run + replayed events (set-then-read works), but is NOT yet persisted
+// across navigations — a documented limitation until the storage service is wired.
+function __Storage() {
+  var data = {};
+  return {
+    getItem: function(k) { var v = data["" + k]; return v == null ? null : v; },
+    setItem: function(k, v) { data["" + k] = "" + v; },
+    removeItem: function(k) { delete data["" + k]; },
+    clear: function() { data = {}; },
+    key: function(i) { var ks = Object.keys(data); return i < ks.length ? ks[i] : null; }
+  };
+}
+var localStorage = __Storage();
+var sessionStorage = __Storage();
+window.localStorage = localStorage;
+window.sessionStorage = sessionStorage;
 "#;
 
 /// One past interaction to replay: fire `event` on the element identified by
@@ -1059,6 +1077,26 @@ mod tests {
         let mut doc = argus_html::parse(html);
         apply_scripts_with_events(&mut doc, &[click.clone(), click.clone()]);
         assert_eq!(text_of(&doc, "n"), "12");
+    }
+
+    #[test]
+    fn local_storage_set_then_read_within_session() {
+        // localStorage is consistent within the run (a click reads what init wrote).
+        let html = "<div id=\"out\"></div>\
+             <script>\
+               localStorage.setItem('greeting', 'hi');\
+               document.getElementById('out').onclick = function(){\
+                 document.getElementById('out').textContent = localStorage.getItem('greeting');\
+               };\
+             </script>";
+        let click = Interaction {
+            kind: "id".into(),
+            val: "out".into(),
+            event: "click".into(),
+        };
+        let mut doc = argus_html::parse(html);
+        apply_scripts_with_events(&mut doc, &[click]);
+        assert_eq!(text_of(&doc, "out"), "hi");
     }
 
     #[test]
