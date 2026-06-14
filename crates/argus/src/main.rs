@@ -35,6 +35,17 @@ fn main() {
             }
             return;
         }
+        // `--dump-a11y`: print the accessibility tree and exit.
+        if has_flag("--dump-a11y") {
+            match argus_browser::dump_a11y(url.as_deref()) {
+                Ok(tree) => print!("{tree}"),
+                Err(err) => {
+                    eprintln!("[browser] dump-a11y failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
     }
 
     let result = match role {

@@ -216,6 +216,96 @@ pub fn dump_dom(url: Option<&str>) -> io::Result<String> {
     Ok(argus_html::parse(&html).serialize())
 }
 
+/// Headless automation: fetch a page and return its **accessibility tree** — the
+/// ARIA role and accessible name of each semantic element (a start on the a11y
+/// tree from `docs/subsystems/embedding.md`). Used by `--dump-a11y`.
+pub fn dump_a11y(url: Option<&str>) -> io::Result<String> {
+    use argus_dom::{Document, NodeData, NodeId};
+
+    log::set_role(Role::Browser);
+    let mut net = spawn_child(Role::NetService)?;
+    proto::parent_handshake(net.channel(), Size::new(800, 600))?;
+    let html = resolve_html(&net, url);
+    proto::send(net.channel(), Msg::Shutdown, &[])?;
+    net.wait()?;
+    let doc = argus_html::parse(&html);
+
+    /// ARIA role implied by an HTML tag (None = generic/presentational).
+    fn role_for(tag: &str) -> Option<&'static str> {
+        Some(match tag {
+            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => "heading",
+            "a" => "link",
+            "button" => "button",
+            "img" => "img",
+            "ul" | "ol" => "list",
+            "li" => "listitem",
+            "nav" => "navigation",
+            "main" => "main",
+            "header" => "banner",
+            "footer" => "contentinfo",
+            "input" | "textarea" => "textbox",
+            "p" => "paragraph",
+            "table" => "table",
+            "tr" => "row",
+            "td" => "cell",
+            "th" => "columnheader",
+            "form" => "form",
+            _ => return None,
+        })
+    }
+
+    fn text_of(doc: &Document, id: NodeId, out: &mut String) {
+        match &doc.node(id).data {
+            NodeData::Text(t) => out.push_str(t),
+            NodeData::Element(_) => {
+                for c in doc.children(id) {
+                    text_of(doc, c, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn walk(doc: &Document, id: NodeId, depth: usize, out: &mut String) {
+        let mut next_depth = depth;
+        if let NodeData::Element(e) = &doc.node(id).data {
+            let tag = &*e.name.local;
+            if !matches!(tag, "head" | "title" | "style" | "script" | "meta" | "link") {
+                if let Some(role) = role_for(tag) {
+                    let name = if tag == "img" {
+                        e.attr("alt").unwrap_or("").to_string()
+                    } else {
+                        let mut s = String::new();
+                        text_of(doc, id, &mut s);
+                        s.split_whitespace().collect::<Vec<_>>().join(" ")
+                    };
+                    let name = if name.len() > 60 {
+                        format!("{}…", &name[..60])
+                    } else {
+                        name
+                    };
+                    for _ in 0..depth {
+                        out.push_str("  ");
+                    }
+                    out.push_str(role);
+                    if !name.is_empty() {
+                        out.push_str(&format!(" \"{name}\""));
+                    }
+                    out.push('\n');
+                    next_depth = depth + 1;
+                }
+            }
+        }
+        for c in doc.children(id) {
+            walk(doc, c, next_depth, out);
+        }
+    }
+
+    let mut out = String::from("document\n");
+    walk(&doc, doc.root(), 1, &mut out);
+    Ok(out)
+}
+
 /// Render a page (a fetched `url`, or the sample) to pixels once, off-screen.
 /// Returns the framebuffer size and RGBA bytes. Used by the `--dump-page` tool.
 pub fn render_once(url: Option<&str>, viewport: Size) -> io::Result<(Size, Vec<u8>)> {
