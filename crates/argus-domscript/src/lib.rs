@@ -9,9 +9,10 @@
 //!
 //! This is a pragmatic subset — synchronous only, no live reflow — but it makes a
 //! real chunk of the DOM API actually change the rendered page, plus discrete
-//! `click` handlers (via deterministic replay through [`apply_scripts_with_events`])
-//! and `setTimeout`/`setInterval` callbacks (drained synchronously, earliest delay
-//! first, with no real wall-clock delay). The API surface includes:
+//! `click` handlers (via deterministic replay through [`apply_scripts_with_events`]),
+//! `setTimeout`/`setInterval` callbacks (drained synchronously, earliest delay
+//! first, no wall clock), and `localStorage`/`sessionStorage` (session-scoped, not
+//! yet persisted across navigations). The DOM API surface includes:
 //! `document.getElementById` / `querySelector` (full CSS selector engine) /
 //! `createElement` / `body` / `write`, and on elements `textContent`/`innerText`,
 //! `innerHTML`, `className`, `setAttribute`/`getAttribute`, `style.<camelCase>`,
