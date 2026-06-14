@@ -13,6 +13,22 @@ fn main() {
     let role = parse_role();
     argus_util::log::set_role(role);
 
+    // `--eval=<js>`: run JavaScript through kataan and print console output + result
+    // (a Runtime.evaluate-style headless surface). No DOM bindings yet.
+    if let Some(src) = flag_value("--eval=") {
+        match argus_script::run_script(&src) {
+            Ok(r) => {
+                print!("{}", r.console);
+                println!("=> {}", r.value);
+            }
+            Err(e) => {
+                eprintln!("script error: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     let url = flag_value("--url=");
 
     // `--dump-page=PATH`: render the page (sample or `--url`) off-screen to a PNG.

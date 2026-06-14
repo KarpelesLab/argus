@@ -11,6 +11,7 @@ dependencies = [
  "argus-geometry",
  "argus-ipc",
  "argus-platform",
+ "argus-script",
  "argus-services",
  "argus-util",
  "oxideav-core",

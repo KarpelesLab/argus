@@ -19,6 +19,7 @@ argus-geometry.workspace = true
 argus-browser.workspace = true
 argus-content.workspace = true
 argus-services.workspace = true
+argus-script.workspace = true
 oxideav-core = "0.1"
 oxideav-png = "0.1"
 
