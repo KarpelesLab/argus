@@ -1,9 +1,9 @@
 //! Image decoding (Layer 1).
 //!
-//! Decodes image bytes into RGBA8 for the renderer, using the first-party oxideav
-//! codecs. Phase 1 covers PNG (via `oxideav-png`) and `data:` URLs; JPEG/GIF/WebP/
-//! AVIF (the other oxideav codecs) plug into [`decode`] as they're wired up. See
-//! `docs/subsystems/media.md`.
+//! Decodes image bytes into RGBA8 for the renderer. PNG (via `oxideav-png`), GIF
+//! (`oxideav-gif`), uncompressed 24/32-bit BMP (built in), and `data:` URLs are
+//! supported; JPEG/WebP/AVIF plug into [`decode`] once those oxideav codecs ship
+//! working decoders. See `docs/subsystems/media.md`.
 
 /// A decoded image: `width * height * 4` straight-alpha RGBA bytes.
 #[derive(Clone, Debug)]
@@ -36,8 +36,73 @@ pub fn decode(bytes: &[u8]) -> Option<DecodedImage> {
             rgba: frame.canvas.pixels,
         });
     }
+    if bytes.starts_with(b"BM") {
+        return decode_bmp(bytes);
+    }
     // JPEG (FF D8) and WebP (RIFF…WEBP) decode here as those codecs are wired in.
     None
+}
+
+/// Decode an uncompressed 24- or 32-bit Windows BMP (BITMAPINFOHEADER) to RGBA.
+/// Rows are bottom-up for positive height, top-down for negative; pixels are
+/// BGR(A) and each row is padded to a 4-byte boundary. Returns `None` for
+/// compressed, paletted, or malformed files.
+fn decode_bmp(bytes: &[u8]) -> Option<DecodedImage> {
+    let rd_u16 = |o: usize| -> Option<u16> {
+        Some(u16::from_le_bytes([*bytes.get(o)?, *bytes.get(o + 1)?]))
+    };
+    let rd_u32 = |o: usize| -> Option<u32> {
+        Some(u32::from_le_bytes([
+            *bytes.get(o)?,
+            *bytes.get(o + 1)?,
+            *bytes.get(o + 2)?,
+            *bytes.get(o + 3)?,
+        ]))
+    };
+    let rd_i32 = |o: usize| -> Option<i32> { rd_u32(o).map(|v| v as i32) };
+
+    let data_offset = rd_u32(10)? as usize;
+    let dib_size = rd_u32(14)?;
+    if dib_size < 40 {
+        return None; // only BITMAPINFOHEADER and later
+    }
+    let width = rd_i32(18)?;
+    let height_raw = rd_i32(22)?;
+    let bpp = rd_u16(28)?;
+    let compression = rd_u32(30)?;
+    if compression != 0 || (bpp != 24 && bpp != 32) || width <= 0 || height_raw == 0 {
+        return None;
+    }
+    let top_down = height_raw < 0;
+    let width = width as usize;
+    let height = height_raw.unsigned_abs() as usize;
+    let bytes_pp = (bpp / 8) as usize;
+    let row_size = (width * bytes_pp).div_ceil(4) * 4; // padded to 4 bytes
+
+    let mut rgba = vec![0u8; width * height * 4];
+    for row in 0..height {
+        // Source row: bottom-up files store the last image row first.
+        let src_row = if top_down { row } else { height - 1 - row };
+        let row_start = data_offset + src_row * row_size;
+        for col in 0..width {
+            let p = row_start + col * bytes_pp;
+            let b = *bytes.get(p)?;
+            let g = *bytes.get(p + 1)?;
+            let r = *bytes.get(p + 2)?;
+            // 32bpp in a BITMAPINFOHEADER is BGRX (the 4th byte is padding, not
+            // alpha — that needs V4/V5 headers), so treat every pixel as opaque.
+            let dst = (row * width + col) * 4;
+            rgba[dst] = r;
+            rgba[dst + 1] = g;
+            rgba[dst + 2] = b;
+            rgba[dst + 3] = 0xFF;
+        }
+    }
+    Some(DecodedImage {
+        width: width as u32,
+        height: height as u32,
+        rgba,
+    })
 }
 
 /// Decode a `data:` URL (`data:[<mime>][;base64],<payload>`).
@@ -86,6 +151,39 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_a_24bit_bmp() {
+        // A 2x2 24-bit BMP, bottom-up. Stored rows (bottom first):
+        //   row0 (image bottom): red, green   row1 (image top): blue, white
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(b"BM");
+        b.extend_from_slice(&70u32.to_le_bytes()); // file size
+        b.extend_from_slice(&0u32.to_le_bytes()); // reserved
+        b.extend_from_slice(&54u32.to_le_bytes()); // pixel data offset
+        b.extend_from_slice(&40u32.to_le_bytes()); // DIB header size
+        b.extend_from_slice(&2i32.to_le_bytes()); // width
+        b.extend_from_slice(&2i32.to_le_bytes()); // height (bottom-up)
+        b.extend_from_slice(&1u16.to_le_bytes()); // planes
+        b.extend_from_slice(&24u16.to_le_bytes()); // bpp
+        b.extend_from_slice(&0u32.to_le_bytes()); // compression (BI_RGB)
+        b.extend_from_slice(&0u32.to_le_bytes()); // image size
+        b.extend_from_slice(&0u32.to_le_bytes()); // x ppm
+        b.extend_from_slice(&0u32.to_le_bytes()); // y ppm
+        b.extend_from_slice(&0u32.to_le_bytes()); // colors used
+        b.extend_from_slice(&0u32.to_le_bytes()); // colors important
+                                                  // Pixel data is BGR, each row padded to 4 bytes.
+        b.extend_from_slice(&[0, 0, 255, 0, 255, 0, 0, 0]); // bottom: red, green + pad
+        b.extend_from_slice(&[255, 0, 0, 255, 255, 255, 0, 0]); // top: blue, white + pad
+
+        let img = decode(&b).expect("decode bmp");
+        assert_eq!((img.width, img.height), (2, 2));
+        // Top-left is blue, top-right white, bottom-left red, bottom-right green.
+        assert_eq!(&img.rgba[0..4], &[0, 0, 255, 255]); // (0,0) blue
+        assert_eq!(&img.rgba[4..8], &[255, 255, 255, 255]); // (1,0) white
+        assert_eq!(&img.rgba[8..12], &[255, 0, 0, 255]); // (0,1) red
+        assert_eq!(&img.rgba[12..16], &[0, 255, 0, 255]); // (1,1) green
+    }
 
     #[test]
     fn base64_roundtrip_known() {
