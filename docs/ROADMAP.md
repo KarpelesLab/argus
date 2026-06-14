@@ -19,10 +19,10 @@ co-equal embedding, not an afterthought).
 | 0 — Foundations / multi-process | ✅ complete (sandbox, IPC, shared-mem framebuffer, AppKit window, CI) |
 | 1 — Static document to pixels | ✅ essentially complete (HTML→DOM, CSS cascade + box model, block/inline layout, lists/hr, text shaping + raster, networking over rsurl, images) |
 | 2 — Scripting & dynamic DOM | 🟡 started — page `<script>` runs in kataan (computation + console). **Blocked** on kataan's embedding API for DOM bindings / event loop ([upstream/kataan.md](upstream/kataan.md)) |
-| 3 — Chrome, navigation & services | 🟡 started — clickable links → fetch → re-render, URL + subresource resolution. Tabs/history/CSP/cache/cookies remain |
-| 4 — Layout & CSS breadth | 🟡 started — box model, text-align, attribute + `:first/last-child` selectors, lists, `<hr>`, tables, basic flexbox + grid, underline. Floats/positioning, `flex-grow`/`justify`, web fonts, complex text remain |
-| 5 — Web platform & headless | 🟡 started — headless `--dump-page`/`--dump-dom`. Web API breadth (needs JS bindings), full CDP automation, storage remain |
-| 6 — Media & richer rendering | ⬜ oxideav A/V, animations, GPU compositor — not started |
+| 3 — Chrome, navigation & services | 🟡 links → fetch → re-render, URL + subresource resolution, **scroll-wheel**, **persistent cookie jar**. Tabs/history/back-forward, CSP, HTTP cache remain |
+| 4 — Layout & CSS breadth | 🟡 box model, text-align, attribute + `:first/last-child` selectors, lists, `<hr>`, **tables**, **flexbox**, **grid**, underline, **border-radius**, **opacity**. Floats/positioning, `flex-grow`/`justify`/`align`, grid spans/`fr`, web fonts, complex text remain |
+| 5 — Web platform & headless | 🟡 headless `--dump-page`/`--dump-dom`. Web API breadth (needs JS bindings), full CDP automation, storage remain |
+| 6 — Media & richer rendering | 🟡 PNG image decode (oxideav). JPEG/GIF/WebP/AVIF, `<video>`/`<audio>`, animations, GPU compositor remain |
 | 7 — Hardening / perf / conformance | ⬜ WPT, fuzzing, a11y, sandbox hardening — continuous, not started |
 
 Honest scope note: the **load-bearing risk for the rest of Phase 2** is external —
