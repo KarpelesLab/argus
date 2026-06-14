@@ -35,12 +35,14 @@ headless automation surface.
 >   line-through, line-breaking with real font metrics; shaped anti-aliased glyphs
 >   + colored rects via the first-party **oxideav** stack (`oxideav-scribe`/`-raster`).
 > - **Images** — `<img>` decoded (PNG via oxideav) with subresource loading.
-> - **JavaScript** — page `<script>`s run in **kataan**, with **working
->   synchronous DOM bindings**: `document.getElementById(id)` →
->   `textContent`/`innerHTML`/`className`/`setAttribute`/`style.*` actually mutate
->   the rendered page (a JS-side `document` shim + reconciliation — no kataan
->   host-callback API needed). An event loop/timers/events still want a real
->   embedding API; see [`docs/upstream/kataan.md`](docs/upstream/kataan.md).
+> - **JavaScript** — page `<script>`s run in **kataan**, with **working DOM
+>   bindings**: `document.getElementById`/`querySelector`/`createElement` →
+>   `textContent`/`innerHTML`/`className`/`classList`/`setAttribute`/`style.*`/
+>   `appendChild` actually mutate the rendered page (a JS-side `document` shim +
+>   reconciliation — no kataan host-callback API needed). **Click handlers fire
+>   too** (`addEventListener('click')`/`onclick`), with state accumulating via
+>   deterministic event replay. Timers/async + reading back layout still want a
+>   real embedding API; see [`docs/upstream/kataan.md`](docs/upstream/kataan.md).
 > - **Navigation** — clickable links resolve + fetch + re-render.
 >
 > Try it: `cargo run` (windowed; click links to navigate) ·
