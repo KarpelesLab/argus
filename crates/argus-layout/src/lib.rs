@@ -18,7 +18,7 @@ use argus_dom::{Document, ElementData, NodeData, NodeId};
 use argus_gfx::{Font, RectFill, TextRun};
 use argus_style::{
     author_stylesheet, computed_style, AuthorStylesheet, BoxSizing, ComputedStyle, Display,
-    ListStyle, TextAlign, TextTransform,
+    ListStyle, TextAlign, TextTransform, VerticalAlign,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -122,6 +122,8 @@ struct InlineWord {
     href: Option<Rc<str>>,
     /// Force a line break before this word (an `<br>` element).
     hard_break: bool,
+    /// Vertical baseline offset in pixels (negative = up), for sub/superscript.
+    baseline_shift: f32,
 }
 
 /// A clickable hyperlink region in canvas pixels.
@@ -760,6 +762,11 @@ impl Ctx<'_> {
                 if t.starts_with(char::is_whitespace) {
                     *pending_space = true;
                 }
+                let shift = match style.vertical_align {
+                    VerticalAlign::Sub => style.font_size * 0.2,
+                    VerticalAlign::Super => -style.font_size * 0.4,
+                    VerticalAlign::Baseline => 0.0,
+                };
                 let mut first = true;
                 for word in t.split_whitespace() {
                     words.push(InlineWord {
@@ -772,6 +779,7 @@ impl Ctx<'_> {
                         strike: style.strike,
                         href: link.clone(),
                         hard_break: false,
+                        baseline_shift: shift,
                     });
                     *pending_space = false;
                     first = false;
@@ -796,6 +804,7 @@ impl Ctx<'_> {
                         strike: false,
                         href: link.clone(),
                         hard_break: true,
+                        baseline_shift: 0.0,
                     });
                     *pending_space = false;
                     return;
@@ -889,20 +898,21 @@ impl Ctx<'_> {
                     pen_x += self.font.measure(" ", w.font_size);
                 }
                 let word_w = self.font.measure(&w.text, w.font_size);
+                let wb = baseline + w.baseline_shift;
                 self.runs.push(TextRun {
                     x: pen_x,
-                    baseline,
+                    baseline: wb,
                     text: w.text.clone(),
                     size_px: w.font_size,
                     color: w.color,
                 });
                 if w.underline {
-                    let uy = baseline + (w.font_size * 0.08).max(1.0);
+                    let uy = wb + (w.font_size * 0.08).max(1.0);
                     let uh = (w.font_size / 16.0).max(1.0);
                     self.rects.push(rect(pen_x, uy, word_w, uh, w.color));
                 }
                 if w.strike {
-                    let sy = baseline - self.font.ascent_px(w.font_size) * 0.32;
+                    let sy = wb - self.font.ascent_px(w.font_size) * 0.32;
                     let sh = (w.font_size / 16.0).max(1.0);
                     self.rects.push(rect(pen_x, sy, word_w, sh, w.color));
                 }
@@ -1010,6 +1020,28 @@ mod tests {
                 .filter(|r| r.text.contains("eighteen"))
                 .count()
                 >= 1
+        );
+    }
+
+    #[test]
+    fn sub_and_super_shift_the_baseline() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let doc = parse("<p>x<sub>down</sub><sup>up</sup>base</p>");
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let y = |t: &str| l.runs.iter().find(|r| r.text == t).map(|r| r.baseline);
+        let base = y("base").expect("base run");
+        let down = y("down").expect("sub run");
+        let up = y("up").expect("super run");
+        assert!(
+            down > base,
+            "subscript {down} should sit below baseline {base}"
+        );
+        assert!(
+            up < base,
+            "superscript {up} should sit above baseline {base}"
         );
     }
 

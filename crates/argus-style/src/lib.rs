@@ -66,6 +66,14 @@ pub enum BoxSizing {
     BorderBox,
 }
 
+/// `vertical-align` for inline content (the subset layout honors).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VerticalAlign {
+    Baseline,
+    Sub,
+    Super,
+}
+
 /// Four edge values (top/right/bottom/left) in CSS pixels.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Edges {
@@ -122,6 +130,8 @@ pub struct ComputedStyle {
     pub box_sizing: BoxSizing,
     /// `line-height` as a multiple of `font-size` (inherited).
     pub line_height: f32,
+    /// `vertical-align` for inline content (not inherited).
+    pub vertical_align: VerticalAlign,
 }
 
 impl ComputedStyle {
@@ -149,6 +159,7 @@ impl ComputedStyle {
             text_transform: TextTransform::None,
             box_sizing: BoxSizing::ContentBox,
             line_height: 1.2,
+            vertical_align: VerticalAlign::Baseline,
         }
     }
 
@@ -183,6 +194,9 @@ b, strong { font-weight: bold }
 a { color: #0645ad; text-decoration: underline }
 u, ins { text-decoration: underline }
 s, del, strike { text-decoration: line-through }
+sub { vertical-align: sub; font-size: 0.75em }
+sup { vertical-align: super; font-size: 0.75em }
+small { font-size: 0.83em }
 ul, ol, blockquote, figure, pre { margin: 1em 0 }
 pre { white-space: pre }
 ul { list-style-type: disc }
@@ -417,6 +431,13 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         cs.box_sizing = match v.as_str() {
             "border-box" => BoxSizing::BorderBox,
             _ => BoxSizing::ContentBox,
+        };
+    }
+    if let Some(v) = map.get("vertical-align") {
+        cs.vertical_align = match v.as_str() {
+            "sub" => VerticalAlign::Sub,
+            "super" => VerticalAlign::Super,
+            _ => VerticalAlign::Baseline,
         };
     }
     if let Some(v) = map.get("line-height") {
