@@ -12,6 +12,7 @@ use argus_gfx::Font;
 use argus_ipc::Channel;
 use argus_protocol::{self as proto, Msg};
 use argus_util::{log, Role};
+use std::collections::HashMap;
 use std::io;
 
 /// Fallback color painted when no document has been loaded yet (Argus blue).
@@ -49,7 +50,7 @@ pub fn run(channel: Channel) -> io::Result<()> {
                 content.html = Some(html);
             }
             Msg::RequestFrame => {
-                let fb = content.render()?;
+                let fb = content.render(&channel)?;
                 proto::send(&channel, Msg::FrameReady { size: viewport }, &[fb.as_fd()])?;
                 content._frame = Some(fb);
             }
@@ -76,33 +77,112 @@ struct Content {
 
 impl Content {
     /// Paint the current document (or the fallback color) into a fresh framebuffer.
-    fn render(&self) -> io::Result<Framebuffer> {
+    /// `channel` is used to fetch image subresources from the browser.
+    fn render(&self, channel: &Channel) -> io::Result<Framebuffer> {
         let mut fb = Framebuffer::create(self.viewport)?;
-        match (&self.font, &self.html) {
-            (Some(font), Some(html)) => {
-                fb.fill(Color::WHITE);
-                let doc = argus_html::parse(html);
-                let layout = argus_layout::layout(&doc, font, self.viewport.width as f32);
-                let list = argus_gfx::DisplayList {
-                    rects: layout.rects,
-                    runs: layout.runs,
-                };
-                let painted = argus_gfx::render_display_list(
-                    &list,
-                    font,
-                    self.viewport.width,
-                    self.viewport.height,
-                );
-                argus_gfx::composite_over(fb.pixels_mut(), &painted.pixels);
-                log!(
-                    "rendered page: {} rects, {} text runs",
-                    list.rects.len(),
-                    list.runs.len()
+        let (Some(font), Some(html)) = (&self.font, &self.html) else {
+            fb.fill(PHASE0_PAINT);
+            return Ok(fb);
+        };
+
+        let doc = argus_html::parse(html);
+
+        // Decode every <img> (data: URLs locally, http(s) via the browser).
+        let mut images: HashMap<String, argus_image::DecodedImage> = HashMap::new();
+        for src in collect_img_srcs(&doc) {
+            if images.contains_key(&src) {
+                continue;
+            }
+            let decoded = if src.starts_with("data:") {
+                argus_image::decode_data_url(&src)
+            } else {
+                let bytes = fetch_resource(channel, &src)?;
+                (!bytes.is_empty())
+                    .then(|| argus_image::decode(&bytes))
+                    .flatten()
+            };
+            if let Some(img) = decoded {
+                images.insert(src, img);
+            }
+        }
+        let sizes: argus_layout::ImageSizes = images
+            .iter()
+            .map(|(k, v)| (k.clone(), (v.width, v.height)))
+            .collect();
+
+        fb.fill(Color::WHITE);
+        let layout = argus_layout::layout(&doc, font, self.viewport.width as f32, &sizes);
+        let list = argus_gfx::DisplayList {
+            rects: layout.rects,
+            runs: layout.runs,
+        };
+        let painted =
+            argus_gfx::render_display_list(&list, font, self.viewport.width, self.viewport.height);
+        argus_gfx::composite_over(fb.pixels_mut(), &painted.pixels);
+
+        // Blit decoded images over the composited page.
+        let (vw, vh) = (self.viewport.width, self.viewport.height);
+        for ib in &layout.images {
+            if let Some(img) = images.get(&ib.src) {
+                argus_gfx::blit_rgba(
+                    fb.pixels_mut(),
+                    vw,
+                    vh,
+                    ib.x as i32,
+                    ib.y as i32,
+                    ib.w as u32,
+                    ib.h as u32,
+                    &img.rgba,
+                    img.width,
+                    img.height,
                 );
             }
-            _ => fb.fill(PHASE0_PAINT),
         }
+
+        log!(
+            "rendered page: {} rects, {} runs, {} images",
+            list.rects.len(),
+            list.runs.len(),
+            layout.images.len()
+        );
         Ok(fb)
+    }
+}
+
+/// Collect the `src` of every `<img>` element in document order.
+fn collect_img_srcs(doc: &argus_dom::Document) -> Vec<String> {
+    fn walk(doc: &argus_dom::Document, id: argus_dom::NodeId, out: &mut Vec<String>) {
+        if let argus_dom::NodeData::Element(e) = &doc.node(id).data {
+            if e.name.is_html("img") {
+                if let Some(src) = e.attr("src") {
+                    out.push(src.to_string());
+                }
+            }
+        }
+        for child in doc.children(id) {
+            walk(doc, child, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(doc, doc.root(), &mut out);
+    out
+}
+
+/// Ask the browser to fetch a subresource; returns its bytes (empty on failure).
+fn fetch_resource(channel: &Channel, url: &str) -> io::Result<Vec<u8>> {
+    proto::send(
+        channel,
+        Msg::FetchResource {
+            url: url.to_string(),
+        },
+        &[],
+    )?;
+    match proto::recv(channel)?.0 {
+        Msg::ResourceData { body } => Ok(body),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("expected ResourceData, got {other:?}"),
+        )),
     }
 }
 

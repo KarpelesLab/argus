@@ -42,9 +42,11 @@ name = "argus-content"
 version = "0.0.0"
 dependencies = [
  "argus-compositor",
+ "argus-dom",
  "argus-geometry",
  "argus-gfx",
  "argus-html",
+ "argus-image",
  "argus-ipc",
  "argus-layout",
  "argus-platform",
@@ -84,6 +86,13 @@ name = "argus-html"
 version = "0.0.0"
 dependencies = [
  "argus-dom",
+]
+
+[[package]]
+name = "argus-image"
+version = "0.0.0"
+dependencies = [
+ "oxideav-png",
 ]
 
 [[package]]

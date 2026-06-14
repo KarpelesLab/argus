@@ -14,31 +14,40 @@ use argus_protocol::{self as proto, Msg};
 use argus_util::{log, Role};
 use std::io;
 
-/// A built-in sample document rendered by the windowed shell and the page dumper.
-pub const SAMPLE_HTML: &str = "<!DOCTYPE html><html><head><title>Argus</title><style>\
-body { background-color: #f4f6fb; color: #1c2430 }\
-h1 { color: #2e86de; text-align: center }\
-h2 { color: #444 }\
-.card { background-color: #ffffff; border: 1px solid #d0d7e2; padding: 16px; margin: 12px 0 }\
-.note { background-color: #fff3cd; color: #5a4b00; border: 1px solid #f0d000; padding: 12px }\
-.brand { color: #c0392b }\
-.center { text-align: center }\
+/// A small decorative image embedded as a `data:` URL, for the sample page.
+const SAMPLE_IMAGE: &str = include_str!("../sample_image.txt");
+
+/// The built-in sample document rendered by the windowed shell and page dumper.
+pub fn sample_html() -> String {
+    format!(
+        "<!DOCTYPE html><html><head><title>Argus</title><style>\
+body {{ background-color: #f4f6fb; color: #1c2430 }}\
+h1 {{ color: #2e86de; text-align: center }}\
+h2 {{ color: #444 }}\
+.card {{ background-color: #ffffff; border: 1px solid #d0d7e2; padding: 16px; margin: 12px 0 }}\
+.note {{ background-color: #fff3cd; color: #5a4b00; border: 1px solid #f0d000; padding: 12px }}\
+.brand {{ color: #c0392b }}\
+.center {{ text-align: center }}\
 </style></head><body>\
 <h1>Argus</h1>\
 <div class=\"card\">\
 <p>A web browser written in <strong class=\"brand\">pure Rust</strong>. This page was \
 fetched over the network, parsed into a DOM, run through a real CSS cascade, laid out \
-with the box model (margins, borders, padding, width, text-align), and painted with \
-shaped, anti-aliased glyphs — all inside a sandboxed content process.</p>\
+with the box model, and painted with shaped, anti-aliased glyphs and decoded images — \
+all inside a sandboxed content process.</p>\
+<img src=\"{SAMPLE_IMAGE}\" width=\"160\" height=\"90\">\
 </div>\
-<h2>Box model</h2>\
-<p class=\"note\">This box has a background, a border, and padding, applied by a class \
-selector. Specificity, the cascade, inline styles, and the box model all work.</p>\
+<h2>Box model &amp; images</h2>\
+<p class=\"note\">This box has a background, a border, and padding from a class \
+selector; the gradient above is a PNG decoded by argus-image. The cascade, inline \
+styles, the box model, and images all work.</p>\
 <p class=\"center\" style=\"color: #2e7d32\">This line is centered and colored green by \
 an inline style attribute.</p>\
 <h3>Next</h3>\
-<p>Images, a real inline fragment tree, and more CSS properties come next.</p>\
-</body></html>";
+<p>JavaScript (kataan), a real inline fragment tree, and more CSS come next.</p>\
+</body></html>"
+    )
+}
 
 /// Locate a usable system font on disk (the browser process is trusted and may
 /// read the filesystem; content cannot).
@@ -72,9 +81,8 @@ fn provide_page(content: &Child, html: &str) -> io::Result<()> {
     )
 }
 
-/// Ask the net service to fetch `url`, returning the body as an HTML string (or a
-/// small error page on failure).
-fn fetch_html(net: &Child, url: &str) -> io::Result<String> {
+/// Ask the net service to fetch `url`, returning the raw body (empty on failure).
+fn fetch_bytes(net: &Child, url: &str) -> io::Result<Vec<u8>> {
     proto::send(
         net.channel(),
         Msg::LoadUrl {
@@ -83,19 +91,23 @@ fn fetch_html(net: &Child, url: &str) -> io::Result<String> {
         &[],
     )?;
     match proto::recv(net.channel())?.0 {
-        Msg::ResourceLoaded { status, body } => {
-            if status == 0 {
-                Ok(error_page(url, "network error"))
-            } else if body.is_empty() {
-                Ok(error_page(url, &format!("empty response (HTTP {status})")))
-            } else {
-                Ok(String::from_utf8_lossy(&body).into_owned())
-            }
-        }
+        Msg::ResourceLoaded { status, body } => Ok(if status == 0 { Vec::new() } else { body }),
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("expected ResourceLoaded, got {other:?}"),
         )),
+    }
+}
+
+fn fetch_html(net: &Child, url: &str) -> io::Result<String> {
+    let body = fetch_bytes(net, url)?;
+    if body.is_empty() {
+        Ok(error_page(
+            url,
+            "could not load (network error or empty response)",
+        ))
+    } else {
+        Ok(String::from_utf8_lossy(&body).into_owned())
     }
 }
 
@@ -111,7 +123,7 @@ fn error_page(url: &str, message: &str) -> String {
 fn resolve_html(net: &Child, url: Option<&str>) -> String {
     match url {
         Some(u) => fetch_html(net, u).unwrap_or_else(|e| error_page(u, &e.to_string())),
-        None => SAMPLE_HTML.to_string(),
+        None => sample_html(),
     }
 }
 
@@ -130,7 +142,7 @@ pub fn render_once(url: Option<&str>, viewport: Size) -> io::Result<(Size, Vec<u
     }
     proto::send(content.channel(), Msg::LoadDocument { html }, &[])?;
 
-    let frame = request_frame(&content)?;
+    let frame = request_frame(&content, &net)?;
     let pixels = frame.pixels().to_vec();
     let size = frame.size();
 
@@ -164,7 +176,7 @@ pub fn run() -> io::Result<()> {
     );
 
     // Ask content to paint, then verify the framebuffer it shared back.
-    let frame = request_frame(&content)?;
+    let frame = request_frame(&content, &net)?;
     let color = verify_uniform(&frame)?;
     let size = frame.size();
     log!(
@@ -199,10 +211,21 @@ pub fn run() -> io::Result<()> {
     Ok(())
 }
 
-/// Ask `content` to paint, and map the shared framebuffer it hands back.
-fn request_frame(content: &Child) -> io::Result<Framebuffer> {
+/// Ask `content` to paint, serving any subresource fetches it makes through the
+/// `net` service while it renders, and map the shared framebuffer it hands back.
+fn request_frame(content: &Child, net: &Child) -> io::Result<Framebuffer> {
     proto::send(content.channel(), Msg::RequestFrame, &[])?;
-    let (msg, mut fds) = proto::recv(content.channel())?;
+    let (msg, mut fds) = loop {
+        let (msg, fds) = proto::recv(content.channel())?;
+        match msg {
+            // Content needs a subresource: fetch it and reply, then keep waiting.
+            Msg::FetchResource { url } => {
+                let body = fetch_bytes(net, &url).unwrap_or_default();
+                proto::send(content.channel(), Msg::ResourceData { body }, &[])?;
+            }
+            other => break (other, fds),
+        }
+    };
     let size = match msg {
         Msg::FrameReady { size } => size,
         other => {
@@ -260,7 +283,7 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
     log!("children handshook; page sent; opening window");
 
     // Present the first frame.
-    let mut frame = request_frame(&content)?;
+    let mut frame = request_frame(&content, &net)?;
     let window = Window::open("Argus", viewport);
     window.present(frame.pixels(), frame.size());
     log!("window open — click to send input to content, close to quit");
@@ -270,7 +293,7 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
             Event::MouseDown { x, y } => {
                 proto::send(content.channel(), Msg::InputClick { x, y }, &[])?;
                 // Repaint (Phase 0 content paints the same color each time).
-                frame = request_frame(&content)?;
+                frame = request_frame(&content, &net)?;
                 window.present(frame.pixels(), frame.size());
             }
             Event::CloseRequested => {

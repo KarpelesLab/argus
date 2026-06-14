@@ -108,6 +108,10 @@ pub enum Msg {
     LoadUrl { url: String },
     /// net service → browser: a fetched resource (`status == 0` means failure).
     ResourceLoaded { status: u16, body: Vec<u8> },
+    /// content → browser: fetch a subresource (e.g. an image) at `url`.
+    FetchResource { url: String },
+    /// browser → content: subresource bytes (empty = not found / error).
+    ResourceData { body: Vec<u8> },
     /// browser → child: exit cleanly.
     Shutdown,
 }
@@ -143,6 +147,8 @@ const TAG_PROVIDE_FONT: u8 = 7;
 const TAG_LOAD_DOCUMENT: u8 = 8;
 const TAG_LOAD_URL: u8 = 9;
 const TAG_RESOURCE_LOADED: u8 = 10;
+const TAG_FETCH_RESOURCE: u8 = 11;
+const TAG_RESOURCE_DATA: u8 = 12;
 
 impl Msg {
     /// Number of file descriptors that accompany this message out-of-band.
@@ -193,6 +199,14 @@ impl Msg {
                 buf.extend_from_slice(&status.to_le_bytes());
                 put_bytes(&mut buf, body);
             }
+            Msg::FetchResource { url } => {
+                buf.push(TAG_FETCH_RESOURCE);
+                put_bytes(&mut buf, url.as_bytes());
+            }
+            Msg::ResourceData { body } => {
+                buf.push(TAG_RESOURCE_DATA);
+                put_bytes(&mut buf, body);
+            }
             Msg::Shutdown => buf.push(TAG_SHUTDOWN),
         }
         buf
@@ -225,6 +239,12 @@ impl Msg {
             },
             TAG_RESOURCE_LOADED => Msg::ResourceLoaded {
                 status: c.u16()?,
+                body: c.bytes()?.to_vec(),
+            },
+            TAG_FETCH_RESOURCE => Msg::FetchResource {
+                url: String::from_utf8_lossy(c.bytes()?).into_owned(),
+            },
+            TAG_RESOURCE_DATA => Msg::ResourceData {
                 body: c.bytes()?.to_vec(),
             },
             TAG_SHUTDOWN => Msg::Shutdown,
@@ -320,6 +340,12 @@ mod tests {
         round_trip(Msg::ResourceLoaded {
             status: 200,
             body: vec![60, 104, 49, 62],
+        });
+        round_trip(Msg::FetchResource {
+            url: "https://example.com/a.png".to_string(),
+        });
+        round_trip(Msg::ResourceData {
+            body: vec![137, 80, 78, 71],
         });
         round_trip(Msg::Shutdown);
     }

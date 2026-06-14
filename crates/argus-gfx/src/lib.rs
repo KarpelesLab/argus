@@ -195,6 +195,48 @@ pub fn render_text(
     }
 }
 
+/// Blit a source RGBA image into `dst` (a `dst_w`×`dst_h` RGBA buffer) at the
+/// destination rect, nearest-neighbor scaled, source-over. Pixels outside `dst`
+/// are clipped.
+#[allow(clippy::too_many_arguments)]
+pub fn blit_rgba(
+    dst: &mut [u8],
+    dst_w: u32,
+    dst_h: u32,
+    dest_x: i32,
+    dest_y: i32,
+    dest_w: u32,
+    dest_h: u32,
+    src: &[u8],
+    src_w: u32,
+    src_h: u32,
+) {
+    if dest_w == 0 || dest_h == 0 || src_w == 0 || src_h == 0 {
+        return;
+    }
+    for dy in 0..dest_h as i32 {
+        let py = dest_y + dy;
+        if py < 0 || py >= dst_h as i32 {
+            continue;
+        }
+        let sy = (dy as u32 * src_h / dest_h).min(src_h - 1);
+        for dx in 0..dest_w as i32 {
+            let px = dest_x + dx;
+            if px < 0 || px >= dst_w as i32 {
+                continue;
+            }
+            let sx = (dx as u32 * src_w / dest_w).min(src_w - 1);
+            let s = (sy * src_w + sx) as usize * 4;
+            let d = (py as u32 * dst_w + px as u32) as usize * 4;
+            let a = src[s + 3] as u32;
+            for c in 0..3 {
+                dst[d + c] = ((src[s + c] as u32 * a + dst[d + c] as u32 * (255 - a)) / 255) as u8;
+            }
+            dst[d + 3] = 255;
+        }
+    }
+}
+
 /// Source-over composite straight-alpha RGBA `src` onto opaque RGBA `dst`
 /// (both tightly packed, same length). `dst` stays opaque.
 pub fn composite_over(dst: &mut [u8], src: &[u8]) {
