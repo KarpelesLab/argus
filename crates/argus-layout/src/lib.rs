@@ -93,6 +93,21 @@ fn roman_marker(n: u32) -> String {
     out
 }
 
+/// Clamp a content-box `width` to the `min-width`/`max-width` constraints,
+/// resolving each against the containing block `avail` (and `box-sizing`).
+fn clamp_content_width(style: &ComputedStyle, width: f32, avail: f32) -> f32 {
+    let mut w = width;
+    if let Some(max) = style.max_width {
+        let m = border_box_to_content(style, max.to_px(style.font_size, avail));
+        w = w.min(m);
+    }
+    if let Some(min) = style.min_width {
+        let m = border_box_to_content(style, min.to_px(style.font_size, avail));
+        w = w.max(m);
+    }
+    w.max(0.0)
+}
+
 /// Convert a specified `width` into a content-box width, honoring `box-sizing`.
 /// For `border-box`, the horizontal padding and border are subtracted.
 fn border_box_to_content(style: &ComputedStyle, width: f32) -> f32 {
@@ -258,6 +273,7 @@ impl Ctx<'_> {
             Some(len) => border_box_to_content(&style, len.to_px(style.font_size, avail)),
             None => (avail - h_extra).max(0.0),
         };
+        let content_w = clamp_content_width(&style, content_w, avail);
         let content_left = border_box_left + style.border.left + style.padding.left;
         let border_box_w = content_w
             + style.padding.left
@@ -557,6 +573,7 @@ impl Ctx<'_> {
             Some(len) => border_box_to_content(&style, len.to_px(style.font_size, avail)),
             None => (avail - h_extra).max(0.0),
         };
+        let content_w = clamp_content_width(&style, content_w, avail);
         let content_left = border_box_left + style.border.left + style.padding.left;
         let border_box_w = content_w
             + style.padding.left
@@ -626,6 +643,7 @@ impl Ctx<'_> {
             Some(len) => border_box_to_content(&style, len.to_px(style.font_size, avail)),
             None => (avail - h_extra).max(0.0),
         };
+        let content_w = clamp_content_width(&style, content_w, avail);
         let content_left = border_box_left + style.border.left + style.padding.left;
         let border_box_w = content_w
             + style.padding.left
@@ -690,6 +708,7 @@ impl Ctx<'_> {
             Some(len) => border_box_to_content(&style, len.to_px(style.font_size, avail)),
             None => (avail - style.margin.left - style.margin.right).max(0.0),
         };
+        let table_w = clamp_content_width(&style, table_w, avail);
         let col_w = table_w / num_cols as f32;
 
         for row in &rows {
@@ -1080,6 +1099,28 @@ mod tests {
             double > single * 1.6,
             "line-height:2 gap {double} should far exceed line-height:1 gap {single}"
         );
+    }
+
+    #[test]
+    fn max_width_caps_and_min_width_floors() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let bg_w = |css: &str| -> f32 {
+            let html = format!("<div style=\"background-color:#ff0000; {css}\">x</div>");
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 1000.0, &ImageSizes::new());
+            l.rects
+                .iter()
+                .find(|r| r.color.r == 255 && r.color.g == 0)
+                .map(|r| r.w)
+                .expect("bg rect")
+        };
+        // max-width caps an otherwise-full-width block.
+        assert!((bg_w("max-width: 300px") - 300.0).abs() < 0.5);
+        // min-width floors an explicitly narrow block.
+        assert!((bg_w("width: 50px; min-width: 200px") - 200.0).abs() < 0.5);
     }
 
     #[test]

@@ -109,6 +109,9 @@ pub struct ComputedStyle {
     pub border_color: Color,
     /// Specified width, resolved during layout (`None` = auto).
     pub width: Option<Length>,
+    /// `min-width` / `max-width`, resolved during layout (`None` = no constraint).
+    pub min_width: Option<Length>,
+    pub max_width: Option<Length>,
     pub text_align: TextAlign,
     /// `text-decoration: underline`.
     pub underline: bool,
@@ -150,6 +153,8 @@ impl ComputedStyle {
             border: Edges::default(),
             border_color: Color::BLACK,
             width: None,
+            min_width: None,
+            max_width: None,
             text_align: TextAlign::Left,
             underline: false,
             strike: false,
@@ -508,6 +513,16 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     // Width.
     if let Some(v) = map.get("width") {
         cs.width = if v == "auto" { None } else { parse_length(v) };
+    }
+    if let Some(v) = map.get("min-width") {
+        cs.min_width = if v == "auto" || v == "0" {
+            None
+        } else {
+            parse_length(v)
+        };
+    }
+    if let Some(v) = map.get("max-width") {
+        cs.max_width = if v == "none" { None } else { parse_length(v) };
     }
     if let Some(v) = map.get("grid-template-columns") {
         cs.grid_columns = grid_track_count(v);
