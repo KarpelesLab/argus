@@ -18,17 +18,19 @@ use argus_dom::{Attribute, Document, NodeData, NodeId, QualName};
 const PRELUDE: &str = r#"
 var __argus_ops = [];
 var __seed = __SEED__;
-function __argus_el(id) {
+// `tgt` is {kind:"id"|"sel", val:"..."}. Seeded reads are only available for ids.
+function __argus_el(tgt) {
+  var seed = (tgt.kind === "id") ? __seed[tgt.val] : null;
   return new Proxy({}, {
     set: function(t, k, v) {
-      __argus_ops.push({op: "prop", id: id, key: k, value: "" + v});
+      __argus_ops.push({op: "prop", tgt: tgt, key: k, value: "" + v});
       return true;
     },
     get: function(t, k) {
       if (k === "style") {
         return new Proxy({}, {
           set: function(t2, k2, v2) {
-            __argus_ops.push({op: "style", id: id, key: k2, value: "" + v2});
+            __argus_ops.push({op: "style", tgt: tgt, key: k2, value: "" + v2});
             return true;
           },
           get: function(t2, k2) { return ""; }
@@ -36,22 +38,20 @@ function __argus_el(id) {
       }
       if (k === "setAttribute") {
         return function(name, val) {
-          __argus_ops.push({op: "attr", id: id, key: "" + name, value: "" + val});
+          __argus_ops.push({op: "attr", tgt: tgt, key: "" + name, value: "" + val});
         };
       }
       if (k === "getAttribute") {
-        return function(name) {
-          var s = __seed[id]; return (s && s[name] != null) ? s[name] : null;
-        };
+        return function(name) { return (seed && seed[name] != null) ? seed[name] : null; };
       }
-      var s = __seed[id];
-      if (s && s[k] != null) return s[k];
+      if (seed && seed[k] != null) return seed[k];
       return "";
     }
   });
 }
 var document = {
-  getElementById: function(id) { return __argus_el(id); },
+  getElementById: function(id) { return __argus_el({kind: "id", val: "" + id}); },
+  querySelector: function(sel) { return __argus_el({kind: "sel", val: "" + sel}); },
   write: function(s) { __argus_ops.push({op: "write", value: "" + s}); }
 };
 var window = document.window = document;
@@ -175,31 +175,45 @@ fn apply_ops(doc: &mut Document, json: &str) {
             .and_then(Json::as_str)
             .unwrap_or("")
             .to_string();
+        let key = get("key").and_then(Json::as_str).unwrap_or("").to_string();
+        let node = match get("tgt") {
+            Some(Json::Obj(t)) => {
+                let f = |k: &str| t.iter().find(|(n, _)| n == k).and_then(|(_, v)| v.as_str());
+                match (f("kind"), f("val")) {
+                    (Some("id"), Some(v)) => find_by_id(doc, v),
+                    (Some("sel"), Some(v)) => find_by_selector(doc, v),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let Some(node) = node else { continue };
         match op_kind {
-            "prop" => {
-                let id = get("id").and_then(Json::as_str).unwrap_or("");
-                let key = get("key").and_then(Json::as_str).unwrap_or("");
-                if let Some(node) = find_by_id(doc, id) {
-                    apply_prop(doc, node, key, &value);
-                }
-            }
-            "style" => {
-                let id = get("id").and_then(Json::as_str).unwrap_or("");
-                let key = get("key").and_then(Json::as_str).unwrap_or("");
-                if let Some(node) = find_by_id(doc, id) {
-                    merge_style(doc, node, key, &value);
-                }
-            }
-            "attr" => {
-                let id = get("id").and_then(Json::as_str).unwrap_or("");
-                let key = get("key").and_then(Json::as_str).unwrap_or("");
-                if let Some(node) = find_by_id(doc, id) {
-                    set_attribute(doc, node, key, &value);
-                }
-            }
+            "prop" => apply_prop(doc, node, &key, &value),
+            "style" => merge_style(doc, node, &key, &value),
+            "attr" => set_attribute(doc, node, &key, &value),
             _ => {}
         }
     }
+}
+
+/// The first element matching a CSS selector, in document order (`None` if the
+/// selector fails to parse or nothing matches).
+fn find_by_selector(doc: &Document, sel: &str) -> Option<NodeId> {
+    let selectors = argus_css::selector::parse_selector_list(&argus_css::tokenizer::tokenize(sel));
+    let selector = selectors.into_iter().next()?;
+    fn walk(doc: &Document, n: NodeId, sel: &argus_css::Selector) -> Option<NodeId> {
+        if matches!(&doc.node(n).data, NodeData::Element(_)) && argus_css::matches(doc, n, sel) {
+            return Some(n);
+        }
+        for c in doc.children(n) {
+            if let Some(found) = walk(doc, c, sel) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    walk(doc, doc.root(), &selector)
 }
 
 /// Interpret a JS property assignment (`el.<key> = value`).
@@ -603,6 +617,21 @@ mod tests {
             .children(node)
             .any(|c| matches!(&doc.node(c).data, NodeData::Element(e) if e.name.is_html("b")));
         assert!(has_b, "innerHTML should create a <b> element");
+    }
+
+    #[test]
+    fn query_selector_by_class_and_tag() {
+        let mut doc = argus_html::parse(
+            "<p class=\"intro\" id=\"p1\">a</p><p id=\"p2\">b</p>\
+             <script>\
+               document.querySelector('.intro').textContent = 'X';\
+               document.querySelector('p:nth-child(2)').textContent = 'Y';\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        assert_eq!(text_of(&doc, "p1"), "X");
+        // The 2nd <p> in document order is p2.
+        assert_eq!(text_of(&doc, "p2"), "Y");
     }
 
     #[test]

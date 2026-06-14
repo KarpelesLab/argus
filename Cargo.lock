@@ -45,6 +45,7 @@ name = "argus-content"
 version = "0.0.0"
 dependencies = [
  "argus-compositor",
+ "argus-css",
  "argus-dom",
  "argus-geometry",
  "argus-gfx",
