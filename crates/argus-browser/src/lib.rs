@@ -75,6 +75,13 @@ blue link</a> all flow inside this paragraph with correct spacing.</p>\
 <div class=\"col\">Second column, sharing the width equally.</div>\
 <div class=\"col\">Third column of the flex container.</div>\
 </div>\
+<h3>Grid</h3>\
+<div style=\"display:grid; grid-template-columns: repeat(2, 1fr)\">\
+<div class=\"col\">Grid cell one</div>\
+<div class=\"col\">Grid cell two</div>\
+<div class=\"col\">Grid cell three</div>\
+<div class=\"col\">Grid cell four</div>\
+</div>\
 <script>\
 function fib(n){{ return n < 2 ? n : fib(n-1) + fib(n-2); }}\
 console.log('kataan ran: fib(20) = ' + fib(20));\

@@ -24,6 +24,8 @@ pub enum Display {
     Inline,
     /// A flex container (display: flex); children lay out in a row.
     Flex,
+    /// A grid container (display: grid); children flow into equal columns.
+    Grid,
     None,
 }
 
@@ -73,6 +75,8 @@ pub struct ComputedStyle {
     pub text_align: TextAlign,
     /// `text-decoration: underline`.
     pub underline: bool,
+    /// Column count for a grid container (from `grid-template-columns`).
+    pub grid_columns: u32,
 }
 
 impl ComputedStyle {
@@ -91,6 +95,7 @@ impl ComputedStyle {
             width: None,
             text_align: TextAlign::Left,
             underline: false,
+            grid_columns: 1,
         }
     }
 }
@@ -263,6 +268,7 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         cs.display = match v.as_str() {
             "block" => Display::Block,
             "flex" | "inline-flex" => Display::Flex,
+            "grid" | "inline-grid" => Display::Grid,
             "none" => Display::None,
             _ => Display::Inline,
         };
@@ -343,6 +349,25 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     if let Some(v) = map.get("width") {
         cs.width = if v == "auto" { None } else { parse_length(v) };
     }
+    if let Some(v) = map.get("grid-template-columns") {
+        cs.grid_columns = grid_track_count(v);
+    }
+}
+
+/// Count the columns named by a `grid-template-columns` value (a simplified read
+/// of `repeat(n, …)` and whitespace-separated track lists).
+fn grid_track_count(v: &str) -> u32 {
+    let v = v.trim();
+    if let Some(rest) = v.strip_prefix("repeat(") {
+        if let Some(n) = rest
+            .split(',')
+            .next()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+        {
+            return n.max(1);
+        }
+    }
+    (v.split_whitespace().count() as u32).max(1)
 }
 
 /// Resolve per-side overrides like `margin-top`, `padding-left`.

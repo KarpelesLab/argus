@@ -7,9 +7,10 @@
 //! is greedily broken into lines that fit the content width, measured with the real
 //! font, and aligned per `text-align`. Styles come from the `argus-style` cascade.
 //!
-//! Still a subset of `docs/subsystems/layout.md`: no flex/grid, no floats/
-//! positioning, no margin collapsing, no inline-level boxes with their own geometry
-//! (inline runs adopt their block's font size/color).
+//! Covers block + inline formatting, lists, `<hr>`, tables, and basic flex/grid.
+//! Still a subset of `docs/subsystems/layout.md`: no floats/positioning, no margin
+//! collapsing, no `flex-grow`/`justify`/`align` or grid spans, no inline-level boxes
+//! with their own geometry (inline runs adopt their block's font size/color).
 
 use argus_dom::{Document, ElementData, NodeData, NodeId};
 use argus_gfx::{Font, RectFill, TextRun};
@@ -317,6 +318,13 @@ impl Ctx<'_> {
                             self.layout_flex(child, cstyle, content_left, content_w);
                             self.cursor_y += cstyle.margin.bottom;
                         }
+                        Display::Grid => {
+                            self.flush_words(&mut words, &style, content_left, content_w);
+                            pending_space = false;
+                            self.cursor_y += cstyle.margin.top;
+                            self.layout_grid(child, cstyle, content_left, content_w);
+                            self.cursor_y += cstyle.margin.bottom;
+                        }
                     }
                 }
                 _ => {}
@@ -458,6 +466,79 @@ impl Ctx<'_> {
         }
         self.cursor_y = row_top + max_h + style.padding.bottom + style.border.bottom;
 
+        if let Some(idx) = bg_idx {
+            self.rects[idx].h = self.cursor_y - border_box_top;
+        }
+    }
+
+    /// Lay out a `display: grid` container: items flow row-major into
+    /// `grid-template-columns` equal columns; each row's height is its tallest item.
+    fn layout_grid(&mut self, id: NodeId, style: ComputedStyle, x: f32, avail: f32) {
+        let items: Vec<NodeId> = self
+            .doc
+            .children(id)
+            .filter(|&c| match &self.doc.node(c).data {
+                NodeData::Element(_) => {
+                    computed_style(self.doc, c, &style, self.author).display != Display::None
+                }
+                _ => false,
+            })
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        let cols = style.grid_columns.max(1) as usize;
+
+        let border_box_top = self.cursor_y;
+        let border_box_left = x + style.margin.left;
+        let h_extra = style.margin.left
+            + style.margin.right
+            + style.border.left
+            + style.border.right
+            + style.padding.left
+            + style.padding.right;
+        let content_w = match style.width {
+            Some(len) => len.to_px(style.font_size, avail),
+            None => (avail - h_extra).max(0.0),
+        };
+        let content_left = border_box_left + style.border.left + style.padding.left;
+        let border_box_w = content_w
+            + style.padding.left
+            + style.padding.right
+            + style.border.left
+            + style.border.right;
+
+        let bg_idx = (style.background_color.a > 0).then(|| {
+            self.rects.push(RectFill {
+                x: border_box_left,
+                y: border_box_top,
+                w: border_box_w,
+                h: 0.0,
+                color: style.background_color,
+            });
+            self.rects.len() - 1
+        });
+
+        self.cursor_y += style.border.top + style.padding.top;
+        let col_w = content_w / cols as f32;
+        let mut idx = 0;
+        while idx < items.len() {
+            let row_top = self.cursor_y;
+            let mut max_h = 0.0f32;
+            for c in 0..cols {
+                if idx >= items.len() {
+                    break;
+                }
+                let item = items[idx];
+                idx += 1;
+                self.cursor_y = row_top;
+                let istyle = computed_style(self.doc, item, &style, self.author);
+                self.layout_block(item, istyle, content_left + c as f32 * col_w, col_w, None);
+                max_h = max_h.max(self.cursor_y - row_top);
+            }
+            self.cursor_y = row_top + max_h;
+        }
+        self.cursor_y += style.padding.bottom + style.border.bottom;
         if let Some(idx) = bg_idx {
             self.rects[idx].h = self.cursor_y - border_box_top;
         }
@@ -783,6 +864,34 @@ mod tests {
         assert!(
             two.x > one.x + 100.0,
             "second item should be in the next column"
+        );
+    }
+
+    #[test]
+    fn grid_flows_items_row_major() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let html = "<div style=\"display:grid; grid-template-columns: repeat(2, 1fr)\">\
+                    <div>a</div><div>b</div><div>c</div><div>d</div></div>";
+        let doc = parse(html);
+        let layout = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let at = |t: &str| {
+            let r = layout.runs.iter().find(|r| r.text == t).unwrap();
+            (r.x, r.baseline)
+        };
+        let (ax, ay) = at("a");
+        let (bx, by) = at("b");
+        let (cx, cy) = at("c");
+        // a,b on row 1 in two columns; c starts row 2 in column 1 (under a).
+        assert!(
+            (ay - by).abs() < 1.0 && bx > ax + 100.0,
+            "row 1 not two columns"
+        );
+        assert!(
+            cy > ay + 10.0 && (cx - ax).abs() < 1.0,
+            "c not under a on row 2"
         );
     }
 }
