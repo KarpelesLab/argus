@@ -275,6 +275,14 @@ impl Ctx<'_> {
                     ));
                     self.cursor_y += h + hr.margin.bottom;
                 }
+                NodeData::Element(e) if e.name.is_html("table") => {
+                    self.flush_words(&mut words, &style, content_left, content_w);
+                    pending_space = false;
+                    let tstyle = computed_style(self.doc, child, &style, self.author);
+                    self.cursor_y += tstyle.margin.top;
+                    self.layout_table(child, tstyle, content_left, content_w);
+                    self.cursor_y += tstyle.margin.bottom;
+                }
                 NodeData::Element(_) => {
                     let cstyle = computed_style(self.doc, child, &style, self.author);
                     match cstyle.display {
@@ -381,6 +389,73 @@ impl Ctx<'_> {
 
     fn is_li(&self, id: NodeId) -> bool {
         matches!(&self.doc.node(id).data, NodeData::Element(e) if e.name.is_html("li"))
+    }
+
+    /// Lay out a `<table>` as a simple equal-column grid: columns share the table
+    /// width equally; each cell is a block box; row height is the tallest cell.
+    fn layout_table(&mut self, id: NodeId, style: ComputedStyle, x: f32, avail: f32) {
+        let rows = self.collect_rows(id);
+        if rows.is_empty() {
+            return;
+        }
+        let num_cols = rows.iter().map(|r| r.len()).max().unwrap_or(1).max(1);
+        let table_left = x + style.margin.left;
+        let table_w = match style.width {
+            Some(len) => len.to_px(style.font_size, avail),
+            None => (avail - style.margin.left - style.margin.right).max(0.0),
+        };
+        let col_w = table_w / num_cols as f32;
+
+        for row in &rows {
+            let row_top = self.cursor_y;
+            let mut max_h = 0.0f32;
+            for (i, &cell) in row.iter().enumerate() {
+                let cell_x = table_left + i as f32 * col_w;
+                self.cursor_y = row_top;
+                let cell_style = computed_style(self.doc, cell, &style, self.author);
+                self.layout_block(cell, cell_style, cell_x, col_w, None);
+                max_h = max_h.max(self.cursor_y - row_top);
+            }
+            self.cursor_y = row_top + max_h;
+        }
+    }
+
+    /// Collect a table's rows (flattening `thead`/`tbody`/`tfoot`); each row is the
+    /// list of its `td`/`th` cells.
+    fn collect_rows(&self, table: NodeId) -> Vec<Vec<NodeId>> {
+        let mut rows = Vec::new();
+        let push_row = |this: &Self, tr: NodeId, rows: &mut Vec<Vec<NodeId>>| {
+            let cells: Vec<NodeId> = this
+                .doc
+                .children(tr)
+                .filter(|&c| {
+                    matches!(&this.doc.node(c).data, NodeData::Element(e)
+                        if e.name.is_html("td") || e.name.is_html("th"))
+                })
+                .collect();
+            if !cells.is_empty() {
+                rows.push(cells);
+            }
+        };
+        for child in self.doc.children(table) {
+            match &self.doc.node(child).data {
+                NodeData::Element(e) if e.name.is_html("tr") => push_row(self, child, &mut rows),
+                NodeData::Element(e)
+                    if e.name.is_html("thead")
+                        || e.name.is_html("tbody")
+                        || e.name.is_html("tfoot") =>
+                {
+                    for tr in self.doc.children(child) {
+                        if matches!(&self.doc.node(tr).data, NodeData::Element(e) if e.name.is_html("tr"))
+                        {
+                            push_row(self, tr, &mut rows);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        rows
     }
 
     /// Flatten an inline subtree into styled words, collapsing whitespace and
@@ -593,5 +668,27 @@ mod tests {
                 .count()
                 >= 1
         );
+    }
+
+    #[test]
+    fn table_lays_cells_in_columns() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let html = "<table><tr><td>a</td><td>b</td><td>c</td></tr>\
+                    <tr><td>d</td><td>e</td><td>f</td></tr></table>";
+        let doc = parse(html);
+        let layout = layout(&doc, &font, 300.0, &ImageSizes::new());
+
+        let cell_runs: Vec<_> = layout
+            .runs
+            .iter()
+            .filter(|r| ["a", "b", "c", "d", "e", "f"].contains(&r.text.as_str()))
+            .collect();
+        assert_eq!(cell_runs.len(), 6, "expected 6 cell texts");
+        // Three distinct column x-positions.
+        let xs: std::collections::BTreeSet<i32> = cell_runs.iter().map(|r| r.x as i32).collect();
+        assert_eq!(xs.len(), 3, "expected 3 columns, got {xs:?}");
     }
 }

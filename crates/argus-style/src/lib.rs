@@ -112,6 +112,8 @@ ul, ol, blockquote, figure, pre { margin: 1em 0 }
 ul, ol { padding-left: 40px }
 blockquote { margin: 1em 40px }
 hr { margin: 8px 0; border-top: 1px solid #c0c0c0 }
+td, th { padding: 4px }
+th { font-weight: bold; text-align: center }
 ";
 
 fn ua_stylesheet() -> &'static Stylesheet {

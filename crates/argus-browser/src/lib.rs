@@ -28,6 +28,8 @@ h2 {{ color: #444 }}\
 .note {{ background-color: #fff3cd; color: #5a4b00; border: 1px solid #f0d000; padding: 12px }}\
 .brand {{ color: #c0392b }}\
 .center {{ text-align: center }}\
+.tbl td, .tbl th {{ border: 1px solid #ccd3df; background-color: #ffffff }}\
+.tbl th {{ background-color: #eef1f7 }}\
 </style></head><body>\
 <h1>Argus</h1>\
 <div class=\"card\">\
@@ -58,6 +60,13 @@ blue link</a> all flow inside this paragraph with correct spacing.</p>\
 <li>Navigation, tabs, and history</li>\
 <li>More CSS: flexbox, grid, and the long tail</li>\
 </ol>\
+<h3>A table</h3>\
+<table class=\"tbl\"><thead><tr><th>Subsystem</th><th>Crate</th><th>Status</th></tr></thead>\
+<tbody>\
+<tr><td>HTML parser</td><td>argus-html</td><td>working</td></tr>\
+<tr><td>CSS cascade</td><td>argus-css</td><td>working</td></tr>\
+<tr><td>Layout</td><td>argus-layout</td><td>block + inline + tables</td></tr>\
+</tbody></table>\
 <script>\
 function fib(n){{ return n < 2 ? n : fib(n-1) + fib(n-2); }}\
 console.log('kataan ran: fib(20) = ' + fib(20));\
