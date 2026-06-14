@@ -79,6 +79,8 @@ pub struct ComputedStyle {
     pub grid_columns: u32,
     /// Uniform `border-radius` in pixels.
     pub border_radius: f32,
+    /// Element `opacity` in `0.0..=1.0`.
+    pub opacity: f32,
 }
 
 impl ComputedStyle {
@@ -99,7 +101,21 @@ impl ComputedStyle {
             underline: false,
             grid_columns: 1,
             border_radius: 0.0,
+            opacity: 1.0,
         }
+    }
+
+    /// Apply this element's opacity to `color`'s alpha channel.
+    pub fn fade(&self, color: Color) -> Color {
+        if self.opacity >= 1.0 {
+            return color;
+        }
+        Color::rgba(
+            color.r,
+            color.g,
+            color.b,
+            (color.a as f32 * self.opacity.clamp(0.0, 1.0)) as u8,
+        )
     }
 }
 
@@ -360,6 +376,12 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         .and_then(|v| len_px(v.split_whitespace().next().unwrap_or(v), fs))
     {
         cs.border_radius = px;
+    }
+    if let Some(o) = map
+        .get("opacity")
+        .and_then(|v| v.trim().parse::<f32>().ok())
+    {
+        cs.opacity = o.clamp(0.0, 1.0);
     }
 }
 

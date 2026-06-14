@@ -36,6 +36,7 @@ h2 {{ color: #444 }}\
 </style></head><body>\
 <h1>Argus</h1>\
 <div class=\"pill\">rounded pill</div>\
+<div class=\"pill\" style=\"opacity: 0.45\">half-opacity pill</div>\
 <div class=\"card\">\
 <p>A web browser written in <strong class=\"brand\">pure Rust</strong>. This page was \
 fetched over the network, parsed into a DOM, run through a real CSS cascade, laid out \

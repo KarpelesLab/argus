@@ -199,7 +199,7 @@ impl Ctx<'_> {
                 y: border_box_top,
                 w: border_box_w,
                 h: 0.0,
-                color: style.background_color,
+                color: style.fade(style.background_color),
                 radius: style.border_radius,
             });
             self.rects.len() - 1
@@ -451,7 +451,7 @@ impl Ctx<'_> {
                 y: border_box_top,
                 w: border_box_w,
                 h: 0.0,
-                color: style.background_color,
+                color: style.fade(style.background_color),
                 radius: style.border_radius,
             });
             self.rects.len() - 1
@@ -517,7 +517,7 @@ impl Ctx<'_> {
                 y: border_box_top,
                 w: border_box_w,
                 h: 0.0,
-                color: style.background_color,
+                color: style.fade(style.background_color),
                 radius: style.border_radius,
             });
             self.rects.len() - 1
@@ -635,7 +635,7 @@ impl Ctx<'_> {
                     words.push(InlineWord {
                         text: word.to_string(),
                         font_size: style.font_size,
-                        color: style.color,
+                        color: style.fade(style.color),
                         // Words within a text node are separated by whitespace.
                         space_before: *pending_space || !first,
                         underline: style.underline,
