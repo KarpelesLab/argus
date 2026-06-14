@@ -44,7 +44,10 @@ styles, the box model, and images all work.</p>\
 <p class=\"center\" style=\"color: #2e7d32\">This line is centered and colored green by \
 an inline style attribute.</p>\
 <h3>Next</h3>\
-<p>JavaScript (kataan), a real inline fragment tree, and more CSS come next.</p>\
+<p>Inline styling now works: a <strong>bold strong</strong>, a \
+<span style=\"color:#c0392b\">red span</span>, and a <a href=\"https://example.com\">\
+blue link</a> all flow inside this paragraph with correct spacing. JavaScript \
+(kataan), more CSS, and navigation come next.</p>\
 </body></html>"
     )
 }

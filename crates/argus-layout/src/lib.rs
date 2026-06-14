@@ -21,6 +21,16 @@ use std::collections::HashMap;
 const LINE_HEIGHT: f32 = 1.2;
 const PAGE_MARGIN: f32 = 8.0;
 
+/// A word in an inline formatting context, carrying its own style so spans, links,
+/// and emphasis keep their color/size within a paragraph.
+struct InlineWord {
+    text: String,
+    font_size: f32,
+    color: argus_geometry::Color,
+    /// Whether whitespace precedes this word (a break opportunity + a space glyph).
+    space_before: bool,
+}
+
 /// A placed image: its box in canvas pixels and the source URL (key into the
 /// content process's decoded-image map).
 #[derive(Clone, Debug)]
@@ -160,16 +170,18 @@ impl Ctx<'_> {
 
         self.cursor_y += style.border.top + style.padding.top;
 
-        // Children.
-        let mut inline = String::new();
+        // Children. Inline-level content accumulates into `words` (each with its own
+        // style); block-level children flush the line box and lay out separately.
+        let mut words: Vec<InlineWord> = Vec::new();
+        let mut pending_space = false;
         for child in self.doc.children(id) {
             match &self.doc.node(child).data {
-                NodeData::Text(t) => {
-                    inline.push_str(t);
-                    inline.push(' ');
+                NodeData::Text(_) => {
+                    self.gather_inline(child, &style, &mut words, &mut pending_space);
                 }
                 NodeData::Element(e) if e.name.is_html("img") => {
-                    self.flush_inline(&mut inline, &style, content_left, content_w);
+                    self.flush_words(&mut words, &style, content_left, content_w);
+                    pending_space = false;
                     self.place_image(e, content_left, content_w);
                 }
                 NodeData::Element(_) => {
@@ -177,11 +189,11 @@ impl Ctx<'_> {
                     match cstyle.display {
                         Display::None => {}
                         Display::Inline => {
-                            self.gather_inline_text(child, &mut inline);
-                            inline.push(' ');
+                            self.gather_inline(child, &cstyle, &mut words, &mut pending_space);
                         }
                         Display::Block => {
-                            self.flush_inline(&mut inline, &style, content_left, content_w);
+                            self.flush_words(&mut words, &style, content_left, content_w);
+                            pending_space = false;
                             self.cursor_y += cstyle.margin.top;
                             self.layout_block(child, cstyle, content_left, content_w);
                             self.cursor_y += cstyle.margin.bottom;
@@ -191,7 +203,7 @@ impl Ctx<'_> {
                 _ => {}
             }
         }
-        self.flush_inline(&mut inline, &style, content_left, content_w);
+        self.flush_words(&mut words, &style, content_left, content_w);
 
         self.cursor_y += style.padding.bottom + style.border.bottom;
         let border_box_h = self.cursor_y - border_box_top;
@@ -263,60 +275,121 @@ impl Ctx<'_> {
         }
     }
 
-    fn gather_inline_text(&self, id: NodeId, out: &mut String) {
+    /// Flatten an inline subtree into styled words, collapsing whitespace and
+    /// tracking break opportunities via `space_before`.
+    fn gather_inline(
+        &self,
+        id: NodeId,
+        style: &ComputedStyle,
+        words: &mut Vec<InlineWord>,
+        pending_space: &mut bool,
+    ) {
         match &self.doc.node(id).data {
-            NodeData::Text(t) => out.push_str(t),
+            NodeData::Text(t) => {
+                if t.starts_with(char::is_whitespace) {
+                    *pending_space = true;
+                }
+                let mut first = true;
+                for word in t.split_whitespace() {
+                    words.push(InlineWord {
+                        text: word.to_string(),
+                        font_size: style.font_size,
+                        color: style.color,
+                        // Words within a text node are separated by whitespace.
+                        space_before: *pending_space || !first,
+                    });
+                    *pending_space = false;
+                    first = false;
+                }
+                if t.ends_with(char::is_whitespace) {
+                    *pending_space = true;
+                }
+            }
             NodeData::Element(_) => {
+                let cstyle = computed_style(self.doc, id, style, self.author);
+                if cstyle.display == Display::None {
+                    return;
+                }
                 for child in self.doc.children(id) {
-                    self.gather_inline_text(child, out);
+                    self.gather_inline(child, &cstyle, words, pending_space);
                 }
             }
             _ => {}
         }
     }
 
-    fn flush_inline(&mut self, inline: &mut String, style: &ComputedStyle, x: f32, width: f32) {
-        let text: String = inline.split_whitespace().collect::<Vec<_>>().join(" ");
-        inline.clear();
-        if text.is_empty() {
+    /// Break `words` into lines that fit `width`, aligned per the block's
+    /// `text-align`, emitting one [`TextRun`] per word (each in its own style).
+    fn flush_words(
+        &mut self,
+        words: &mut Vec<InlineWord>,
+        block: &ComputedStyle,
+        x: f32,
+        width: f32,
+    ) {
+        if words.is_empty() {
             return;
         }
+        let taken = std::mem::take(words);
 
-        let mut line = String::new();
-        for word in text.split(' ') {
-            let candidate = if line.is_empty() {
-                word.to_string()
+        // Greedily assign words to lines, recording each line's word range.
+        let mut lines: Vec<std::ops::Range<usize>> = Vec::new();
+        let mut line_start = 0usize;
+        let mut pen = 0.0f32;
+        for (i, w) in taken.iter().enumerate() {
+            let space = if i > line_start && w.space_before {
+                self.font.measure(" ", w.font_size)
             } else {
-                format!("{line} {word}")
+                0.0
             };
-            if line.is_empty() || self.font.measure(&candidate, style.font_size) <= width {
-                line = candidate;
+            let ww = self.font.measure(&w.text, w.font_size);
+            if i > line_start && pen + space + ww > width {
+                lines.push(line_start..i);
+                line_start = i;
+                pen = ww;
             } else {
-                self.emit_line(&line, style, x, width);
-                line = word.to_string();
+                pen += space + ww;
             }
         }
-        if !line.is_empty() {
-            self.emit_line(&line, style, x, width);
-        }
-    }
+        lines.push(line_start..taken.len());
 
-    fn emit_line(&mut self, line: &str, style: &ComputedStyle, x: f32, width: f32) {
-        let line_w = self.font.measure(line, style.font_size);
-        let offset = match style.text_align {
-            TextAlign::Left => 0.0,
-            TextAlign::Center => ((width - line_w) / 2.0).max(0.0),
-            TextAlign::Right => (width - line_w).max(0.0),
-        };
-        let baseline = self.cursor_y + self.font.ascent_px(style.font_size);
-        self.runs.push(TextRun {
-            x: x + offset,
-            baseline,
-            text: line.to_string(),
-            size_px: style.font_size,
-            color: style.color,
-        });
-        self.cursor_y += style.font_size * LINE_HEIGHT;
+        for range in lines {
+            let line = &taken[range.clone()];
+            // Line width and tallest font for baseline/height.
+            let mut line_w = 0.0f32;
+            let mut max_size = 0.0f32;
+            for (j, w) in line.iter().enumerate() {
+                let space = if j > 0 && w.space_before {
+                    self.font.measure(" ", w.font_size)
+                } else {
+                    0.0
+                };
+                line_w += space + self.font.measure(&w.text, w.font_size);
+                max_size = max_size.max(w.font_size);
+            }
+            let offset = match block.text_align {
+                TextAlign::Left => 0.0,
+                TextAlign::Center => ((width - line_w) / 2.0).max(0.0),
+                TextAlign::Right => (width - line_w).max(0.0),
+            };
+            let baseline = self.cursor_y + self.font.ascent_px(max_size);
+
+            let mut pen_x = x + offset;
+            for (j, w) in line.iter().enumerate() {
+                if j > 0 && w.space_before {
+                    pen_x += self.font.measure(" ", w.font_size);
+                }
+                self.runs.push(TextRun {
+                    x: pen_x,
+                    baseline,
+                    text: w.text.clone(),
+                    size_px: w.font_size,
+                    color: w.color,
+                });
+                pen_x += self.font.measure(&w.text, w.font_size);
+            }
+            self.cursor_y += max_size * LINE_HEIGHT;
+        }
     }
 }
 

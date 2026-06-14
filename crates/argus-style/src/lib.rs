@@ -104,6 +104,7 @@ h5 { font-size: 0.83em; font-weight: bold; margin: 1.67em 0 }
 h6 { font-size: 0.67em; font-weight: bold; margin: 2.33em 0 }
 p { margin: 1em 0 }
 b, strong { font-weight: bold }
+a { color: #0645ad }
 ul, ol, blockquote, figure, pre { margin: 1em 0 }
 blockquote { margin: 1em 40px }
 ";
