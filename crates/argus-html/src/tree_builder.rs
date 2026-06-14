@@ -564,4 +564,37 @@ mod tests {
 ";
         assert_eq!(got, want);
     }
+
+    /// Robustness (a lightweight fuzz): the parser must never panic on arbitrary
+    /// byte input. Drives thousands of structured-random documents through the
+    /// full tokenizer + tree builder. Coverage-guided fuzzing lives in `fuzz/`.
+    #[test]
+    fn parser_survives_arbitrary_input() {
+        let mut seed = 0x9E3779B97F4A7C15u64;
+        let mut byte = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed & 0xff) as u8
+        };
+        // A bias table toward HTML-structural bytes makes inputs reach deeper
+        // states than pure noise would.
+        const BIAS: &[u8] = b"<>/=\"'&; \n\tabcdivp013!-[]CDATAscriptstyletabletrtd";
+        for _ in 0..4000 {
+            let len = (byte() as usize) * 3;
+            let bytes: Vec<u8> = (0..len)
+                .map(|_| {
+                    if byte() < 140 {
+                        BIAS[byte() as usize % BIAS.len()]
+                    } else {
+                        byte()
+                    }
+                })
+                .collect();
+            let s = String::from_utf8_lossy(&bytes);
+            let doc = parse(&s);
+            // The output is always a well-formed arena (serialization can't panic).
+            let _ = doc.serialize();
+        }
+    }
 }

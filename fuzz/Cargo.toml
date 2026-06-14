@@ -1,0 +1,36 @@
+# Coverage-guided fuzzing harness (Phase 7). Run with a nightly toolchain:
+#   cargo install cargo-fuzz
+#   cargo +nightly fuzz run html
+#   cargo +nightly fuzz run css
+#
+# This crate is excluded from the main workspace (it pulls libfuzzer-sys and needs
+# the `-Z sanitizer` machinery), so normal `cargo build`/`cargo test` ignore it.
+[package]
+name = "argus-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+argus-html = { path = "../crates/argus-html" }
+argus-css = { path = "../crates/argus-css" }
+
+[[bin]]
+name = "html"
+path = "fuzz_targets/html.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "css"
+path = "fuzz_targets/css.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

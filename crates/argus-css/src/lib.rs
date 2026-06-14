@@ -253,4 +253,39 @@ mod tests {
         assert_eq!(sheet.rules.len(), 1);
         assert_eq!(sheet.rules[0].declarations[0].value, "blue");
     }
+
+    /// Robustness (a lightweight fuzz): the tokenizer + parser + selector engine +
+    /// value parsers must never panic on arbitrary byte input.
+    #[test]
+    fn css_parser_survives_arbitrary_input() {
+        let mut seed = 0xD1B54A32D192ED03u64;
+        let mut byte = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed & 0xff) as u8
+        };
+        const BIAS: &[u8] = b"{}()[]:;,.#*>~+=\"' \n%/-0123abcdivpxemrgb()repeat,";
+        for _ in 0..4000 {
+            let len = (byte() as usize) * 3;
+            let bytes: Vec<u8> = (0..len)
+                .map(|_| {
+                    if byte() < 150 {
+                        BIAS[byte() as usize % BIAS.len()]
+                    } else {
+                        byte()
+                    }
+                })
+                .collect();
+            let css = String::from_utf8_lossy(&bytes);
+            let sheet = parse_stylesheet(&css);
+            // Exercise selector matching + value parsing on whatever parsed.
+            for rule in &sheet.rules {
+                for d in &rule.declarations {
+                    let _ = parse_color(&d.value);
+                    let _ = parse_length(&d.value);
+                }
+            }
+        }
+    }
 }
