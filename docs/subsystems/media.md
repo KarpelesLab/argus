@@ -4,6 +4,7 @@
 **Layer:** 3 (integration); the media **service** is a process (Layer 4)
 **Depends on:** `oxideav`, `argus-gfx` (surfaces), `argus-net` (byte sources), `argus-script` (element APIs)
 **Consumed by:** `argus-engine`, `argus-paint`/compositor (frames), `argus-webapi` (media element APIs)
+**Upstream asks:** [`../upstream/oxideav.md`](../upstream/oxideav.md)
 
 ## Purpose
 

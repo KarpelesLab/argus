@@ -220,7 +220,8 @@ transforms), and a prototype `argus-gpu` compositor backend.
   invariants are CI-enforced, not aspirational.
 - **Upstream feedback** — feature requests to kataan (host/DOM hooks, WASM surface),
   rsurl (priority/streaming/abort), purecrypto (WebCrypto coverage), oxideav (codec/
-  demux API) gathered as each phase consumes them.
+  demux API) gathered as each phase consumes them. Tracked as living checklists in
+  [`upstream/`](upstream/README.md) — note that kataan's embedding API + GC gate Phase 2.
 - **Docs** — keep `subsystems/` and `ARCHITECTURE.md` in sync as designs solidify;
   promote "open questions" to decisions with a short ADR note when resolved.
 

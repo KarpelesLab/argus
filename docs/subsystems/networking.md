@@ -4,6 +4,7 @@
 **Layer:** 3 (integration); the net **service** is a process (Layer 4)
 **Depends on:** `rsurl`, `purecrypto` (TLS, via rsurl), `argus-security`, `argus-storage`
 **Consumed by:** `argus-engine` (resource loads), `argus-script` (fetch/XHR)
+**Upstream asks:** [`../upstream/rsurl.md`](../upstream/rsurl.md)
 
 ## Purpose
 

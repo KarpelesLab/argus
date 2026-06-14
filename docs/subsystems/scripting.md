@@ -4,6 +4,7 @@
 **Layer:** 3 (integration)
 **Depends on:** `kataan`, `argus-dom`, `argus-css` (CSSOM), `argus-events`, `argus-net`, `argus-security`
 **Consumed by:** `argus-engine`
+**Upstream asks:** [`../upstream/kataan.md`](../upstream/kataan.md) (gates Phase 2)
 
 ## Purpose
 

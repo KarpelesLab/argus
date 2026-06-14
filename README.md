@@ -73,6 +73,7 @@ argus/
 │   ├── PROCESS_MODEL.md       Multi-process, IPC, and sandbox design
 │   ├── ROADMAP.md             Phased plan with exit criteria
 │   ├── GLOSSARY.md            Shared vocabulary
+│   ├── upstream/             What Argus needs from kataan/rsurl/oxideav/purecrypto
 │   └── subsystems/            One design doc per core subsystem
 │       ├── README.md          Subsystem index + dependency graph
 │       ├── dom.md             HTML parser + DOM tree + events
