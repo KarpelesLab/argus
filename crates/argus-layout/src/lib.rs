@@ -543,6 +543,21 @@ impl Ctx<'_> {
             );
         }
 
+        // `outline`: four rects just outside the border box (no layout effect).
+        if style.outline_width > 0.0 && style.outline_color.a > 0 && !style.hidden {
+            let ow = style.outline_width;
+            let (ol, ot) = (border_box_left - ow, border_box_top - ow);
+            let (ow_full, oh_full) = (border_box_w + 2.0 * ow, border_box_h + 2.0 * ow);
+            let oc = style.outline_color;
+            self.rects.push(rect(ol, ot, ow_full, ow, oc)); // top
+            self.rects
+                .push(rect(ol, border_box_top + border_box_h, ow_full, ow, oc)); // bottom
+            self.rects.push(rect(ol, ot, ow, oh_full, oc)); // left
+            self.rects
+                .push(rect(border_box_left + border_box_w, ot, ow, oh_full, oc));
+            // right
+        }
+
         // `position: relative` paints the box (and its subtree) shifted by its
         // inset, without affecting the normal flow of following siblings.
         if style.position == Position::Relative {
@@ -1390,6 +1405,29 @@ mod tests {
         let y_after = l.runs.iter().find(|r| r.text == "after").unwrap().baseline;
         let y_shown = l.runs.iter().find(|r| r.text == "shown").unwrap().baseline;
         assert!(y_after > y_shown, "after should be below the hidden block");
+    }
+
+    #[test]
+    fn outline_paints_outside_border_box() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A 50px-wide box at the page margin (8px) with a 3px outline paints
+        // outline rects extending to the left of the border box (x < 8).
+        let doc = parse("<div style=\"width:50px; outline: 3px solid #ff0000\">x</div>");
+        let l = layout(&doc, &font, 200.0, &ImageSizes::new());
+        let red: Vec<&RectFill> = l
+            .rects
+            .iter()
+            .filter(|r| r.color.r == 255 && r.color.g == 0 && r.color.b == 0)
+            .collect();
+        assert_eq!(red.len(), 4, "outline should be 4 rects");
+        // The left outline rect sits just outside the page margin.
+        assert!(
+            red.iter().any(|r| r.x < PAGE_MARGIN),
+            "outline extends left of border box"
+        );
     }
 
     #[test]

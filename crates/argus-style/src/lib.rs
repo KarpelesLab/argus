@@ -153,6 +153,9 @@ pub struct ComputedStyle {
     /// `visibility: hidden` — the box keeps its space but paints nothing
     /// (inherited; a descendant may set `visibility: visible` to reappear).
     pub hidden: bool,
+    /// `outline` — drawn just outside the border box; does not affect layout.
+    pub outline_width: f32,
+    pub outline_color: Color,
     /// `position` and its inset offsets (resolved during layout; not inherited).
     pub position: Position,
     pub inset_top: Option<Length>,
@@ -193,6 +196,8 @@ impl ComputedStyle {
             vertical_align: VerticalAlign::Baseline,
             gap: 0.0,
             hidden: false,
+            outline_width: 0.0,
+            outline_color: Color::TRANSPARENT,
             position: Position::Static,
             inset_top: None,
             inset_right: None,
@@ -590,6 +595,20 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     }
     if let Some(px) = map.get("border-left-width").and_then(|v| len_px(v, fs)) {
         cs.border.left = px;
+    }
+    // Outline (drawn outside the border box; reuses the border shorthand parser).
+    if let Some(v) = map.get("outline") {
+        let (w, c) = parse_border(v, fs);
+        cs.outline_width = w;
+        if let Some(c) = c {
+            cs.outline_color = c;
+        }
+    }
+    if let Some(v) = map.get("outline-width").and_then(|v| len_px(v, fs)) {
+        cs.outline_width = v;
+    }
+    if let Some(v) = map.get("outline-color").and_then(|v| parse_color(v)) {
+        cs.outline_color = v;
     }
     // Width.
     if let Some(v) = map.get("width") {
