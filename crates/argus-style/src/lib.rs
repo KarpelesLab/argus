@@ -121,6 +121,8 @@ pub struct ComputedStyle {
     /// `min-width` / `max-width`, resolved during layout (`None` = no constraint).
     pub min_width: Option<Length>,
     pub max_width: Option<Length>,
+    /// Specified content `height` (`None` = auto, sized to content).
+    pub height: Option<Length>,
     pub text_align: TextAlign,
     /// `text-decoration: underline`.
     pub underline: bool,
@@ -182,6 +184,7 @@ impl ComputedStyle {
             width: None,
             min_width: None,
             max_width: None,
+            height: None,
             text_align: TextAlign::Left,
             underline: false,
             strike: false,
@@ -258,7 +261,7 @@ input, textarea, select { display: block; border: 1px solid #999; background: #f
 button { display: block; border: 1px solid #888; background: #e8e8e8; padding: 4px 12px; \
   width: 120px; text-align: center; margin: 4px 0; border-radius: 4px }
 option { display: none }
-input[type=checkbox], input[type=radio] { width: 14px; padding: 1px; margin: 4px 6px 4px 0 }
+input[type=checkbox], input[type=radio] { width: 14px; height: 14px; padding: 0; margin: 4px 6px 4px 0 }
 input[type=radio] { border-radius: 8px }
 ";
 
@@ -639,6 +642,9 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     }
     if let Some(v) = map.get("max-width") {
         cs.max_width = if v == "none" { None } else { parse_length(v) };
+    }
+    if let Some(v) = map.get("height") {
+        cs.height = if v == "auto" { None } else { parse_length(v) };
     }
     if let Some(v) = map.get("grid-template-columns") {
         cs.grid_columns = grid_track_count(v);

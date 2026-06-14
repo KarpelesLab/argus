@@ -483,12 +483,6 @@ impl Ctx<'_> {
                         baseline_shift: 0.0,
                     });
                 }
-                // Checkbox/radio have no content, so give them a square content box.
-                if e.name.is_html("input")
-                    && matches!(e.attr("type"), Some("checkbox") | Some("radio"))
-                {
-                    self.cursor_y += content_w.max(8.0);
-                }
             }
             for child in self.doc.children(id) {
                 match &self.doc.node(child).data {
@@ -576,6 +570,16 @@ impl Ctx<'_> {
             }
             self.flush_words(&mut words, &style, content_left, content_w);
         } // end !white_space_pre
+
+        // Honor a specified `height`: extend the content box down to it (we don't
+        // clip overflow, so taller content still grows the box).
+        if let Some(h) = style.height {
+            let content_top = border_box_top + style.border.top + style.padding.top;
+            let target = content_top + h.to_px(style.font_size, content_w);
+            if self.cursor_y < target {
+                self.cursor_y = target;
+            }
+        }
 
         self.cursor_y += style.padding.bottom + style.border.bottom;
         let border_box_h = self.cursor_y - border_box_top;
@@ -1712,6 +1716,23 @@ mod tests {
         // `right` shifts left (negative dx).
         let (rx2, _) = bg("position: relative; right: 20px");
         assert!((rx2 - sx + 20.0).abs() < 0.5, "right dx: {} vs {}", rx2, sx);
+    }
+
+    #[test]
+    fn height_extends_the_box() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A 120px-tall box renders a background rect at least that tall.
+        let doc = parse("<div style=\"height: 120px; background-color: #ff0000\">x</div>");
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let bg = l
+            .rects
+            .iter()
+            .find(|r| r.color.r == 255 && r.color.g == 0)
+            .expect("bg rect");
+        assert!(bg.h >= 120.0, "box height {} should be >= 120", bg.h);
     }
 
     #[test]
