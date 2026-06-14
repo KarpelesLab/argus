@@ -19,20 +19,30 @@ and compositor, a multi-process security architecture, a JS↔DOM binding bridge
 storage, navigation/session management, and both a windowed GUI shell **and** a
 headless automation surface.
 
-> **Status:** Phase 0 complete; **Phase 1 renders styled pages.** The sandboxed
-> content process parses HTML into a DOM, runs a real **CSS cascade** (a UA
-> stylesheet + the page's author `<style>` + inline `style` attributes, ordered by
-> origin/`!important`/specificity), lays out block/inline content into lines
-> (measured with real font metrics), and paints colored backgrounds and shaped,
-> anti-aliased glyphs into a shared-memory framebuffer. Headings are large and bold,
-> paragraphs wrap and take their cascaded colors, class/id selectors and
-> backgrounds work. Text shaping + rasterization use the first-party **oxideav**
-> stack (`oxideav-scribe`/`-raster`).
+> **Status:** **Argus loads, renders, scripts, and navigates real web pages.**
+> Phases 0–1 are essentially complete and Phases 2–3 have begun:
 >
-> Try it: `cargo run` (windowed) · `cargo run -- --dump-page=/tmp/page.png` (render
-> the sample page to an image) · `cargo run -- --headless` (Phase 0 verifier).
-> Still ahead in Phase 1: inline-level box styling, images, a real fragment tree,
-> more CSS properties. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> - **Networking** — fetches `http(s)` over **rsurl** (TLS via purecrypto) in a
+>   trusted net service; the sandboxed content process never touches a socket.
+> - **HTML → DOM** — spec-subset tokenizer + tree builder.
+> - **CSS** — a real cascade (UA + author `<style>` + inline) with selectors,
+>   specificity, the **box model** (margins/borders/padding/width), `text-align`,
+>   colors/backgrounds, and per-run inline styling.
+> - **Layout & paint** — block/inline formatting, lists (`ul`/`ol` markers), `hr`,
+>   line-breaking with real font metrics; shaped anti-aliased glyphs + colored
+>   rects via the first-party **oxideav** stack (`oxideav-scribe`/`-raster`).
+> - **Images** — `<img>` decoded (PNG via oxideav) with subresource loading.
+> - **JavaScript** — page `<script>`s run in **kataan** (computation + `console`).
+>   *DOM bindings (`document`/`window`) are not yet possible — they require
+>   kataan's embedding API; see [`docs/upstream/kataan.md`](docs/upstream/kataan.md).*
+> - **Navigation** — clickable links resolve + fetch + re-render.
+>
+> Try it: `cargo run` (windowed; click links to navigate) ·
+> `cargo run -- --url=https://example.com` (load a site) ·
+> `cargo run -- --dump-page=/tmp/page.png` (render to an image) ·
+> `cargo run -- --headless` (multi-process verifier). 18 crates, ~120 tests, green
+> on macOS CI. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what remains (full
+> JS/DOM, flex/grid, more conformance, media, GPU compositing).
 
 ---
 

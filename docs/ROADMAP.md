@@ -12,6 +12,24 @@ co-equal embedding, not an afterthought).
 > Dates are deliberately omitted — this is a dependency-ordered plan, not a
 > schedule. Effort markers: 🟢 small · 🟡 medium · 🔴 large · 🔴🔴 very large.
 
+## Current status (snapshot)
+
+| Phase | State |
+|-------|-------|
+| 0 — Foundations / multi-process | ✅ complete (sandbox, IPC, shared-mem framebuffer, AppKit window, CI) |
+| 1 — Static document to pixels | ✅ essentially complete (HTML→DOM, CSS cascade + box model, block/inline layout, lists/hr, text shaping + raster, networking over rsurl, images) |
+| 2 — Scripting & dynamic DOM | 🟡 started — page `<script>` runs in kataan (computation + console). **Blocked** on kataan's embedding API for DOM bindings / event loop ([upstream/kataan.md](upstream/kataan.md)) |
+| 3 — Chrome, navigation & services | 🟡 started — clickable links → fetch → re-render, URL resolution. Tabs/history/CSP/cache/cookies remain |
+| 4 — Layout & CSS breadth | ⬜ flexbox/grid/floats/positioning, full selectors, web fonts, complex text — not started |
+| 5 — Web platform & headless | ⬜ Web API breadth (needs JS bindings), CDP automation, storage — not started |
+| 6 — Media & richer rendering | ⬜ oxideav A/V, animations, GPU compositor — not started |
+| 7 — Hardening / perf / conformance | ⬜ WPT, fuzzing, a11y, sandbox hardening — continuous, not started |
+
+Honest scope note: the **load-bearing risk for the rest of Phase 2** is external —
+kataan needs the embedding API documented in [upstream/kataan.md](upstream/kataan.md)
+before `document`/`window` and the event loop can exist. Phases 4–7 are a large,
+multi-cycle effort beyond the current foundation.
+
 ---
 
 ## Phase 0 — Foundations & the multi-process skeleton 🔴
