@@ -34,6 +34,27 @@ So kataan is consumed as an **engine**, with Argus owning the host environment. 
 may still use kataan's `wasm_rt` to back `WebAssembly.*` — open question in
 [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §7.)
 
+## Current implementation (what ships today)
+
+The native-binding design below is the **target**; it assumes kataan's embedder API
+(native functions / accessor properties). That API isn't published yet — but testing
+kataan 0.0.3 showed its JS is rich enough (ES6 `Proxy`, `Object.defineProperty`,
+`JSON`, closures, `this`) to bind the DOM **without** it. So today, scripting runs
+through a **JS-side `document`/`window` shim + post-execution reconciliation** in
+[`argus-content`](../../crates/argus-content/src/dom_script.rs):
+
+1. The real DOM's id'd elements are serialized into a seed object.
+2. A JS prelude defines `document`/`window` and proxy element handles whose get/set
+   traps record mutation ops; it's run with the page scripts in one kataan execution.
+3. The recorded ops (emitted as JSON) are parsed in Rust and replayed into the real
+   `Document` before layout.
+
+This is **synchronous only** — no event loop, timers, events, or live reflow (those
+still want the embedder API). It already supports `getElementById`/`querySelector`/
+`createElement`/`body`, and element `textContent`/`innerHTML`/`className`/
+`setAttribute`/`style.*`/`classList`/`appendChild`/`remove`. When the native embedder
+API lands, this shim is replaced by the direct bindings described below.
+
 ## Responsibilities
 
 - **Realm/global setup** — create a kataan realm per `Window`/worker, install the
