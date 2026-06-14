@@ -26,11 +26,14 @@ headless automation surface.
 >   trusted net service; the sandboxed content process never touches a socket.
 > - **HTML → DOM** — spec-subset tokenizer + tree builder.
 > - **CSS** — a real cascade (UA + author `<style>` + inline) with selectors,
->   specificity, the **box model** (margins/borders/padding/width), `text-align`,
->   colors/backgrounds, and per-run inline styling.
-> - **Layout & paint** — block/inline formatting, lists (`ul`/`ol` markers), `hr`,
->   line-breaking with real font metrics; shaped anti-aliased glyphs + colored
->   rects via the first-party **oxideav** stack (`oxideav-scribe`/`-raster`).
+>   specificity, the **box model** (margins/borders/padding/width, `box-sizing`,
+>   `min/max-width`), `text-align`, `line-height`, `text-transform`, `white-space:
+>   pre`, `list-style-type`, `vertical-align` (sub/sup), colors/backgrounds,
+>   `border-radius`, `opacity`, and per-run inline styling.
+> - **Layout & paint** — block/inline formatting, **flexbox**, **grid** (with
+>   `gap`), **tables**, lists (`ul`/`ol` markers), `<br>`, `<hr>`, underline/
+>   line-through, line-breaking with real font metrics; shaped anti-aliased glyphs
+>   + colored rects via the first-party **oxideav** stack (`oxideav-scribe`/`-raster`).
 > - **Images** — `<img>` decoded (PNG via oxideav) with subresource loading.
 > - **JavaScript** — page `<script>`s run in **kataan** (computation + `console`).
 >   *DOM bindings (`document`/`window`) are not yet possible — they require
@@ -40,9 +43,10 @@ headless automation surface.
 > Try it: `cargo run` (windowed; click links to navigate) ·
 > `cargo run -- --url=https://example.com` (load a site) ·
 > `cargo run -- --dump-page=/tmp/page.png` (render to an image) ·
-> `cargo run -- --headless` (multi-process verifier). 18 crates, ~120 tests, green
-> on macOS CI. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what remains (full
-> JS/DOM, flex/grid, more conformance, media, GPU compositing).
+> `cargo run -- --dump-text` / `--dump-dom` / `--dump-a11y` (headless text/DOM/a11y) ·
+> `cargo run -- --headless` (multi-process verifier). 18 crates, green on macOS CI.
+> See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what remains (full JS/DOM,
+> floats/positioning, more conformance, media, GPU compositing).
 
 ---
 
