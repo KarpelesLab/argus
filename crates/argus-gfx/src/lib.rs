@@ -38,6 +38,29 @@ impl Font {
     pub fn ascent_px(&self, size_px: f32) -> f32 {
         self.chain.face(0).ascent_px(size_px)
     }
+
+    /// Distance from the baseline to the bottom of the line, in pixels.
+    pub fn descent_px(&self, size_px: f32) -> f32 {
+        self.chain.face(0).descent_px(size_px)
+    }
+
+    /// Advance width of `text` at `size_px`, in pixels (sum of glyph advances).
+    pub fn measure(&self, text: &str, size_px: f32) -> f32 {
+        match self.chain.shape(text, size_px) {
+            Ok(glyphs) => glyphs.iter().map(|g| g.x_advance).sum(),
+            Err(_) => 0.0,
+        }
+    }
+}
+
+/// A shaped-and-positioned text run for [`render_runs`]: its left edge at `x` and
+/// baseline at `baseline`, in canvas pixels.
+#[derive(Clone, Debug)]
+pub struct TextRun {
+    pub x: f32,
+    pub baseline: f32,
+    pub text: String,
+    pub size_px: f32,
 }
 
 /// An RGBA8 canvas (row-major, tightly packed, straight alpha).
@@ -86,6 +109,31 @@ pub fn render_text(
         .map(|p| p.data)
         .unwrap_or_else(|| vec![0; width as usize * height as usize * 4]);
 
+    Canvas {
+        width,
+        height,
+        pixels,
+    }
+}
+
+/// Render many text runs onto one transparent [`Canvas`] in a single rasterization
+/// pass (glyphs are black; color support lands with the paint layer).
+pub fn render_runs(runs: &[TextRun], font: &Font, width: u32, height: u32) -> Canvas {
+    let children: Vec<Node> = runs
+        .iter()
+        .map(|run| Node::Group(build_run(font, &run.text, run.size_px, run.x, run.baseline)))
+        .collect();
+    let root = Group {
+        children,
+        ..Group::default()
+    };
+    let video = render_run(root, width, height);
+    let pixels = video
+        .planes
+        .into_iter()
+        .next()
+        .map(|p| p.data)
+        .unwrap_or_else(|| vec![0; width as usize * height as usize * 4]);
     Canvas {
         width,
         height,
