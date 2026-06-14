@@ -21,11 +21,33 @@ use argus_dom::{Attribute, Document, NodeData, NodeId, QualName};
 const PRELUDE: &str = r#"
 var __argus_ops = [];
 var __seed = __SEED__;
+var __argus_state = {};      // in-JS overlay so reads reflect prior writes this run
+var __argus_listeners = {};  // event listeners keyed by target, for replay dispatch
+function __sk(tgt) { return tgt.kind + "" + tgt.val; }
+function __reg(tgt, type, fn) {
+  var key = __sk(tgt);
+  (__argus_listeners[key] = __argus_listeners[key] || []).push({type: "" + type, fn: fn});
+}
+// Read the current value of a property/attribute (overlay first, then seed).
+function __read(tgt, seed, k) {
+  var sk = __sk(tgt);
+  if (__argus_state[sk] && __argus_state[sk][k] != null) return __argus_state[sk][k];
+  if (seed && seed[k] != null) return seed[k];
+  return null;
+}
 // `tgt` is {kind:"id"|"sel", val:"..."}. Seeded reads are only available for ids.
 function __argus_el(tgt) {
   var seed = (tgt.kind === "id") ? __seed[tgt.val] : null;
   return new Proxy({}, {
     set: function(t, k, v) {
+      // `on<event> = fn` registers an event listener; everything else is a prop.
+      if (k.indexOf("on") === 0 && typeof v === "function") {
+        __reg(tgt, k.substring(2), v);
+        return true;
+      }
+      var sk = __sk(tgt);
+      __argus_state[sk] = __argus_state[sk] || {};
+      __argus_state[sk][k] = "" + v;
       __argus_ops.push({op: "prop", tgt: tgt, key: k, value: "" + v});
       return true;
     },
@@ -41,21 +63,30 @@ function __argus_el(tgt) {
       }
       if (k === "__tgt") return tgt;
       if (k === "classList") {
-        var cur = (seed && seed["class"]) ? (" " + seed["class"] + " ") : " ";
+        var has = function(c) {
+          var cur = __read(tgt, seed, "class");
+          return cur != null && (" " + cur + " ").indexOf(" " + c + " ") >= 0;
+        };
         return {
           add: function(c) { __argus_ops.push({op: "class", tgt: tgt, key: "add", value: "" + c}); },
           remove: function(c) { __argus_ops.push({op: "class", tgt: tgt, key: "remove", value: "" + c}); },
           toggle: function(c) { __argus_ops.push({op: "class", tgt: tgt, key: "toggle", value: "" + c}); },
-          contains: function(c) { return cur.indexOf(" " + c + " ") >= 0; }
+          contains: has
         };
+      }
+      if (k === "addEventListener") {
+        return function(type, fn) { __reg(tgt, type, fn); };
       }
       if (k === "setAttribute") {
         return function(name, val) {
+          var sk = __sk(tgt);
+          __argus_state[sk] = __argus_state[sk] || {};
+          __argus_state[sk]["" + name] = "" + val;
           __argus_ops.push({op: "attr", tgt: tgt, key: "" + name, value: "" + val});
         };
       }
       if (k === "getAttribute") {
-        return function(name) { return (seed && seed[name] != null) ? seed[name] : null; };
+        return function(name) { var r = __read(tgt, seed, "" + name); return r == null ? null : r; };
       }
       if (k === "appendChild" || k === "append") {
         return function(child) {
@@ -76,10 +107,19 @@ function __argus_el(tgt) {
       if (k === "querySelector") {
         return function(sel) { return __argus_el({kind: "scoped", parent: tgt, val: "" + sel}); };
       }
-      if (seed && seed[k] != null) return seed[k];
-      return "";
+      var r = __read(tgt, seed, k);
+      return r == null ? "" : r;
     }
   });
+}
+// Fire registered handlers of `type` on element {kind,val} (for replay dispatch).
+function __argus_dispatch(kind, val, type) {
+  var ls = __argus_listeners[kind + "" + val];
+  if (!ls) return;
+  var ev = {type: type, target: __argus_el({kind: kind, val: val})};
+  for (var i = 0; i < ls.length; i++) {
+    if (ls[i].type === type) { ls[i].fn(ev); }
+  }
 }
 var __newCount = 0;
 var document = {
@@ -97,9 +137,27 @@ document.documentElement = __argus_el({kind: "sel", val: "html"});
 var window = document.window = document;
 "#;
 
+/// One past interaction to replay: fire `event` on the element identified by
+/// `kind` (`"id"`/`"sel"`) + `val`. Replaying the full history each run lets JS
+/// state (and DOM read-backs via the overlay) accumulate deterministically.
+#[derive(Clone, Debug)]
+pub struct Interaction {
+    pub kind: String,
+    pub val: String,
+    pub event: String,
+}
+
 /// Run a document's inline scripts and apply their DOM mutations in place.
 /// Returns the console output (minus the internal ops line) for logging.
 pub fn apply_scripts(doc: &mut Document) -> Option<String> {
+    apply_scripts_with_events(doc, &[])
+}
+
+/// Like [`apply_scripts`], but after running the scripts (which register event
+/// listeners), replay `events` in order within the same execution, then apply the
+/// resulting DOM mutations. `events` should be the full interaction history so
+/// stateful handlers accumulate correctly (deterministic event replay).
+pub fn apply_scripts_with_events(doc: &mut Document, events: &[Interaction]) -> Option<String> {
     let scripts = collect_scripts(doc);
     if scripts.is_empty() {
         return None;
@@ -110,6 +168,14 @@ pub fn apply_scripts(doc: &mut Document) -> Option<String> {
     for s in &scripts {
         src.push('\n');
         src.push_str(s);
+    }
+    for e in events {
+        src.push_str(&format!(
+            "\n__argus_dispatch({}, {}, {});",
+            json_string(&e.kind),
+            json_string(&e.val),
+            json_string(&e.event)
+        ));
     }
     // Emit the recorded ops on a sentinel line we can pick out of the console.
     src.push_str("\nconsole.log(\"\\u0001ARGUSOPS\" + JSON.stringify(__argus_ops));\n");
@@ -904,6 +970,55 @@ mod tests {
             apply_ops(&mut doc, &s); // must not panic
             let _ = doc.serialize();
         }
+    }
+
+    #[test]
+    fn event_replay_accumulates_state() {
+        // A click counter: JS variable state must accumulate across replayed
+        // clicks (showing N after N clicks, not 1) — the core of the model.
+        let html = "<button id=\"btn\">+</button><span id=\"count\">0</span>\
+             <script>\
+               var c = 0;\
+               document.getElementById('btn').addEventListener('click', function(e){\
+                 c = c + 1;\
+                 document.getElementById('count').textContent = '' + c;\
+               });\
+             </script>";
+        let click = Interaction {
+            kind: "id".into(),
+            val: "btn".into(),
+            event: "click".into(),
+        };
+        // Replay three clicks.
+        let mut doc = argus_html::parse(html);
+        apply_scripts_with_events(&mut doc, &[click.clone(), click.clone(), click.clone()]);
+        assert_eq!(text_of(&doc, "count"), "3");
+
+        // Zero clicks → handler never fires; the count stays its initial value.
+        let mut doc0 = argus_html::parse(html);
+        apply_scripts_with_events(&mut doc0, &[]);
+        assert_eq!(text_of(&doc0, "count"), "0");
+    }
+
+    #[test]
+    fn event_replay_dom_readback_via_overlay() {
+        // DOM-backed state: the handler reads textContent and increments it; the
+        // overlay must make each replayed click see the previous click's write.
+        let html = "<span id=\"n\">10</span>\
+             <script>\
+               document.getElementById('n').onclick = function(){\
+                 var e = document.getElementById('n');\
+                 e.textContent = '' + (parseInt(e.textContent) + 1);\
+               };\
+             </script>";
+        let click = Interaction {
+            kind: "id".into(),
+            val: "n".into(),
+            event: "click".into(),
+        };
+        let mut doc = argus_html::parse(html);
+        apply_scripts_with_events(&mut doc, &[click.clone(), click.clone()]);
+        assert_eq!(text_of(&doc, "n"), "12");
     }
 
     #[test]
