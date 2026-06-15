@@ -260,6 +260,7 @@ impl Content {
                     (cy * img.height as f32) as u32,
                     (cw * img.width as f32).max(1.0) as u32,
                     (ch * img.height as f32).max(1.0) as u32,
+                    ib.clip.map(|[x, y, w, h]| [x as i32, y as i32, w as i32, h as i32]),
                 );
             }
         }

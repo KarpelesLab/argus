@@ -379,6 +379,10 @@ pub struct ComputedStyle {
     pub border_radius: f32,
     /// Element `opacity` in `0.0..=1.0`.
     pub opacity: f32,
+    /// `overflow: hidden`/`clip` — clip the subtree's paint to this box. Not
+    /// inherited. (`scroll`/`auto` are left unclipped since we can't scroll within
+    /// an element, so their overflow stays visible rather than being lost.)
+    pub overflow_clip: bool,
     /// `white-space: pre*` — preserve whitespace and honor newlines (inherited).
     pub white_space_pre: bool,
     /// `white-space: nowrap`/`pre` — suppress automatic line wrapping (inherited).
@@ -515,6 +519,7 @@ impl ComputedStyle {
             flex_wrap: false,
             border_radius: 0.0,
             opacity: 1.0,
+            overflow_clip: false,
             white_space_pre: false,
             nowrap: false,
             pre_line: false,
@@ -1934,6 +1939,15 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         .and_then(|v| v.trim().parse::<f32>().ok())
     {
         cs.opacity = o.clamp(0.0, 1.0);
+    }
+    // `overflow` (and its `-x`/`-y` longhands / two-value shorthand): `hidden`/`clip`
+    // clip the box. The shorthand's first token covers both axes here.
+    for prop in ["overflow", "overflow-x", "overflow-y"] {
+        if let Some(v) = map.get(prop) {
+            if v.split_whitespace().any(|t| matches!(t, "hidden" | "clip")) {
+                cs.overflow_clip = true;
+            }
+        }
     }
     if let Some(ws) = map.get("white-space") {
         cs.white_space_pre = matches!(

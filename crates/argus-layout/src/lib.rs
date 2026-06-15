@@ -486,6 +486,8 @@ pub struct ImageBox {
     /// `(x, y, w, h)` (whole image = `(0, 0, 1, 1)`). `object-fit: cover` crops
     /// the overflow by narrowing this window; other fits leave it full.
     pub crop: (f32, f32, f32, f32),
+    /// `overflow: hidden` clip rect `(x, y, w, h)` confining this image, if any.
+    pub clip: Option<[f32; 4]>,
 }
 
 /// The border-box of an element that carries an `id`, for click hit-testing.
@@ -717,6 +719,7 @@ impl Ctx<'_> {
                 h: 0.0,
                 color: style.fade(style.background_color),
                 radius: style.border_radius,
+                clip: None,
             });
             self.rects.len() - 1
         });
@@ -750,6 +753,7 @@ impl Ctx<'_> {
                     h: 0.0,
                     color: style.border_color,
                     radius: 0.0,
+                    clip: None,
                 });
             }
             i
@@ -777,6 +781,7 @@ impl Ctx<'_> {
                         shadow: style.text_shadow,
                         letter_spacing: 0.0,
                         font_key: style.font_key,
+                        clip: None,
                     });
                 }
                 bullet => {
@@ -792,6 +797,7 @@ impl Ctx<'_> {
                         h: d,
                         color: style.color,
                         radius: if round { d * 0.5 } else { 0.0 },
+                        clip: None,
                     });
                     if matches!(bullet, Marker::Circle) {
                         // Punch out the centre so the ring reads as hollow.
@@ -803,6 +809,7 @@ impl Ctx<'_> {
                             h: d - 2.0 * t,
                             color: argus_geometry::Color::WHITE,
                             radius: (d - 2.0 * t) * 0.5,
+                            clip: None,
                         });
                     }
                 }
@@ -851,6 +858,7 @@ impl Ctx<'_> {
                         shadow: style.text_shadow,
                         letter_spacing: 0.0,
                         font_key: style.font_key,
+                        clip: None,
                     });
                     self.cursor_y += fs * style.line_height;
                 }
@@ -1228,6 +1236,15 @@ impl Ctx<'_> {
             let cap = content_top + mh.to_px(style.font_size, content_w);
             self.cursor_y = self.cursor_y.min(cap).max(natural_bottom);
         }
+        // `overflow: hidden`/`clip` with a definite height makes that height a hard
+        // size: the box stays its specified height and the overflow is clipped
+        // (below), so following siblings flow right after it rather than after the
+        // overflowing content.
+        if style.overflow_clip {
+            if let Some(h) = style.height {
+                self.cursor_y = content_top + h.to_px(style.font_size, content_w);
+            }
+        }
 
         self.cursor_y += style.padding.bottom + style.border.bottom;
         let border_box_h = self.cursor_y - border_box_top;
@@ -1245,6 +1262,7 @@ impl Ctx<'_> {
                     h: (border_box_h + 2.0 * spread).max(0.0),
                     color: sc,
                     radius: style.border_radius,
+                    clip: None,
                 };
             } else {
                 // Faux blur: concentric rects from the full blur extent inward, each
@@ -1263,6 +1281,7 @@ impl Ctx<'_> {
                         h: (border_box_h + 2.0 * ext).max(0.0),
                         color: argus_geometry::Color { a: layer_a, ..sc },
                         radius: style.border_radius + grow.max(0.0),
+                        clip: None,
                     };
                 }
             }
@@ -1348,6 +1367,7 @@ impl Ctx<'_> {
                     h: (border_box_h - 2.0 * inset).max(0.0),
                     color: style.accent_color.unwrap_or(style.color),
                     radius,
+                    clip: None,
                 });
             }
             // `<input type=color>`: fill the inner box with the value's color swatch.
@@ -1364,6 +1384,7 @@ impl Ctx<'_> {
                     h: (border_box_h - 2.0 * inset).max(0.0),
                     color: swatch,
                     radius: 0.0,
+                    clip: None,
                 });
             }
             // `<input type=range>`: a thin track with a thumb at the value position.
@@ -1382,6 +1403,7 @@ impl Ctx<'_> {
                     h: track_h,
                     color: argus_geometry::Color::rgb(0xc0, 0xc0, 0xc0),
                     radius: track_h / 2.0,
+                    clip: None,
                 });
                 let thumb = border_box_h.clamp(8.0, 14.0);
                 let tx = (border_box_left + frac * border_box_w - thumb / 2.0)
@@ -1393,8 +1415,18 @@ impl Ctx<'_> {
                     h: thumb,
                     color: accent,
                     radius: thumb / 2.0,
+                    clip: None,
                 });
             }
+        }
+
+        // `overflow: hidden`/`clip`: confine this box's paint (its background,
+        // border, and every descendant pushed since `ds_start`) to its border box.
+        // Clipping the box's own border/background to the border box is a no-op, so
+        // only descendant overflow is actually trimmed. The outline (painted next)
+        // is intentionally left unclipped — it sits outside the border box.
+        if style.overflow_clip {
+            self.stamp_clip(ds_start, [border_box_left, border_box_top, border_box_w, border_box_h]);
         }
 
         // `outline`: four rects `outline-offset` outside the border box (no layout
@@ -1506,6 +1538,7 @@ impl Ctx<'_> {
                     h: ih,
                     color: g.color_at(1.0 - f),
                     radius: iw.min(ih) / 2.0,
+                    clip: None,
                 };
             }
             return;
@@ -1527,6 +1560,7 @@ impl Ctx<'_> {
                     h,
                     color,
                     radius: 0.0,
+                    clip: None,
                 }
             } else {
                 let sh = h / n;
@@ -1537,6 +1571,7 @@ impl Ctx<'_> {
                     h: sh + 0.5,
                     color,
                     radius: 0.0,
+                    clip: None,
                 }
             };
             self.rects[start + k] = rect;
@@ -1548,14 +1583,17 @@ impl Ctx<'_> {
         for r in &mut self.rects[start.0..] {
             r.x += dx;
             r.y += dy;
+            shift_clip(&mut r.clip, dx, dy);
         }
         for r in &mut self.runs[start.1..] {
             r.x += dx;
             r.baseline += dy;
+            shift_clip(&mut r.clip, dx, dy);
         }
         for im in &mut self.images[start.2..] {
             im.x += dx;
             im.y += dy;
+            shift_clip(&mut im.clip, dx, dy);
         }
         for l in &mut self.links[start.3..] {
             l.x += dx;
@@ -1564,6 +1602,21 @@ impl Ctx<'_> {
         for b in &mut self.bounds[start.4..] {
             b.x += dx;
             b.y += dy;
+        }
+    }
+
+    /// Intersect every display-list item appended since `start` with the clip rect
+    /// `clip` (`overflow: hidden`). Items already clipped (a nested overflow box)
+    /// keep the tighter intersection; links and bounds are untouched (hit-testing).
+    fn stamp_clip(&mut self, start: DisplayListMark, clip: [f32; 4]) {
+        for r in &mut self.rects[start.0..] {
+            r.clip = Some(clip_intersect(r.clip, clip));
+        }
+        for r in &mut self.runs[start.1..] {
+            r.clip = Some(clip_intersect(r.clip, clip));
+        }
+        for im in &mut self.images[start.2..] {
+            im.clip = Some(clip_intersect(im.clip, clip));
         }
     }
 
@@ -1579,14 +1632,17 @@ impl Ctx<'_> {
         for r in &mut self.rects[start.0..end.0] {
             r.x += dx;
             r.y += dy;
+            shift_clip(&mut r.clip, dx, dy);
         }
         for r in &mut self.runs[start.1..end.1] {
             r.x += dx;
             r.baseline += dy;
+            shift_clip(&mut r.clip, dx, dy);
         }
         for im in &mut self.images[start.2..end.2] {
             im.x += dx;
             im.y += dy;
+            shift_clip(&mut im.clip, dx, dy);
         }
         for l in &mut self.links[start.3..end.3] {
             l.x += dx;
@@ -1668,6 +1724,7 @@ impl Ctx<'_> {
             h,
             color: argus_geometry::Color::rgb(0xd0, 0xd0, 0xd0),
             radius,
+            clip: None,
         });
         // Filled portion: `accent-color` if set, else blue (progress) / green (meter).
         let fill = istyle.accent_color.unwrap_or_else(|| {
@@ -1689,6 +1746,7 @@ impl Ctx<'_> {
                 h,
                 color: fill,
                 radius,
+                clip: None,
             });
         } else if frac > 0.0 {
             self.rects.push(RectFill {
@@ -1698,6 +1756,7 @@ impl Ctx<'_> {
                 h,
                 color: fill,
                 radius,
+                clip: None,
             });
         }
         self.cursor_y = top + h + istyle.margin.bottom;
@@ -1734,6 +1793,7 @@ impl Ctx<'_> {
                             h,
                             src: poster.to_string(),
                             crop: (0.0, 0.0, 1.0, 1.0),
+                            clip: None,
                         });
                         self.cursor_y += h;
                         return;
@@ -1763,6 +1823,7 @@ impl Ctx<'_> {
                 argus_geometry::Color::rgb(0x20, 0x20, 0x20)
             },
             radius: if is_audio { h / 2.0 } else { 4.0 },
+            clip: None,
         });
         // A centered "play" square for video.
         if !is_audio {
@@ -1774,6 +1835,7 @@ impl Ctx<'_> {
                 h: s,
                 color: argus_geometry::Color::rgb(0xf0, 0xf0, 0xf0),
                 radius: 2.0,
+                clip: None,
             });
         }
         self.cursor_y += h;
@@ -1948,6 +2010,7 @@ impl Ctx<'_> {
                     h: dh,
                     src: src.to_string(),
                     crop,
+                    clip: None,
                 });
             }
             self.cursor_y += h;
@@ -1969,6 +2032,7 @@ impl Ctx<'_> {
                         shadow: istyle.text_shadow,
                         letter_spacing: 0.0,
                         font_key: istyle.font_key,
+                        clip: None,
                     });
                     self.cursor_y += fs * istyle.line_height;
                 }
@@ -2352,6 +2416,7 @@ impl Ctx<'_> {
                 h: 0.0,
                 color: style.fade(style.background_color),
                 radius: style.border_radius,
+                clip: None,
             });
             self.rects.len() - 1
         });
@@ -2751,6 +2816,7 @@ impl Ctx<'_> {
                 h: 0.0,
                 color: style.fade(style.background_color),
                 radius: style.border_radius,
+                clip: None,
             });
             self.rects.len() - 1
         });
@@ -3594,6 +3660,7 @@ impl Ctx<'_> {
                     shadow: taken.iter().find_map(|w| w.shadow),
                     letter_spacing: 0.0,
                     font_key: taken.iter().map(|w| w.font_key).find(|&k| k != 0).unwrap_or(0),
+                    clip: None,
                 });
                 self.cursor_y += max_size * block.line_height;
                 return;
@@ -3759,6 +3826,7 @@ impl Ctx<'_> {
                     shadow: w.shadow,
                     letter_spacing: ls,
                     font_key: w.font_key,
+                    clip: None,
                 });
                 let dh = (w.font_size / 16.0).max(1.0);
                 if w.underline {
@@ -3806,6 +3874,25 @@ fn transform_text(word: &str, transform: TextTransform) -> String {
     }
 }
 
+/// Shift a clip rect's origin by `(dx, dy)` (its size is unchanged).
+fn shift_clip(clip: &mut Option<[f32; 4]>, dx: f32, dy: f32) {
+    if let Some(c) = clip {
+        c[0] += dx;
+        c[1] += dy;
+    }
+}
+
+/// Intersect an optional existing clip with `clip`, returning the overlap (a
+/// degenerate, zero-area rect when they don't overlap, which hides the item).
+fn clip_intersect(existing: Option<[f32; 4]>, clip: [f32; 4]) -> [f32; 4] {
+    let Some(a) = existing else { return clip };
+    let x = a[0].max(clip[0]);
+    let y = a[1].max(clip[1]);
+    let right = (a[0] + a[2]).min(clip[0] + clip[2]);
+    let bottom = (a[1] + a[3]).min(clip[1] + clip[3]);
+    [x, y, (right - x).max(0.0), (bottom - y).max(0.0)]
+}
+
 fn rect(x: f32, y: f32, w: f32, h: f32, color: argus_geometry::Color) -> RectFill {
     RectFill {
         x,
@@ -3814,6 +3901,7 @@ fn rect(x: f32, y: f32, w: f32, h: f32, color: argus_geometry::Color) -> RectFil
         h,
         color,
         radius: 0.0,
+        clip: None,
     }
 }
 
@@ -4327,6 +4415,34 @@ mod tests {
         let blue = l.rects.iter().any(|r| r.color.b > 200 && r.color.r < 60 && r.w < 6.0);
         assert!(red, "red top border present");
         assert!(blue, "blue left border present");
+    }
+
+    #[test]
+    fn overflow_hidden_clips_descendants_to_border_box() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A fixed 80x40 box with overflow:hidden holding overflowing text: the text
+        // runs carry a clip equal to the box's border box; without overflow there's
+        // no clip.
+        let make = |css: &str| {
+            let html = format!(
+                "<div style=\"width:80px; height:40px; {css}\">\
+                 lots of words that overflow the small box badly</div>"
+            );
+            let doc = parse(&html);
+            layout(&doc, &font, 400.0, &ImageSizes::new())
+        };
+        let clipped = make("overflow: hidden");
+        let run = clipped.runs.iter().find(|r| !r.text.trim().is_empty()).expect("a run");
+        let [_, _, cw, ch] = run.clip.expect("clipped run has a clip");
+        assert!((cw - 80.0).abs() < 1.0, "clip width = border box width, got {cw}");
+        assert!((ch - 40.0).abs() < 1.0, "clip height = border box height, got {ch}");
+        // Default overflow:visible leaves runs unclipped.
+        let visible = make("");
+        let vrun = visible.runs.iter().find(|r| !r.text.trim().is_empty()).expect("a run");
+        assert_eq!(vrun.clip, None, "visible overflow does not clip");
     }
 
     #[test]

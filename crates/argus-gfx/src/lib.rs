@@ -157,6 +157,8 @@ pub struct TextRun {
     pub letter_spacing: f32,
     /// Face selector: web-font family hash (≥ 2), monospace (1), or primary (0).
     pub font_key: u32,
+    /// `overflow: hidden` clip rect `(x, y, w, h)` this run is confined to, if any.
+    pub clip: Option<[f32; 4]>,
 }
 
 /// A filled rectangle in canvas pixels (e.g. an element background), optionally
@@ -169,6 +171,8 @@ pub struct RectFill {
     pub h: f32,
     pub color: Color,
     pub radius: f32,
+    /// `overflow: hidden` clip rect `(x, y, w, h)` this fill is confined to, if any.
+    pub clip: Option<[f32; 4]>,
 }
 
 /// A flat list of paint commands. Rectangles paint first (backgrounds), then text.
@@ -183,7 +187,7 @@ pub struct DisplayList {
 pub fn render_display_list(list: &DisplayList, font: &Font, width: u32, height: u32) -> Canvas {
     let mut children: Vec<Node> = Vec::with_capacity(list.rects.len() + list.runs.len());
     for r in &list.rects {
-        children.push(rect_node(r));
+        children.push(maybe_clip(rect_node(r), r.clip));
     }
     for run in &list.runs {
         push_run_nodes(font, run, &mut children);
@@ -203,6 +207,31 @@ pub fn render_display_list(list: &DisplayList, font: &Font, width: u32, height: 
         width,
         height,
         pixels,
+    }
+}
+
+/// A rectangular [`Path`] for an axis-aligned clip region.
+fn rect_clip_path(clip: [f32; 4]) -> Path {
+    let [x, y, w, h] = clip;
+    let mut p = Path::new();
+    p.move_to(Point::new(x, y));
+    p.line_to(Point::new(x + w, y));
+    p.line_to(Point::new(x + w, y + h));
+    p.line_to(Point::new(x, y + h));
+    p.close();
+    p
+}
+
+/// Wrap `node` in a clip group if `clip` is set, so the rasterizer confines it to
+/// that rectangle (`overflow: hidden`). Unclipped nodes pass through unchanged.
+fn maybe_clip(node: Node, clip: Option<[f32; 4]>) -> Node {
+    match clip {
+        Some(c) => Node::Group(Group {
+            clip: Some(rect_clip_path(c)),
+            children: vec![node],
+            ..Group::default()
+        }),
+        None => node,
     }
 }
 
@@ -304,12 +333,14 @@ pub fn blit_rgba(
 ) {
     blit_rgba_cropped(
         dst, dst_w, dst_h, dest_x, dest_y, dest_w, dest_h, src, src_w, src_h, 0, 0, src_w, src_h,
+        None,
     );
 }
 
 /// Like [`blit_rgba`], but samples only the source sub-rect
 /// `(src_x, src_y, src_cw, src_ch)` (clamped to the image), scaled to fill the
-/// destination rect. Used for `object-fit: cover`, which crops the overflow.
+/// destination rect, and confined to the optional `clip` rect `[x, y, w, h]` in
+/// destination pixels (`overflow: hidden`). Used for `object-fit: cover`.
 #[allow(clippy::too_many_arguments)]
 pub fn blit_rgba_cropped(
     dst: &mut [u8],
@@ -326,6 +357,7 @@ pub fn blit_rgba_cropped(
     src_y: u32,
     src_cw: u32,
     src_ch: u32,
+    clip: Option<[i32; 4]>,
 ) {
     if dest_w == 0 || dest_h == 0 || src_cw == 0 || src_ch == 0 || src_w == 0 || src_h == 0 {
         return;
@@ -335,11 +367,21 @@ pub fn blit_rgba_cropped(
         if py < 0 || py >= dst_h as i32 {
             continue;
         }
+        if let Some([_, cy, _, ch]) = clip {
+            if py < cy || py >= cy + ch {
+                continue;
+            }
+        }
         let sy = (src_y + dy as u32 * src_ch / dest_h).min(src_h - 1);
         for dx in 0..dest_w as i32 {
             let px = dest_x + dx;
             if px < 0 || px >= dst_w as i32 {
                 continue;
+            }
+            if let Some([cx, _cy, cw, _ch]) = clip {
+                if px < cx || px >= cx + cw {
+                    continue;
+                }
             }
             let sx = (src_x + dx as u32 * src_cw / dest_w).min(src_w - 1);
             let s = (sy * src_w + sx) as usize * 4;
@@ -403,6 +445,21 @@ fn render_run(root: Group, width: u32, height: u32) -> oxideav_core::VideoFrame 
 /// faux-bolded by overprinting a second copy offset ~0.6px on the x-axis, which
 /// thickens the strokes without a dedicated bold face.
 fn push_run_nodes(font: &Font, run: &TextRun, out: &mut Vec<Node>) {
+    // For a clipped run, gather the glyph nodes then wrap them in one clip group.
+    if let Some(clip) = run.clip {
+        let mut inner = Vec::new();
+        push_run_nodes_unclipped(font, run, &mut inner);
+        out.push(Node::Group(Group {
+            clip: Some(rect_clip_path(clip)),
+            children: inner,
+            ..Group::default()
+        }));
+        return;
+    }
+    push_run_nodes_unclipped(font, run, out);
+}
+
+fn push_run_nodes_unclipped(font: &Font, run: &TextRun, out: &mut Vec<Node>) {
     // Paint the text-shadow copy first (behind the glyphs).
     if let Some((dx, dy, scolor)) = run.shadow {
         let spaint = Paint::Solid(rgba_of(scolor));
@@ -494,7 +551,7 @@ mod tests {
         let src = [255u8, 0, 0, 255, 0, 0, 255, 255];
         // Blit only the right half (src_x=1, src_cw=1) into a 1x1 dest → blue.
         let mut dst = [0u8; 4];
-        blit_rgba_cropped(&mut dst, 1, 1, 0, 0, 1, 1, &src, 2, 1, 1, 0, 1, 1);
+        blit_rgba_cropped(&mut dst, 1, 1, 0, 0, 1, 1, &src, 2, 1, 1, 0, 1, 1, None);
         assert_eq!(&dst[..3], &[0, 0, 255], "right-half crop yields blue");
         // The full-image wrapper samples the left (first) pixel → red.
         let mut dst2 = [0u8; 4];
