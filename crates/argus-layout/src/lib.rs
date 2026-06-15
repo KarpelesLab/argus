@@ -485,7 +485,19 @@ impl Ctx<'_> {
                     });
                 }
             }
+            // A closed `<details>` shows only its `<summary>`; other children hide.
+            let details_closed = self
+                .doc
+                .node(id)
+                .as_element()
+                .is_some_and(|e| e.name.is_html("details") && e.attr("open").is_none());
             for child in self.doc.children(id) {
+                if details_closed
+                    && !matches!(&self.doc.node(child).data,
+                        NodeData::Element(e) if e.name.is_html("summary"))
+                {
+                    continue;
+                }
                 match &self.doc.node(child).data {
                     NodeData::Text(_) => {
                         self.gather_inline(child, &style, None, &mut words, &mut pending_space);
@@ -1376,6 +1388,38 @@ mod tests {
         assert!(
             up < base,
             "superscript {up} should sit above baseline {base}"
+        );
+    }
+
+    #[test]
+    fn details_hides_content_unless_open() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let render = |open: &str| -> Vec<String> {
+            let html = format!(
+                "<details{open}><summary>More info</summary><p>Hidden body text</p></details>"
+            );
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+            l.runs.iter().map(|r| r.text.clone()).collect()
+        };
+        // Closed: only the summary renders.
+        let closed = render("");
+        assert!(
+            closed.contains(&"More".to_string()),
+            "summary shows: {closed:?}"
+        );
+        assert!(
+            !closed.contains(&"Hidden".to_string()),
+            "body hidden: {closed:?}"
+        );
+        // Open: the body renders too.
+        let open = render(" open");
+        assert!(
+            open.contains(&"Hidden".to_string()),
+            "open body shows: {open:?}"
         );
     }
 

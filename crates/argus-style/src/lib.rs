@@ -229,8 +229,10 @@ impl ComputedStyle {
 /// The built-in user-agent stylesheet (expressed as real CSS).
 const UA_CSS: &str = "\
 html, body, div, p, h1, h2, h3, h4, h5, h6, section, article, header, footer, nav, \
-main, aside, figure, blockquote, ul, ol, li, dl, dt, dd, pre, table, form, hr, address \
+main, aside, figure, blockquote, ul, ol, li, dl, dt, dd, pre, table, form, hr, address, \
+details, summary \
 { display: block }
+summary { font-weight: bold }
 head, title, style, script, meta, link, base, noscript { display: none }
 h1 { font-size: 2em; font-weight: bold; margin: 0.67em 0 }
 h2 { font-size: 1.5em; font-weight: bold; margin: 0.83em 0 }
