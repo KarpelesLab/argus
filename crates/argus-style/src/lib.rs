@@ -246,6 +246,9 @@ pub struct ComputedStyle {
     /// `overflow-wrap`/`word-break: break-word` — split words too long to fit
     /// rather than letting them overflow the line (inherited).
     pub break_word: bool,
+    /// `text-overflow: ellipsis` — truncate an overflowing single (`nowrap`) line
+    /// with `…` (not inherited).
+    pub ellipsis: bool,
     /// `list-style-type` for list items (inherited).
     pub list_style: ListStyle,
     /// `text-transform` case mapping (inherited).
@@ -322,6 +325,7 @@ impl ComputedStyle {
             pre_line: false,
             pre_wrap: false,
             break_word: false,
+            ellipsis: false,
             list_style: ListStyle::Disc,
             text_transform: TextTransform::None,
             box_sizing: BoxSizing::ContentBox,
@@ -1101,6 +1105,9 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         if matches!(v.trim(), "break-all" | "break-word") {
             cs.break_word = true;
         }
+    }
+    if let Some(v) = map.get("text-overflow") {
+        cs.ellipsis = v.trim() == "ellipsis";
     }
 }
 

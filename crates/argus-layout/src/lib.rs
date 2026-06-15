@@ -1019,6 +1019,24 @@ impl Ctx<'_> {
         out
     }
 
+    /// Truncate `text` to the largest prefix whose width plus an `…` fits `width`,
+    /// returning the prefix with `…` appended (for `text-overflow: ellipsis`).
+    fn truncate_ellipsis(&self, text: &str, fs: f32, width: f32) -> String {
+        let ell = "…";
+        let ell_w = self.font.measure(ell, fs);
+        let budget = (width - ell_w).max(0.0);
+        let mut cur = String::new();
+        for ch in text.chars() {
+            cur.push(ch);
+            if self.font.measure(&cur, fs) > budget {
+                cur.pop();
+                break;
+            }
+        }
+        cur.push_str(ell);
+        cur
+    }
+
     /// Split a word into the largest character chunks that each fit `width` (for
     /// `overflow-wrap: break-word`). Always keeps at least one char per chunk.
     fn split_word(&self, word: &str, fs: f32, width: f32) -> Vec<String> {
@@ -2087,6 +2105,41 @@ impl Ctx<'_> {
             }
             taken = expanded;
         }
+
+        // `text-overflow: ellipsis` on a non-wrapping line: if the joined text
+        // overflows the content box, render a single truncated run ending with `…`.
+        if block.ellipsis && block.nowrap && width > 0.0 {
+            let mut text = String::new();
+            let mut max_size = 0.0f32;
+            for (i, w) in taken.iter().enumerate() {
+                if w.text.is_empty() {
+                    continue;
+                }
+                if i > 0 && w.space_before {
+                    text.push(' ');
+                }
+                text.push_str(&w.text);
+                max_size = max_size.max(w.font_size);
+            }
+            if self.font.measure(&text, max_size) > width {
+                let color = taken
+                    .iter()
+                    .find(|w| !w.text.is_empty())
+                    .map(|w| w.color)
+                    .unwrap_or(block.fade(block.color));
+                let clipped = self.truncate_ellipsis(&text, max_size, width);
+                let baseline = self.cursor_y + self.font.ascent_px(max_size);
+                self.runs.push(TextRun {
+                    x,
+                    baseline,
+                    text: clipped,
+                    size_px: max_size,
+                    color,
+                });
+                self.cursor_y += max_size * block.line_height;
+                return;
+            }
+        }
         let content_right = x + width;
 
         // Greedily assign words to lines. Each line's inline region is narrowed by
@@ -2550,6 +2603,32 @@ mod tests {
             1,
             "nowrap stays on one line"
         );
+    }
+
+    #[test]
+    fn text_overflow_ellipsis_truncates_nowrap_line() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A long nowrap line in a narrow box with text-overflow:ellipsis collapses to
+        // a single run ending in `…`; without it the text stays full.
+        let render = |css: &str| -> Vec<String> {
+            let html = format!(
+                "<div style=\"width:80px; white-space:nowrap; overflow:hidden; {css}\">the quick brown fox jumps</div>"
+            );
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+            l.runs.iter().map(|r| r.text.clone()).collect()
+        };
+        let with = render("text-overflow: ellipsis");
+        assert_eq!(with.len(), 1, "ellipsis collapses to one run: {with:?}");
+        assert!(with[0].ends_with('…'), "ends with ellipsis: {:?}", with[0]);
+        assert!(!with[0].contains("jumps"), "tail truncated: {:?}", with[0]);
+        // Without ellipsis, the full text is present (multiple word runs, no …).
+        let without = render("");
+        assert!(without.iter().any(|t| t == "jumps"), "full text kept: {without:?}");
+        assert!(without.iter().all(|t| !t.ends_with('…')), "no ellipsis: {without:?}");
     }
 
     #[test]
