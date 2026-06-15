@@ -176,6 +176,8 @@ struct InlineWord {
     strike: bool,
     /// Whether this word has an overline (`text-decoration: overline`).
     overline: bool,
+    /// Whether this word is bold (`font-weight: bold`).
+    bold: bool,
     /// Color of the decoration lines (`text-decoration-color`, else the text color).
     decoration_color: argus_geometry::Color,
     /// The hyperlink target, if this word is inside an `<a href>`.
@@ -456,6 +458,7 @@ impl Ctx<'_> {
                         text: s.clone(),
                         size_px: fs,
                         color: style.color,
+                        bold: style.bold,
                     });
                 }
                 bullet => {
@@ -524,6 +527,7 @@ impl Ctx<'_> {
                         text: vline,
                         size_px: fs,
                         color,
+                        bold: style.bold,
                     });
                     self.cursor_y += fs * style.line_height;
                 }
@@ -577,6 +581,7 @@ impl Ctx<'_> {
                         underline: false,
                         strike: false,
                         overline: false,
+                        bold: false,
                         decoration_color: argus_geometry::Color::TRANSPARENT,
                         href: None,
                         hard_break: false,
@@ -1091,6 +1096,7 @@ impl Ctx<'_> {
                         text: line,
                         size_px: fs,
                         color,
+                        bold: istyle.bold,
                     });
                     self.cursor_y += fs * istyle.line_height;
                 }
@@ -2118,6 +2124,7 @@ impl Ctx<'_> {
                 underline: style.underline && !style.hidden,
                 strike: style.strike && !style.hidden,
                 overline: style.overline && !style.hidden,
+                bold: style.bold,
                 decoration_color: style.fade(style.decoration_color.unwrap_or(style.color)),
                 href: None,
                 hard_break: false,
@@ -2170,6 +2177,7 @@ impl Ctx<'_> {
                         underline: style.underline && !style.hidden,
                         strike: style.strike && !style.hidden,
                         overline: style.overline && !style.hidden,
+                        bold: style.bold,
                         decoration_color: style.fade(style.decoration_color.unwrap_or(style.color)),
                         href: if style.hidden { None } else { link.clone() },
                         hard_break: false,
@@ -2198,6 +2206,7 @@ impl Ctx<'_> {
                         underline: false,
                         strike: false,
                         overline: false,
+                        bold: false,
                         decoration_color: argus_geometry::Color::TRANSPARENT,
                         href: link.clone(),
                         hard_break: true,
@@ -2284,6 +2293,7 @@ impl Ctx<'_> {
                     text: clipped,
                     size_px: max_size,
                     color,
+                    bold: taken.iter().any(|w| w.bold),
                 });
                 self.cursor_y += max_size * block.line_height;
                 return;
@@ -2404,6 +2414,7 @@ impl Ctx<'_> {
                     text: w.text.clone(),
                     size_px: w.font_size,
                     color: w.color,
+                    bold: w.bold,
                 });
                 if w.underline {
                     let uy = wb + (w.font_size * 0.08).max(1.0);
@@ -2907,6 +2918,22 @@ mod tests {
         let track = l2.rects.iter().find(|r| r.w > 100.0).unwrap();
         let fill_purple = l2.rects.iter().any(|r| r.w < track.w && r.color.r > 100 && r.color.g < 40 && r.color.b > 100);
         assert!(fill_purple, "progress fill uses accent-color");
+    }
+
+    #[test]
+    fn bold_text_runs_are_flagged() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A <b> word produces a bold-flagged run; a plain word does not.
+        let html = "<p>plain <b>strong</b></p>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let strong = l.runs.iter().find(|r| r.text == "strong").unwrap();
+        let plain = l.runs.iter().find(|r| r.text == "plain").unwrap();
+        assert!(strong.bold, "<b> text is bold");
+        assert!(!plain.bold, "plain text is not bold");
     }
 
     #[test]

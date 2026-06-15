@@ -80,6 +80,8 @@ pub struct TextRun {
     pub text: String,
     pub size_px: f32,
     pub color: Color,
+    /// Bold text is faux-bolded by overprinting the glyphs at a small x-offset.
+    pub bold: bool,
 }
 
 /// A filled rectangle in canvas pixels (e.g. an element background), optionally
@@ -109,12 +111,7 @@ pub fn render_display_list(list: &DisplayList, font: &Font, width: u32, height: 
         children.push(rect_node(r));
     }
     for run in &list.runs {
-        let mut group = build_run(font, &run.text, run.size_px, run.x, run.baseline);
-        let paint = Paint::Solid(rgba_of(run.color));
-        for child in &mut group.children {
-            recolor(child, &paint);
-        }
-        children.push(Node::Group(group));
+        push_run_nodes(font, run, &mut children);
     }
     let root = Group {
         children,
@@ -273,17 +270,10 @@ pub fn composite_over(dst: &mut [u8], src: &[u8]) {
 /// Render many text runs onto one transparent [`Canvas`] in a single rasterization
 /// pass (glyphs are black; color support lands with the paint layer).
 pub fn render_runs(runs: &[TextRun], font: &Font, width: u32, height: u32) -> Canvas {
-    let children: Vec<Node> = runs
-        .iter()
-        .map(|run| {
-            let mut group = build_run(font, &run.text, run.size_px, run.x, run.baseline);
-            let paint = Paint::Solid(rgba_of(run.color));
-            for child in &mut group.children {
-                recolor(child, &paint);
-            }
-            Node::Group(group)
-        })
-        .collect();
+    let mut children: Vec<Node> = Vec::with_capacity(runs.len());
+    for run in runs {
+        push_run_nodes(font, run, &mut children);
+    }
     let root = Group {
         children,
         ..Group::default()
@@ -306,6 +296,21 @@ pub fn render_runs(runs: &[TextRun], font: &Font, width: u32, height: u32) -> Ca
 fn render_run(root: Group, width: u32, height: u32) -> oxideav_core::VideoFrame {
     let frame = VectorFrame::new(width as f32, height as f32).with_root(root);
     Renderer::new(width, height).render(&frame)
+}
+
+/// Append the colored glyph node(s) for a [`TextRun`] to `out`. Bold runs are
+/// faux-bolded by overprinting a second copy offset ~0.6px on the x-axis, which
+/// thickens the strokes without a dedicated bold face.
+fn push_run_nodes(font: &Font, run: &TextRun, out: &mut Vec<Node>) {
+    let paint = Paint::Solid(rgba_of(run.color));
+    let offsets: &[f32] = if run.bold { &[0.0, 0.6] } else { &[0.0] };
+    for &dx in offsets {
+        let mut group = build_run(font, &run.text, run.size_px, run.x + dx, run.baseline);
+        for child in &mut group.children {
+            recolor(child, &paint);
+        }
+        out.push(Node::Group(group));
+    }
 }
 
 /// Build the placed-glyph run group for `text` (baseline at `origin_x`,
