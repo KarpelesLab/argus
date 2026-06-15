@@ -8,8 +8,8 @@
 //! `:first/last/only-of-type`, `:nth-of-type`, `:nth-last-of-type`, `:not(...)`,
 //! `:is(...)`/`:where(...)` (match any argument; `:is()` takes its most specific
 //! argument's weight, `:where()` contributes zero), `:root`, `:empty`, and the
-//! form-state `:checked`/`:disabled`/`:enabled`/`:required`/`:read-only`. Other
-//! pseudo-classes/elements are
+//! form-state `:checked`/`:disabled`/`:enabled`/`:required`/`:read-only`, and
+//! `:link`/`:any-link`. Other pseudo-classes/elements are
 //! parsed-and-ignored so they don't break matching.
 
 use crate::tokenizer::Token;
@@ -74,6 +74,8 @@ pub enum PseudoClass {
     /// `:required` / `:read-only` — backed by attribute presence.
     Required,
     ReadOnly,
+    /// `:link` / `:any-link` — a hyperlink (`<a>`/`<area>` with an `href`).
+    AnyLink,
     /// `:root` — the document's root element (`<html>`).
     Root,
     /// `:empty` — no element or (non-whitespace) text children.
@@ -292,6 +294,7 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                                 "enabled" => c.pseudos.push(PseudoClass::Enabled),
                                 "required" => c.pseudos.push(PseudoClass::Required),
                                 "read-only" => c.pseudos.push(PseudoClass::ReadOnly),
+                                "link" | "any-link" => c.pseudos.push(PseudoClass::AnyLink),
                                 "root" => c.pseudos.push(PseudoClass::Root),
                                 "empty" => c.pseudos.push(PseudoClass::Empty),
                                 "first-of-type" => c.pseudos.push(PseudoClass::FirstOfType),
@@ -611,6 +614,11 @@ fn pseudo_matches(doc: &Document, node: NodeId, p: PseudoClass) -> bool {
         PseudoClass::Enabled => !element_has_attr(doc, node, "disabled"),
         PseudoClass::Required => element_has_attr(doc, node, "required"),
         PseudoClass::ReadOnly => element_has_attr(doc, node, "readonly"),
+        PseudoClass::AnyLink => matches!(
+            &doc.node(node).data,
+            NodeData::Element(e)
+                if (e.name.is_html("a") || e.name.is_html("area")) && e.attr("href").is_some()
+        ),
         // `:root` — an element whose parent is the document node.
         PseudoClass::Root => doc
             .node(node)
@@ -845,6 +853,15 @@ mod tests {
         assert!(!matches(&doc, plain, &sel(":required")));
         assert!(matches(&doc, readonly, &sel(":read-only")));
         assert!(!matches(&doc, plain, &sel("input:read-only")));
+
+        // :link / :any-link — <a href>, not a bare <a>.
+        let link = doc.create_element(QualName::html("a"), vec![Attribute::new("href", "/x")]);
+        doc.append(root, link);
+        let anchor = doc.create_element(QualName::html("a"), vec![]);
+        doc.append(root, anchor);
+        assert!(matches(&doc, link, &sel("a:link")));
+        assert!(matches(&doc, link, &sel(":any-link")));
+        assert!(!matches(&doc, anchor, &sel("a:link")));
     }
 
     #[test]
