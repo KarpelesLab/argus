@@ -608,7 +608,12 @@ fn extract_images(doc: &argus_dom::Document, base: Option<&str>) -> String {
     fn walk(doc: &Document, id: NodeId, base: Option<&str>, out: &mut String) {
         if let NodeData::Element(e) = &doc.node(id).data {
             if e.name.is_html("img") {
-                if let Some(src) = e.attr("src") {
+                // Prefer the explicit `src`; fall back to the best `srcset`
+                // candidate so srcset-only responsive images are still listed.
+                let url = e
+                    .attr("src")
+                    .or_else(|| e.attr("srcset").and_then(srcset_best));
+                if let Some(src) = url {
                     let alt = e.attr("alt").unwrap_or("");
                     let w = e.attr("width").unwrap_or("?");
                     let h = e.attr("height").unwrap_or("?");
@@ -623,6 +628,31 @@ fn extract_images(doc: &argus_dom::Document, base: Option<&str>) -> String {
     let mut out = String::new();
     walk(doc, doc.root(), base, &mut out);
     out
+}
+
+/// Pick the highest-resolution candidate URL from an `srcset` attribute. Each
+/// comma-separated candidate is `URL [descriptor]` where the descriptor is a `w`
+/// (width) or `x` (density) value; the largest descriptor wins, falling back to
+/// the last candidate when descriptors are absent or unparseable.
+fn srcset_best(srcset: &str) -> Option<&str> {
+    let mut best: Option<(&str, f32)> = None;
+    for cand in srcset.split(',') {
+        let cand = cand.trim();
+        if cand.is_empty() {
+            continue;
+        }
+        let mut parts = cand.split_whitespace();
+        let Some(url) = parts.next() else { continue };
+        // `w`/`x` descriptor → numeric weight; bare URL (single candidate) → 1x.
+        let weight = parts
+            .next()
+            .and_then(|d| d.trim_end_matches(['w', 'x']).parse::<f32>().ok())
+            .unwrap_or(1.0);
+        if best.is_none_or(|(_, bw)| weight >= bw) {
+            best = Some((url, weight));
+        }
+    }
+    best.map(|(u, _)| u)
 }
 
 /// The base URL for resolving the document's relative links: the first
@@ -1719,7 +1749,7 @@ mod tests {
     use super::{
         decode_html, dom_node_json, effective_base, extract_forms, extract_images, extract_json,
         extract_jsonld, extract_links, extract_meta, extract_tables, page_title, render_text,
-        resolve_url, History,
+        resolve_url, srcset_best, History,
     };
 
     #[test]
@@ -1842,6 +1872,29 @@ mod tests {
         assert_eq!(lines[0], "https://site.example/a.png\tLogo\t64x32");
         assert_eq!(lines[1], "https://site.example/dir/b.jpg\t\t?x?");
         assert_eq!(lines.len(), 2, "only <img> elements: {out:?}");
+    }
+
+    #[test]
+    fn srcset_best_picks_highest_descriptor() {
+        // Width descriptors: the largest `w` wins.
+        assert_eq!(
+            srcset_best("small.jpg 480w, big.jpg 1024w, mid.jpg 768w"),
+            Some("big.jpg")
+        );
+        // Density descriptors: the largest `x` wins.
+        assert_eq!(srcset_best("a.png 1x, b.png 2x, c.png 3x"), Some("c.png"));
+        // No descriptors: the (last) candidate is used.
+        assert_eq!(srcset_best("only.jpg"), Some("only.jpg"));
+        assert_eq!(srcset_best("  "), None);
+    }
+
+    #[test]
+    fn extract_images_falls_back_to_srcset() {
+        let doc = argus_html::parse(
+            "<img srcset=\"/s-480.jpg 480w, /s-1024.jpg 1024w\" alt=\"Hero\">",
+        );
+        let out = extract_images(&doc, Some("https://site.example/"));
+        assert_eq!(out.lines().next().unwrap(), "https://site.example/s-1024.jpg\tHero\t?x?");
     }
 
     #[test]
