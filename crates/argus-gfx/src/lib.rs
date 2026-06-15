@@ -98,6 +98,8 @@ pub struct TextRun {
     pub italic: bool,
     /// `text-shadow` as `(offset-x, offset-y, color)`, painted behind the glyphs.
     pub shadow: Option<(f32, f32, Color)>,
+    /// `letter-spacing`: extra pixels inserted after each glyph (0 = none).
+    pub letter_spacing: f32,
 }
 
 /// A filled rectangle in canvas pixels (e.g. an element background), optionally
@@ -210,7 +212,7 @@ pub fn render_text(
     height: u32,
     _color: Color,
 ) -> Canvas {
-    let root = build_run(font, text, size_px, origin_x, baseline_y);
+    let root = build_run(font, text, size_px, origin_x, baseline_y, 0.0);
     let video = render_run(root, width, height);
     let pixels = video
         .planes
@@ -321,7 +323,14 @@ fn push_run_nodes(font: &Font, run: &TextRun, out: &mut Vec<Node>) {
     // Paint the text-shadow copy first (behind the glyphs).
     if let Some((dx, dy, scolor)) = run.shadow {
         let spaint = Paint::Solid(rgba_of(scolor));
-        let mut sgroup = build_run(font, &run.text, run.size_px, run.x + dx, run.baseline + dy);
+        let mut sgroup = build_run(
+            font,
+            &run.text,
+            run.size_px,
+            run.x + dx,
+            run.baseline + dy,
+            run.letter_spacing,
+        );
         if run.italic {
             sgroup.transform = sgroup.transform.compose(&Transform2D::skew_x(-0.21));
         }
@@ -333,7 +342,14 @@ fn push_run_nodes(font: &Font, run: &TextRun, out: &mut Vec<Node>) {
     let paint = Paint::Solid(rgba_of(run.color));
     let offsets: &[f32] = if run.bold { &[0.0, 0.6] } else { &[0.0] };
     for &dx in offsets {
-        let mut group = build_run(font, &run.text, run.size_px, run.x + dx, run.baseline);
+        let mut group = build_run(
+            font,
+            &run.text,
+            run.size_px,
+            run.x + dx,
+            run.baseline,
+            run.letter_spacing,
+        );
         // Faux-italic: shear the run's baseline-local space so glyph tops lean right.
         if run.italic {
             group.transform = group.transform.compose(&Transform2D::skew_x(-0.21));
@@ -346,12 +362,27 @@ fn push_run_nodes(font: &Font, run: &TextRun, out: &mut Vec<Node>) {
 }
 
 /// Build the placed-glyph run group for `text` (baseline at `origin_x`,
-/// `baseline_y`). Shared by [`render_text`] and diagnostics.
-fn build_run(font: &Font, text: &str, size_px: f32, origin_x: f32, baseline_y: f32) -> Group {
+/// `baseline_y`). `letter_spacing` shifts each glyph right by its index times the
+/// spacing. Shared by [`render_text`] and diagnostics.
+fn build_run(
+    font: &Font,
+    text: &str,
+    size_px: f32,
+    origin_x: f32,
+    baseline_y: f32,
+    letter_spacing: f32,
+) -> Group {
     let placed = Shaper::shape_to_paths(&font.chain, text, size_px);
     let children: Vec<Node> = placed
         .into_iter()
-        .map(|(_face_idx, node, tf)| {
+        .enumerate()
+        .map(|(i, (_face_idx, node, tf))| {
+            // Move glyph `i` right by `i * letter_spacing` in the run-local space.
+            let tf = if letter_spacing != 0.0 {
+                Transform2D::translate(i as f32 * letter_spacing, 0.0).compose(&tf)
+            } else {
+                tf
+            };
             Node::Group(Group {
                 transform: tf,
                 children: vec![node],
@@ -385,6 +416,33 @@ mod tests {
             }
         }
         None
+    }
+
+    #[test]
+    fn letter_spacing_offsets_each_glyph() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font found; skipping");
+            return;
+        };
+        // Each glyph i is shifted right by i*spacing relative to no spacing.
+        let xs = |ls: f32| -> Vec<f32> {
+            let g = build_run(&font, "abc", 16.0, 0.0, 0.0, ls);
+            g.children
+                .iter()
+                .map(|c| match c {
+                    Node::Group(grp) => grp.transform.e,
+                    _ => 0.0,
+                })
+                .collect()
+        };
+        let base = xs(0.0);
+        let spaced = xs(5.0);
+        assert_eq!(base.len(), 3);
+        assert_eq!(spaced.len(), 3);
+        for i in 0..3 {
+            let expected = base[i] + i as f32 * 5.0;
+            assert!((spaced[i] - expected).abs() < 0.01, "glyph {i}: {} vs {expected}", spaced[i]);
+        }
     }
 
     #[test]

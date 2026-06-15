@@ -324,6 +324,8 @@ pub struct ComputedStyle {
     pub text_indent: f32,
     /// `word-spacing` extra pixels added between words (inherited).
     pub word_spacing: f32,
+    /// `letter-spacing` extra pixels added after each character (inherited).
+    pub letter_spacing: f32,
     /// `border-spacing` (or the `cellspacing` attr) between table cells, in pixels
     /// (inherited; the table layout reads it). Defaults to 0.
     pub border_spacing: f32,
@@ -418,6 +420,7 @@ impl ComputedStyle {
             line_height: 1.2,
             text_indent: 0.0,
             word_spacing: 0.0,
+            letter_spacing: 0.0,
             border_spacing: 0.0,
             vertical_align: VerticalAlign::Baseline,
             gap: 0.0,
@@ -840,6 +843,7 @@ pub fn computed_style(
         line_height: parent.line_height,         // line-height inherits
         text_indent: parent.text_indent,         // text-indent inherits
         word_spacing: parent.word_spacing,       // word-spacing inherits
+        letter_spacing: parent.letter_spacing,   // letter-spacing inherits
         border_spacing: parent.border_spacing,   // border-spacing inherits
         hidden: parent.hidden,                   // visibility inherits
         ..ComputedStyle::initial()
@@ -1286,6 +1290,13 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         if let Some(px) = parse_length(v).map(|l| l.to_px(cs.font_size, 0.0)) {
             cs.word_spacing = px;
         }
+    }
+    if let Some(v) = map.get("letter-spacing") {
+        cs.letter_spacing = if v.trim() == "normal" {
+            0.0
+        } else {
+            parse_length(v).map_or(cs.letter_spacing, |l| l.to_px(cs.font_size, 0.0))
+        };
     }
     // `border-spacing` (the first/horizontal value if two are given).
     if let Some(v) = map.get("border-spacing") {
@@ -2157,6 +2168,22 @@ mod tests {
         let cs = computed_style(&doc, dd, &ComputedStyle::initial(), &Stylesheet::default());
         assert_eq!(cs.display, Display::Block);
         assert_eq!(cs.margin.left, 40.0, "dd is indented by the UA default");
+    }
+
+    #[test]
+    fn letter_spacing_parses_and_inherits() {
+        let mut doc = Document::new();
+        let p = one(&mut doc, "p", vec![]);
+        let author = parse_stylesheet("p { letter-spacing: 3px }");
+        let cs = computed_style(&doc, p, &ComputedStyle::initial(), &author);
+        assert_eq!(cs.letter_spacing, 3.0);
+        // Inherits to a child, and `normal` resets it to 0.
+        let span = one(&mut doc, "span", vec![]);
+        let child = computed_style(&doc, span, &cs, &Stylesheet::default());
+        assert_eq!(child.letter_spacing, 3.0, "letter-spacing inherits");
+        let reset = parse_stylesheet("span { letter-spacing: normal }");
+        let child2 = computed_style(&doc, span, &cs, &reset);
+        assert_eq!(child2.letter_spacing, 0.0, "normal resets it");
     }
 
     #[test]

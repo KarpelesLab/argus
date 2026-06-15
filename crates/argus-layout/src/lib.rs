@@ -633,6 +633,7 @@ impl Ctx<'_> {
                         bold: style.bold,
                         italic: style.italic,
                         shadow: style.text_shadow,
+                        letter_spacing: 0.0,
                     });
                 }
                 bullet => {
@@ -705,6 +706,7 @@ impl Ctx<'_> {
                         bold: style.bold,
                         italic: style.italic,
                         shadow: style.text_shadow,
+                        letter_spacing: 0.0,
                     });
                     self.cursor_y += fs * style.line_height;
                 }
@@ -1749,6 +1751,7 @@ impl Ctx<'_> {
                         bold: istyle.bold,
                         italic: istyle.italic,
                         shadow: istyle.text_shadow,
+                        letter_spacing: 0.0,
                     });
                     self.cursor_y += fs * istyle.line_height;
                 }
@@ -3274,6 +3277,7 @@ impl Ctx<'_> {
                     bold: taken.iter().any(|w| w.bold),
                     italic: taken.iter().any(|w| w.italic),
                     shadow: taken.iter().find_map(|w| w.shadow),
+                    letter_spacing: 0.0,
                 });
                 self.cursor_y += max_size * block.line_height;
                 return;
@@ -3311,7 +3315,10 @@ impl Ctx<'_> {
                 };
                 let ww = match w.atomic {
                     Some((_, _, bw, _, _)) => bw,
-                    None => self.font.measure(&w.text, w.font_size),
+                    None => {
+                        self.font.measure(&w.text, w.font_size)
+                            + block.letter_spacing * w.text.chars().count() as f32
+                    }
                 };
                 if !block.nowrap && i > line_start && pen + space + ww > avail {
                     break;
@@ -3347,7 +3354,10 @@ impl Ctx<'_> {
                         atomic_h = atomic_h.max(bh);
                         bw
                     }
-                    None => self.font.measure(&w.text, w.font_size),
+                    None => {
+                        self.font.measure(&w.text, w.font_size)
+                            + block.letter_spacing * w.text.chars().count() as f32
+                    }
                 };
                 line_w += space + ww;
                 max_size = max_size.max(w.font_size);
@@ -3405,7 +3415,11 @@ impl Ctx<'_> {
                     pen_x +=
                         self.font.measure(" ", w.font_size) + block.word_spacing + justify_extra;
                 }
-                let word_w = self.font.measure(&w.text, w.font_size);
+                // `letter-spacing` widens the word's advance by one spacing per
+                // character (matching the per-glyph offset the painter applies).
+                let ls = block.letter_spacing;
+                let word_w =
+                    self.font.measure(&w.text, w.font_size) + ls * w.text.chars().count() as f32;
                 let wb = baseline + w.baseline_shift;
                 // Inline background (e.g. <mark>, highlighted span) paints behind the
                 // glyphs, covering the line box around this word.
@@ -3427,6 +3441,7 @@ impl Ctx<'_> {
                     bold: w.bold,
                     italic: w.italic,
                     shadow: w.shadow,
+                    letter_spacing: ls,
                 });
                 if w.underline {
                     let uy = wb + (w.font_size * 0.08).max(1.0);
@@ -4698,6 +4713,28 @@ mod tests {
         // Three distinct column x-positions.
         let xs: std::collections::BTreeSet<i32> = cell_runs.iter().map(|r| r.x as i32).collect();
         assert_eq!(xs.len(), 3, "expected 3 columns, got {xs:?}");
+    }
+
+    #[test]
+    fn letter_spacing_widens_words() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // The first word "aaaa" is wider with letter-spacing, so the second word
+        // "bb" starts further right, and its run carries the spacing for painting.
+        let x_of = |html: &str, t: &str| -> (f32, f32) {
+            let doc = parse(html);
+            let l = layout(&doc, &font, 600.0, &ImageSizes::new());
+            let r = l.runs.iter().find(|r| r.text == t).unwrap();
+            (r.x, r.letter_spacing)
+        };
+        let (bx0, ls0) = x_of("<p>aaaa bb</p>", "bb");
+        let (bx1, ls1) = x_of("<p style=\"letter-spacing:4px\">aaaa bb</p>", "bb");
+        assert_eq!(ls0, 0.0);
+        assert!((ls1 - 4.0).abs() < 0.01, "run carries the spacing: {ls1}");
+        // "aaaa" is 4 chars → +16px of spacing pushes "bb" right by ~16px.
+        assert!((bx1 - bx0 - 16.0).abs() < 2.0, "second word advanced: {bx0} -> {bx1}");
     }
 
     #[test]
