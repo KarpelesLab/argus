@@ -1,9 +1,11 @@
-//! Trusted service processes (Phase 0 skeleton).
+//! Trusted service processes.
 //!
-//! The net and storage services will own the network (rsurl) and disk on the
-//! trusted side of the sandbox (see `docs/PROCESS_MODEL.md`). For now they only
-//! prove the spawn/handshake/lifecycle path: come up, acknowledge, idle until the
-//! browser shuts them down or goes away.
+//! The net and storage services own the network (rsurl) and disk on the trusted
+//! side of the sandbox (see `docs/PROCESS_MODEL.md`) — the sandboxed content
+//! process never touches a socket. The **net service** fetches `LoadUrl` requests
+//! over rsurl (threading a persistent cookie jar) and serves them through a
+//! conservative in-memory HTTP cache that honors `Cache-Control`. The storage
+//! service is still a lifecycle skeleton.
 
 use argus_ipc::Channel;
 use argus_protocol::{self as proto, Msg};
