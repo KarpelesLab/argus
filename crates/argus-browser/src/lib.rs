@@ -311,8 +311,6 @@ pub fn dump_dom(url: Option<&str>) -> io::Result<String> {
 /// ARIA role and accessible name of each semantic element (a start on the a11y
 /// tree from `docs/subsystems/embedding.md`). Used by `--dump-a11y`.
 pub fn dump_a11y(url: Option<&str>) -> io::Result<String> {
-    use argus_dom::{Document, NodeData, NodeId};
-
     log::set_role(Role::Browser);
     let mut net = spawn_child(Role::NetService)?;
     proto::parent_handshake(net.channel(), Size::new(800, 600))?;
@@ -321,30 +319,39 @@ pub fn dump_a11y(url: Option<&str>) -> io::Result<String> {
     net.wait()?;
     let mut doc = argus_html::parse(&html);
     argus_domscript::apply_scripts(&mut doc);
+    Ok(a11y_tree(&doc))
+}
 
-    /// ARIA role implied by an HTML tag (None = generic/presentational).
-    fn role_for(tag: &str) -> Option<&'static str> {
-        Some(match tag {
-            "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => "heading",
-            "a" => "link",
-            "button" => "button",
-            "img" => "img",
-            "ul" | "ol" => "list",
-            "li" => "listitem",
-            "nav" => "navigation",
-            "main" => "main",
-            "header" => "banner",
-            "footer" => "contentinfo",
-            "input" | "textarea" => "textbox",
-            "p" => "paragraph",
-            "table" => "table",
-            "tr" => "row",
-            "td" => "cell",
-            "th" => "columnheader",
-            "form" => "form",
-            _ => return None,
-        })
-    }
+/// ARIA role implied by an HTML tag (None = generic/presentational).
+fn implicit_role(tag: &str) -> Option<&'static str> {
+    Some(match tag {
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => "heading",
+        "a" => "link",
+        "button" => "button",
+        "img" => "img",
+        "ul" | "ol" => "list",
+        "li" => "listitem",
+        "nav" => "navigation",
+        "main" => "main",
+        "header" => "banner",
+        "footer" => "contentinfo",
+        "input" | "textarea" => "textbox",
+        "p" => "paragraph",
+        "table" => "table",
+        "tr" => "row",
+        "td" => "cell",
+        "th" => "columnheader",
+        "form" => "form",
+        _ => return None,
+    })
+}
+
+/// Build the accessibility tree for a parsed document: each semantic element as an
+/// indented `role "name"` line. Honors an explicit `role` attribute, `aria-label`
+/// (accessible-name override), and `aria-hidden="true"` (prunes the subtree). Pure
+/// (no I/O) so it's unit-testable.
+fn a11y_tree(doc: &argus_dom::Document) -> String {
+    use argus_dom::{Document, NodeData, NodeId};
 
     fn text_of(doc: &Document, id: NodeId, out: &mut String) {
         match &doc.node(id).data {
@@ -358,23 +365,43 @@ pub fn dump_a11y(url: Option<&str>) -> io::Result<String> {
         }
     }
 
+    /// Collapse whitespace and truncate to 60 chars on a char boundary.
+    fn clean(s: &str) -> String {
+        let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        if collapsed.chars().count() > 60 {
+            let t: String = collapsed.chars().take(60).collect();
+            format!("{t}…")
+        } else {
+            collapsed
+        }
+    }
+
     fn walk(doc: &Document, id: NodeId, depth: usize, out: &mut String) {
+        if let NodeData::Element(e) = &doc.node(id).data {
+            // `aria-hidden="true"` removes the element and its subtree from the tree.
+            if e.attr("aria-hidden") == Some("true") {
+                return;
+            }
+        }
         let mut next_depth = depth;
         if let NodeData::Element(e) = &doc.node(id).data {
             let tag = &*e.name.local;
             if !matches!(tag, "head" | "title" | "style" | "script" | "meta" | "link") {
-                if let Some(role) = role_for(tag) {
-                    let name = if tag == "img" {
-                        e.attr("alt").unwrap_or("").to_string()
+                // An explicit `role` attribute overrides the tag's implicit role.
+                let role: Option<&str> = e
+                    .attr("role")
+                    .filter(|r| !r.is_empty())
+                    .or_else(|| implicit_role(tag));
+                if let Some(role) = role {
+                    // Accessible name: `aria-label`, else `alt` for images, else text.
+                    let name = if let Some(label) = e.attr("aria-label") {
+                        clean(label)
+                    } else if tag == "img" {
+                        clean(e.attr("alt").unwrap_or(""))
                     } else {
                         let mut s = String::new();
                         text_of(doc, id, &mut s);
-                        s.split_whitespace().collect::<Vec<_>>().join(" ")
-                    };
-                    let name = if name.len() > 60 {
-                        format!("{}…", &name[..60])
-                    } else {
-                        name
+                        clean(&s)
                     };
                     for _ in 0..depth {
                         out.push_str("  ");
@@ -394,8 +421,8 @@ pub fn dump_a11y(url: Option<&str>) -> io::Result<String> {
     }
 
     let mut out = String::from("document\n");
-    walk(&doc, doc.root(), 1, &mut out);
-    Ok(out)
+    walk(doc, doc.root(), 1, &mut out);
+    out
 }
 
 /// Headless automation: fetch a page and return its **rendered text** — an
@@ -919,6 +946,27 @@ fn verify_uniform(fb: &Framebuffer) -> io::Result<Color> {
 #[cfg(test)]
 mod tests {
     use super::{extract_links, page_title, render_text, resolve_url, History};
+
+    #[test]
+    fn a11y_tree_roles_names_and_aria() {
+        let doc = argus_html::parse(
+            "<nav><a href=\"/\">Home</a></nav>\
+             <h1>Title</h1>\
+             <button aria-label=\"Close dialog\">×</button>\
+             <div role=\"alert\">Heads up</div>\
+             <p aria-hidden=\"true\">secret</p>",
+        );
+        let tree = super::a11y_tree(&doc);
+        assert!(tree.contains("navigation"), "nav role:\n{tree}");
+        assert!(tree.contains("link \"Home\""), "link name:\n{tree}");
+        assert!(tree.contains("heading \"Title\""), "heading:\n{tree}");
+        // aria-label overrides the text content as the accessible name.
+        assert!(tree.contains("button \"Close dialog\""), "aria-label:\n{tree}");
+        // An explicit role attribute is honored.
+        assert!(tree.contains("alert \"Heads up\""), "role attr:\n{tree}");
+        // aria-hidden prunes the element.
+        assert!(!tree.contains("secret"), "aria-hidden should prune:\n{tree}");
+    }
 
     #[test]
     fn extract_links_resolves_relative_hrefs() {
