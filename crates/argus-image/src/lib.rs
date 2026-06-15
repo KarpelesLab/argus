@@ -4,9 +4,10 @@
 //! codecs: PNG (`oxideav-png`), GIF (`oxideav-gif`), **JPEG** (`oxideav-mjpeg` via
 //! the `oxideav-core` registry, YUV→RGBA through `oxideav-pixfmt`), **WebP**
 //! (`oxideav-webp`, lossless), **QOI** (`oxideav-qoi`), and **ICO/CUR favicons**
-//! (`oxideav-ico`, largest sub-image) — plus uncompressed 24/32-bit BMP (built in)
-//! and `data:` URLs. AVIF, TIFF, TGA, and lossy-WebP (VP8) decode here once that
-//! glue lands. See `docs/subsystems/media.md`.
+//! (`oxideav-ico`, largest sub-image) — plus uncompressed 24/32-bit BMP and
+//! **TGA** (Truevision, uncompressed + RLE true-color, both built in) and `data:`
+//! URLs. AVIF, TIFF, and lossy-WebP (VP8) decode here once that glue lands. See
+//! `docs/subsystems/media.md`.
 
 /// A decoded image: `width * height * 4` straight-alpha RGBA bytes.
 #[derive(Clone, Debug)]
@@ -55,7 +56,8 @@ pub fn decode(bytes: &[u8]) -> Option<DecodedImage> {
     if bytes.starts_with(&[0x00, 0x00, 0x01, 0x00]) {
         return decode_ico(bytes);
     }
-    None
+    // TGA has no leading signature; try it last (it validates structurally).
+    decode_tga(bytes)
 }
 
 /// Decode a QOI image (lossless). `oxideav-qoi` returns tightly-packed RGB or
@@ -241,6 +243,110 @@ fn decode_bmp(bytes: &[u8]) -> Option<DecodedImage> {
     })
 }
 
+/// Decode a TGA (Truevision Targa) true-color image: uncompressed (type 2) or
+/// RLE (type 10), 24-bit BGR or 32-bit BGRA. Color-mapped/grayscale variants are
+/// not handled. TGA has no leading magic, so this is tried last and validates the
+/// header structurally (bounded reads fail closed on malformed data).
+fn decode_tga(bytes: &[u8]) -> Option<DecodedImage> {
+    if bytes.len() < 18 {
+        return None;
+    }
+    let id_len = bytes[0] as usize;
+    let cmap_type = bytes[1];
+    let img_type = bytes[2];
+    let cmap_len = u16::from_le_bytes([bytes[5], bytes[6]]) as usize;
+    let cmap_entry_bits = bytes[7] as usize;
+    let width = u16::from_le_bytes([bytes[12], bytes[13]]) as usize;
+    let height = u16::from_le_bytes([bytes[14], bytes[15]]) as usize;
+    let depth = bytes[16] as usize;
+    let descriptor = bytes[17];
+
+    // Only uncompressed (2) / RLE (10) true-color, 24- or 32-bit.
+    if (img_type != 2 && img_type != 10) || (depth != 24 && depth != 32) || cmap_type > 1 {
+        return None;
+    }
+    if width == 0 || height == 0 || (width as u64) * (height as u64) > 64_000_000 {
+        return None;
+    }
+    let bpp = depth / 8;
+    let cmap_bytes = if cmap_type == 1 {
+        cmap_len * cmap_entry_bits.div_ceil(8)
+    } else {
+        0
+    };
+    let mut p = 18 + id_len + cmap_bytes;
+    let npx = width * height;
+    // Pixels in stored order (first stored pixel first); flipped to top-down below.
+    let mut px = vec![0u8; npx * 4];
+    let read_pixel = |bytes: &[u8], p: &mut usize, out: &mut [u8]| -> Option<()> {
+        let b = *bytes.get(*p)?;
+        let g = *bytes.get(*p + 1)?;
+        let r = *bytes.get(*p + 2)?;
+        let a = if bpp == 4 { *bytes.get(*p + 3)? } else { 0xFF };
+        out[0] = r;
+        out[1] = g;
+        out[2] = b;
+        out[3] = a;
+        *p += bpp;
+        Some(())
+    };
+
+    let mut idx = 0;
+    if img_type == 2 {
+        while idx < npx {
+            read_pixel(bytes, &mut p, &mut px[idx * 4..idx * 4 + 4])?;
+            idx += 1;
+        }
+    } else {
+        // RLE: each packet is a 1-byte header; high bit set → run of `count` copies
+        // of one pixel, else `count` raw pixels. `count` = low 7 bits + 1.
+        while idx < npx {
+            let header = *bytes.get(p)?;
+            p += 1;
+            let count = (header & 0x7F) as usize + 1;
+            if header & 0x80 != 0 {
+                let mut pix = [0u8; 4];
+                read_pixel(bytes, &mut p, &mut pix)?;
+                for _ in 0..count {
+                    if idx >= npx {
+                        break;
+                    }
+                    px[idx * 4..idx * 4 + 4].copy_from_slice(&pix);
+                    idx += 1;
+                }
+            } else {
+                for _ in 0..count {
+                    if idx >= npx {
+                        break;
+                    }
+                    read_pixel(bytes, &mut p, &mut px[idx * 4..idx * 4 + 4])?;
+                    idx += 1;
+                }
+            }
+        }
+    }
+
+    // Rows are stored bottom-to-top unless descriptor bit 5 (top-down) is set.
+    let top_down = descriptor & 0x20 != 0;
+    let rgba = if top_down {
+        px
+    } else {
+        let mut flipped = vec![0u8; npx * 4];
+        let stride = width * 4;
+        for row in 0..height {
+            let src = (height - 1 - row) * stride;
+            let dst = row * stride;
+            flipped[dst..dst + stride].copy_from_slice(&px[src..src + stride]);
+        }
+        flipped
+    };
+    Some(DecodedImage {
+        width: width as u32,
+        height: height as u32,
+        rgba,
+    })
+}
+
 /// Decode a `data:` URL (`data:[<mime>][;base64],<payload>`).
 pub fn decode_data_url(url: &str) -> Option<DecodedImage> {
     let rest = url.strip_prefix("data:")?;
@@ -319,6 +425,50 @@ mod tests {
         assert_eq!(&img.rgba[4..8], &[255, 255, 255, 255]); // (1,0) white
         assert_eq!(&img.rgba[8..12], &[255, 0, 0, 255]); // (0,1) red
         assert_eq!(&img.rgba[12..16], &[0, 255, 0, 255]); // (1,1) green
+    }
+
+    // Build an 18-byte TGA header for a true-color image.
+    fn tga_header(img_type: u8, w: u16, h: u16, depth: u8, descriptor: u8) -> Vec<u8> {
+        let mut b = vec![0u8; 18];
+        b[2] = img_type;
+        b[12..14].copy_from_slice(&w.to_le_bytes());
+        b[14..16].copy_from_slice(&h.to_le_bytes());
+        b[16] = depth;
+        b[17] = descriptor;
+        b
+    }
+
+    #[test]
+    fn decodes_uncompressed_tga_with_vertical_flip() {
+        // 2x2 uncompressed 24-bit TGA, bottom-up (descriptor 0). Stored bottom row
+        // first: row0 (image bottom) = red,green; row1 (image top) = blue,white.
+        let mut b = tga_header(2, 2, 2, 24, 0);
+        // BGR pixels.
+        b.extend_from_slice(&[0, 0, 255, 0, 255, 0]); // bottom: red, green
+        b.extend_from_slice(&[255, 0, 0, 255, 255, 255]); // top: blue, white
+        let img = decode(&b).expect("decode tga");
+        assert_eq!((img.width, img.height), (2, 2));
+        assert_eq!(&img.rgba[0..4], &[0, 0, 255, 255], "(0,0) blue");
+        assert_eq!(&img.rgba[4..8], &[255, 255, 255, 255], "(1,0) white");
+        assert_eq!(&img.rgba[8..12], &[255, 0, 0, 255], "(0,1) red");
+        assert_eq!(&img.rgba[12..16], &[0, 255, 0, 255], "(1,1) green");
+    }
+
+    #[test]
+    fn decodes_rle_tga_top_down_32bit() {
+        // 4x1 RLE 32-bit TGA, top-down (descriptor 0x20). One run packet of 3 blue
+        // pixels, then a raw packet of 1 red pixel.
+        let mut b = tga_header(10, 4, 1, 32, 0x20);
+        b.push(0x80 | 2); // run packet, count = 3
+        b.extend_from_slice(&[255, 0, 0, 255]); // BGRA blue
+        b.push(0x00); // raw packet, count = 1
+        b.extend_from_slice(&[0, 0, 255, 255]); // BGRA red
+        let img = decode(&b).expect("decode rle tga");
+        assert_eq!((img.width, img.height), (4, 1));
+        for i in 0..3 {
+            assert_eq!(&img.rgba[i * 4..i * 4 + 4], &[0, 0, 255, 255], "pixel {i} blue");
+        }
+        assert_eq!(&img.rgba[12..16], &[255, 0, 0, 255], "pixel 3 red");
     }
 
     #[test]
@@ -484,6 +634,21 @@ mod tests {
                 buf.extend((0..len).map(|_| byte()));
                 let _ = decode(&buf); // must not panic
             }
+        }
+        // Raw random bodies (no magic) exercise the signature-less TGA fallback,
+        // including plausible-looking TGA headers, which must still fail closed.
+        for _ in 0..400 {
+            let len = byte() as usize * 4;
+            let mut buf: Vec<u8> = (0..len).map(|_| byte()).collect();
+            // Occasionally force a true-color TGA image-type byte to hit the decoder.
+            let n = buf.len();
+            if n > 0 {
+                buf[2.min(n - 1)] = if byte() & 1 == 0 { 2 } else { 10 };
+                if n > 16 {
+                    buf[16] = if byte() & 1 == 0 { 24 } else { 32 };
+                }
+            }
+            let _ = decode(&buf); // must not panic
         }
     }
 
