@@ -176,6 +176,8 @@ pub struct ComputedStyle {
     pub justify_content: JustifyContent,
     /// `align-items` — cross-axis item placement (flex container).
     pub align_items: AlignItems,
+    /// `flex-grow` factor for a flex item (0 = does not grow).
+    pub flex_grow: f32,
     /// Uniform `border-radius` in pixels.
     pub border_radius: f32,
     /// Element `opacity` in `0.0..=1.0`.
@@ -241,6 +243,7 @@ impl ComputedStyle {
             flex_direction: FlexDirection::Row,
             justify_content: JustifyContent::FlexStart,
             align_items: AlignItems::Stretch,
+            flex_grow: 0.0,
             border_radius: 0.0,
             opacity: 1.0,
             white_space_pre: false,
@@ -884,6 +887,25 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             "flex-end" | "end" => AlignItems::FlexEnd,
             "center" => AlignItems::Center,
             _ => AlignItems::Stretch,
+        };
+    }
+    // `flex-grow`, or the grow component of the `flex` shorthand (its first
+    // numeric token). `flex: none` → 0; `flex: auto`/`flex: 1` → grow 1.
+    if let Some(v) = map.get("flex-grow") {
+        if let Ok(g) = v.trim().parse::<f32>() {
+            cs.flex_grow = g.max(0.0);
+        }
+    } else if let Some(v) = map.get("flex") {
+        let t = v.trim();
+        cs.flex_grow = match t {
+            "none" | "initial" => 0.0,
+            "auto" => 1.0,
+            _ => t
+                .split_whitespace()
+                .next()
+                .and_then(|first| first.parse::<f32>().ok())
+                .map(|g| g.max(0.0))
+                .unwrap_or(0.0),
         };
     }
     if let Some(px) = map

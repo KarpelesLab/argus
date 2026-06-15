@@ -806,6 +806,37 @@ impl Ctx<'_> {
         matches!(&self.doc.node(id).data, NodeData::Element(e) if e.name.is_html("li"))
     }
 
+    /// Approximate the max-content border-box width of an element: the widest line
+    /// its inline text would occupy if never wrapped (segments split on hard
+    /// `<br>` breaks), plus its own horizontal padding and border. Used to give a
+    /// shrink-to-content base size to flex items that have no explicit `width`.
+    /// Block descendants are treated as inline here (an over-estimate that is fine
+    /// for the typical flex item — a label or button).
+    fn intrinsic_border_width(&self, id: NodeId, style: &ComputedStyle) -> f32 {
+        let mut words: Vec<InlineWord> = Vec::new();
+        let mut pending_space = false;
+        for child in self.doc.children(id) {
+            self.gather_inline(child, style, None, &mut words, &mut pending_space);
+        }
+        let mut max_line = 0.0f32;
+        let mut cur = 0.0f32;
+        for w in &words {
+            if w.hard_break {
+                max_line = max_line.max(cur);
+                cur = 0.0;
+                continue;
+            }
+            let space = if w.space_before {
+                self.font.measure(" ", w.font_size)
+            } else {
+                0.0
+            };
+            cur += space + self.font.measure(&w.text, w.font_size);
+        }
+        max_line = max_line.max(cur);
+        max_line + style.padding.left + style.padding.right + style.border.left + style.border.right
+    }
+
     /// The text of a `<select>`'s selected `<option>` (the one with a `selected`
     /// attribute, else the first option).
     fn selected_option_text(&self, select: NodeId) -> String {
@@ -1009,38 +1040,74 @@ impl Ctx<'_> {
                     })
                 })
                 .collect();
-            let flex_count = fixed.iter().filter(|f| f.is_none()).count();
-            let fixed_sum: f32 = fixed.iter().filter_map(|f| *f).sum();
-            let flex_w = if flex_count > 0 {
-                ((content_w - total_gap - fixed_sum) / flex_count as f32).max(0.0)
+            // When any item declares `flex-grow`, use the proper grow model: each
+            // item starts at its base size (explicit-width footprint, else
+            // shrink-to-content) and positive free space is split in proportion to
+            // the grow factors. Otherwise keep the equal-share model with
+            // `justify-content` distributing any leftover among fixed-width items.
+            let any_grow = istyles.iter().any(|s| s.flex_grow > 0.0);
+            let (sizes, lead, between_extra): (Vec<f32>, f32, f32) = if any_grow {
+                let base: Vec<f32> = istyles
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        fixed[i].unwrap_or_else(|| {
+                            self.intrinsic_border_width(items[i], s)
+                                + s.margin.left
+                                + s.margin.right
+                        })
+                    })
+                    .collect();
+                let base_sum: f32 = base.iter().sum();
+                let free = (content_w - total_gap - base_sum).max(0.0);
+                let total_grow: f32 = istyles.iter().map(|s| s.flex_grow).sum();
+                let sizes: Vec<f32> = base
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &b)| {
+                        if total_grow > 0.0 {
+                            b + free * istyles[i].flex_grow / total_grow
+                        } else {
+                            b
+                        }
+                    })
+                    .collect();
+                (sizes, 0.0, 0.0)
             } else {
-                0.0
-            };
-            let sizes: Vec<f32> = fixed.iter().map(|f| f.unwrap_or(flex_w)).collect();
-            let used: f32 = sizes.iter().sum::<f32>() + total_gap;
-            let free = (content_w - used).max(0.0);
+                let flex_count = fixed.iter().filter(|f| f.is_none()).count();
+                let fixed_sum: f32 = fixed.iter().filter_map(|f| *f).sum();
+                let flex_w = if flex_count > 0 {
+                    ((content_w - total_gap - fixed_sum) / flex_count as f32).max(0.0)
+                } else {
+                    0.0
+                };
+                let sizes: Vec<f32> = fixed.iter().map(|f| f.unwrap_or(flex_w)).collect();
+                let used: f32 = sizes.iter().sum::<f32>() + total_gap;
+                let free = (content_w - used).max(0.0);
 
-            // Justify-content only has free space to distribute when no item is
-            // flexible (flexible items already absorb it).
-            let (lead, between_extra) = if flex_count > 0 {
-                (0.0, 0.0)
-            } else {
-                match style.justify_content {
-                    JustifyContent::FlexStart => (0.0, 0.0),
-                    JustifyContent::FlexEnd => (free, 0.0),
-                    JustifyContent::Center => (free / 2.0, 0.0),
-                    JustifyContent::SpaceBetween => {
-                        (0.0, if n > 1.0 { free / (n - 1.0) } else { 0.0 })
+                // Justify-content only has free space to distribute when no item is
+                // flexible (flexible items already absorb it).
+                let (lead, between_extra) = if flex_count > 0 {
+                    (0.0, 0.0)
+                } else {
+                    match style.justify_content {
+                        JustifyContent::FlexStart => (0.0, 0.0),
+                        JustifyContent::FlexEnd => (free, 0.0),
+                        JustifyContent::Center => (free / 2.0, 0.0),
+                        JustifyContent::SpaceBetween => {
+                            (0.0, if n > 1.0 { free / (n - 1.0) } else { 0.0 })
+                        }
+                        JustifyContent::SpaceAround => {
+                            let unit = free / n;
+                            (unit / 2.0, unit)
+                        }
+                        JustifyContent::SpaceEvenly => {
+                            let unit = free / (n + 1.0);
+                            (unit, unit)
+                        }
                     }
-                    JustifyContent::SpaceAround => {
-                        let unit = free / n;
-                        (unit / 2.0, unit)
-                    }
-                    JustifyContent::SpaceEvenly => {
-                        let unit = free / (n + 1.0);
-                        (unit, unit)
-                    }
-                }
+                };
+                (sizes, lead, between_extra)
             };
 
             let mut cx = content_left + lead;
@@ -2413,6 +2480,52 @@ mod tests {
         let end = first_baseline("flex-end");
         assert!(center > start + 80.0, "center pushes down: {start} -> {center}");
         assert!(end > center + 80.0, "flex-end further down: {center} -> {end}");
+    }
+
+    #[test]
+    fn flex_grow_distributes_free_space_by_weight() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Two short items in a 400px row; the second has flex-grow:2 so it should get
+        // a larger share of the free space and therefore start further left (it grows
+        // rightward) while the first stays narrow. We measure the gap between their
+        // start positions: with grow only on the second, the second item begins right
+        // after the first's (small) content width.
+        let html = "<div style=\"display:flex; width:400px\">\
+                      <div style=\"flex-grow:1\">aa</div>\
+                      <div style=\"flex-grow:2\">bb</div>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 800.0, &ImageSizes::new());
+        let a = l.runs.iter().find(|r| r.text == "aa").unwrap();
+        let b = l.runs.iter().find(|r| r.text == "bb").unwrap();
+        // First item gets 1/3 of free space, second gets 2/3. The second item's start
+        // (a.base + 1/3 free) is well past the first's start, and its left edge should
+        // be more than a third of the way across the 400px container.
+        assert!(b.x > a.x + 100.0, "grow:2 item pushed right of grow:1 item: a={} b={}", a.x, b.x);
+        assert!(b.x > 130.0, "second item starts past the first third, got {}", b.x);
+    }
+
+    #[test]
+    fn flex_grow_zero_keeps_items_at_content_width() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // With flex-grow on one item only, the non-growing item stays at its content
+        // width; the growing item absorbs all the free space. The first (grow:0,
+        // explicit-width) item keeps its 50px slot, so the grower starts at ~50px.
+        let html = "<div style=\"display:flex; width:400px\">\
+                      <div style=\"width:50px\">a</div>\
+                      <div style=\"flex-grow:1\">grow</div>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 800.0, &ImageSizes::new());
+        let grow = l.runs.iter().find(|r| r.text == "grow").unwrap();
+        // The grower starts just after the fixed 50px slot (plus page margin ~8).
+        assert!(grow.x > 50.0 && grow.x < 80.0, "grower starts after fixed slot, got {}", grow.x);
     }
 
     #[test]
