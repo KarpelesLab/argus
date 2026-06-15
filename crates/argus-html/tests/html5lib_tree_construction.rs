@@ -870,4 +870,18 @@ a</br>b
 |       <b>
 |         "1"
 |       "2"
+
+#data
+<a href="1">x<a href="2">y
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <a>
+|       href="1"
+|       "x"
+|     <a>
+|       href="2"
+|       "y"
 "####;

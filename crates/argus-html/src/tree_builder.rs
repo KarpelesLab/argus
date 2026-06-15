@@ -889,6 +889,14 @@ impl TreeBuilder {
                 }
             }
         }
+        // A new `<a>` runs the adoption agency on any still-open `<a>` (nested
+        // anchors are a parse error); `<nobr>` likewise on an open `<nobr>`.
+        if name == "a" && self.afe_last_named_after_marker("a").is_some() {
+            self.adoption_agency("a");
+        }
+        if name == "nobr" && self.has_in_scope("nobr", false) {
+            self.adoption_agency("nobr");
+        }
         // Re-open any active formatting elements a block boundary closed, so the new
         // element (and its content) nests inside them.
         self.reconstruct_active_formatting();
