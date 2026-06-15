@@ -1101,4 +1101,62 @@ caf&eacute; &amp; tea
 |       href="/x"
 |       <b>
 |         "link"
+
+#data
+<p>a<br>b</p>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <p>
+|       "a"
+|       <br>
+|       "b"
+
+#data
+<div id=main>x</div>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <div>
+|       id="main"
+|       "x"
+
+#data
+<select><option>a<option>b</select>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <select>
+|       <option>
+|         "a"
+|       <option>
+|         "b"
+
+#data
+<title>a<b>c</title>
+#errors
+#document
+| <html>
+|   <head>
+|     <title>
+|       "a<b>c"
+|   <body>
+
+#data
+<p>a<div>b</div>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <p>
+|       "a"
+|     <div>
+|       "b"
 "####;
