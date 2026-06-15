@@ -16,7 +16,7 @@
 //! - Reordering is per call (one line); callers apply it to text that is not
 //!   wrapped across multiple visual lines.
 
-use oxideav_scribe::bidi::{bidi_class, paragraph_level, resolve_neutral_types, resolve_weak_types, BidiClass};
+use oxideav_scribe::bidi::{bidi_class, resolve_neutral_types, resolve_weak_types, BidiClass};
 
 /// Reorder `text` from logical into visual order for left-to-right painting,
 /// returning `None` when the text contains no right-to-left character (so the
@@ -26,16 +26,32 @@ pub(crate) fn reorder_visual(text: &str) -> Option<String> {
     if chars.is_empty() {
         return None;
     }
+    // Arabic Presentation-Forms (the joined glyphs produced by `crate::arabic`)
+    // are strong right-to-left; classify them as AL even if the upstream table
+    // doesn't, so reshaped Arabic still reorders.
+    let eff_class = |c: char| match c as u32 {
+        0xFB50..=0xFDFF | 0xFE70..=0xFEFF => BidiClass::AL,
+        _ => bidi_class(c),
+    };
     // Fast path: nothing right-to-left → no reordering needed.
     let has_rtl = chars
         .iter()
-        .any(|&c| matches!(bidi_class(c), BidiClass::R | BidiClass::AL | BidiClass::AN));
+        .any(|&c| matches!(eff_class(c), BidiClass::R | BidiClass::AL | BidiClass::AN));
     if !has_rtl {
         return None;
     }
 
-    let base = paragraph_level(text); // 0 = LTR, 1 = RTL
-    let mut classes: Vec<BidiClass> = chars.iter().map(|&c| bidi_class(c)).collect();
+    // Paragraph embedding level from the first strong character (UAX #9 P2/P3):
+    // L → 0 (LTR), R/AL → 1 (RTL). Defaults to LTR.
+    let base = chars
+        .iter()
+        .find_map(|&c| match eff_class(c) {
+            BidiClass::L => Some(0),
+            BidiClass::R | BidiClass::AL => Some(1),
+            _ => None,
+        })
+        .unwrap_or(0);
+    let mut classes: Vec<BidiClass> = chars.iter().map(|&c| eff_class(c)).collect();
     let sos = if base % 2 == 0 { BidiClass::L } else { BidiClass::R };
     // No explicit embeddings, so the whole text is one level run: sos == eos.
     resolve_weak_types(&mut classes, sos, sos);
@@ -50,7 +66,7 @@ pub(crate) fn reorder_visual(text: &str) -> Option<String> {
     // L1: trailing whitespace (and segment separators) on the line reset to the
     // base level so it sits on the base-direction side.
     for i in (0..chars.len()).rev() {
-        match bidi_class(chars[i]) {
+        match eff_class(chars[i]) {
             BidiClass::WS | BidiClass::S | BidiClass::B | BidiClass::BN => levels[i] = base,
             _ => break,
         }

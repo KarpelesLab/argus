@@ -28,6 +28,7 @@ use argus_style::{
 use std::collections::HashMap;
 use std::rc::Rc;
 
+mod arabic;
 mod bidi;
 
 const PAGE_MARGIN: f32 = 8.0;
@@ -3490,11 +3491,14 @@ impl Ctx<'_> {
                 if t.starts_with(char::is_whitespace) {
                     *pending_space = true;
                 }
-                // Bidi: text containing right-to-left characters is reordered from
-                // logical into visual order so the LTR shaper paints it correctly.
-                // Pure-LTR text returns `None` and is used unchanged.
-                let reordered = bidi::reorder_visual(t);
-                let t: &str = reordered.as_deref().unwrap_or(t);
+                // Complex text: Arabic letters are first reshaped to their joined
+                // presentation forms (the shaper has no Arabic joining), then any
+                // right-to-left text is reordered logical→visual so the LTR shaper
+                // paints it correctly. Pure-LTR text skips both (used unchanged).
+                let reshaped = arabic::reshape(t);
+                let shaped: &str = reshaped.as_deref().unwrap_or(t);
+                let reordered = bidi::reorder_visual(shaped);
+                let t: &str = reordered.as_deref().unwrap_or(shaped);
                 let shift = match style.vertical_align {
                     VerticalAlign::Sub => style.font_size * 0.2,
                     VerticalAlign::Super => -style.font_size * 0.4,
@@ -4504,6 +4508,24 @@ mod tests {
         let l2 = layout(&doc2, &font, 400.0, &ImageSizes::new());
         let run2 = l2.runs.iter().find(|r| r.text.contains('a')).expect("run");
         assert_eq!(run2.text, "abc", "LTR text unchanged");
+    }
+
+    #[test]
+    fn arabic_is_reshaped_and_reordered() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Two BEH letters (U+0628 U+0628): reshaped to initial FE91 + final FE90,
+        // then bidi-reversed to visual order [final FE90, initial FE91].
+        let doc = parse("<p>\u{0628}\u{0628}</p>");
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let run = l.runs.iter().find(|r| !r.text.trim().is_empty()).expect("a run");
+        assert_eq!(
+            run.text.chars().map(|c| c as u32).collect::<Vec<_>>(),
+            vec![0xFE90, 0xFE91],
+            "joined presentation forms in visual order"
+        );
     }
 
     #[test]
