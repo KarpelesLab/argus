@@ -82,6 +82,8 @@ pub struct TextRun {
     pub color: Color,
     /// Bold text is faux-bolded by overprinting the glyphs at a small x-offset.
     pub bold: bool,
+    /// Italic text is faux-slanted by an x-shear of the glyph run.
+    pub italic: bool,
 }
 
 /// A filled rectangle in canvas pixels (e.g. an element background), optionally
@@ -306,6 +308,10 @@ fn push_run_nodes(font: &Font, run: &TextRun, out: &mut Vec<Node>) {
     let offsets: &[f32] = if run.bold { &[0.0, 0.6] } else { &[0.0] };
     for &dx in offsets {
         let mut group = build_run(font, &run.text, run.size_px, run.x + dx, run.baseline);
+        // Faux-italic: shear the run's baseline-local space so glyph tops lean right.
+        if run.italic {
+            group.transform = group.transform.compose(&Transform2D::skew_x(-0.21));
+        }
         for child in &mut group.children {
             recolor(child, &paint);
         }

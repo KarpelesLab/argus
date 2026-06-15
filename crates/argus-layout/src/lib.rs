@@ -178,6 +178,8 @@ struct InlineWord {
     overline: bool,
     /// Whether this word is bold (`font-weight: bold`).
     bold: bool,
+    /// Whether this word is italic (`font-style: italic`).
+    italic: bool,
     /// Color of the decoration lines (`text-decoration-color`, else the text color).
     decoration_color: argus_geometry::Color,
     /// The hyperlink target, if this word is inside an `<a href>`.
@@ -459,6 +461,7 @@ impl Ctx<'_> {
                         size_px: fs,
                         color: style.color,
                         bold: style.bold,
+                        italic: style.italic,
                     });
                 }
                 bullet => {
@@ -528,6 +531,7 @@ impl Ctx<'_> {
                         size_px: fs,
                         color,
                         bold: style.bold,
+                        italic: style.italic,
                     });
                     self.cursor_y += fs * style.line_height;
                 }
@@ -582,6 +586,7 @@ impl Ctx<'_> {
                         strike: false,
                         overline: false,
                         bold: false,
+                        italic: false,
                         decoration_color: argus_geometry::Color::TRANSPARENT,
                         href: None,
                         hard_break: false,
@@ -1097,6 +1102,7 @@ impl Ctx<'_> {
                         size_px: fs,
                         color,
                         bold: istyle.bold,
+                        italic: istyle.italic,
                     });
                     self.cursor_y += fs * istyle.line_height;
                 }
@@ -2125,6 +2131,7 @@ impl Ctx<'_> {
                 strike: style.strike && !style.hidden,
                 overline: style.overline && !style.hidden,
                 bold: style.bold,
+                italic: style.italic,
                 decoration_color: style.fade(style.decoration_color.unwrap_or(style.color)),
                 href: None,
                 hard_break: false,
@@ -2178,6 +2185,7 @@ impl Ctx<'_> {
                         strike: style.strike && !style.hidden,
                         overline: style.overline && !style.hidden,
                         bold: style.bold,
+                        italic: style.italic,
                         decoration_color: style.fade(style.decoration_color.unwrap_or(style.color)),
                         href: if style.hidden { None } else { link.clone() },
                         hard_break: false,
@@ -2207,6 +2215,7 @@ impl Ctx<'_> {
                         strike: false,
                         overline: false,
                         bold: false,
+                        italic: false,
                         decoration_color: argus_geometry::Color::TRANSPARENT,
                         href: link.clone(),
                         hard_break: true,
@@ -2294,6 +2303,7 @@ impl Ctx<'_> {
                     size_px: max_size,
                     color,
                     bold: taken.iter().any(|w| w.bold),
+                    italic: taken.iter().any(|w| w.italic),
                 });
                 self.cursor_y += max_size * block.line_height;
                 return;
@@ -2415,6 +2425,7 @@ impl Ctx<'_> {
                     size_px: w.font_size,
                     color: w.color,
                     bold: w.bold,
+                    italic: w.italic,
                 });
                 if w.underline {
                     let uy = wb + (w.font_size * 0.08).max(1.0);
@@ -2934,6 +2945,21 @@ mod tests {
         let plain = l.runs.iter().find(|r| r.text == "plain").unwrap();
         assert!(strong.bold, "<b> text is bold");
         assert!(!plain.bold, "plain text is not bold");
+    }
+
+    #[test]
+    fn italic_text_runs_are_flagged() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // <em> (UA italic) and font-style:italic flag the run; plain does not.
+        let html = "<p>plain <em>slanted</em> <span style=\"font-style:italic\">x</span></p>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        assert!(l.runs.iter().find(|r| r.text == "slanted").unwrap().italic, "<em> is italic");
+        assert!(l.runs.iter().find(|r| r.text == "x").unwrap().italic, "font-style:italic");
+        assert!(!l.runs.iter().find(|r| r.text == "plain").unwrap().italic, "plain not italic");
     }
 
     #[test]

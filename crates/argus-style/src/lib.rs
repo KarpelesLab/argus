@@ -174,6 +174,8 @@ pub struct ComputedStyle {
     pub display: Display,
     pub font_size: f32,
     pub bold: bool,
+    /// `font-style: italic`/`oblique` (faux-slanted at render time).
+    pub italic: bool,
     pub color: Color,
     pub background_color: Color,
     pub margin: Edges,
@@ -308,6 +310,7 @@ impl ComputedStyle {
             display: Display::Block,
             font_size: 16.0,
             bold: false,
+            italic: false,
             color: Color::BLACK,
             background_color: Color::TRANSPARENT,
             margin: Edges::default(),
@@ -406,6 +409,7 @@ h5 { font-size: 0.83em; font-weight: bold; margin: 1.67em 0 }
 h6 { font-size: 0.67em; font-weight: bold; margin: 2.33em 0 }
 p { margin: 1em 0 }
 b, strong { font-weight: bold }
+i, em, cite, var, dfn, address { font-style: italic }
 a { color: #0645ad; text-decoration: underline }
 u, ins { text-decoration: underline }
 s, del, strike { text-decoration: line-through }
@@ -552,6 +556,7 @@ pub fn computed_style(
         display: Display::Inline,
         font_size: parent.font_size,
         bold: parent.bold,
+        italic: parent.italic,
         color: parent.color,
         text_align: parent.text_align,           // text-align inherits
         white_space_pre: parent.white_space_pre, // white-space inherits
@@ -699,7 +704,11 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
                 }
             }
             cs.bold = toks[..idx].iter().any(|t| is_bold(t));
+            cs.italic = toks[..idx].iter().any(|t| *t == "italic" || *t == "oblique");
         }
+    }
+    if let Some(v) = map.get("font-style") {
+        cs.italic = matches!(v.trim(), "italic" | "oblique");
     }
     if let Some(v) = map.get("font-size") {
         if let Some(px) = resolve_font_size(v, parent.font_size) {
