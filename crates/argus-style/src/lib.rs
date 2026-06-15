@@ -485,6 +485,8 @@ ol { list-style-type: decimal }
 ul, ol { padding-left: 40px }
 blockquote { margin: 1em 40px }
 dd { margin-left: 40px }
+fieldset { display: block; border: 1px solid #a0a0a0; padding: 8px 10px; margin: 0 2px }
+legend { display: block; font-weight: bold; padding: 0 4px }
 hr { margin: 8px 0; border-top: 1px solid #c0c0c0 }
 td, th { padding: 4px }
 th { font-weight: bold; text-align: center }
@@ -2071,6 +2073,19 @@ mod tests {
         let cs = computed_style(&doc, dd, &ComputedStyle::initial(), &Stylesheet::default());
         assert_eq!(cs.display, Display::Block);
         assert_eq!(cs.margin.left, 40.0, "dd is indented by the UA default");
+    }
+
+    #[test]
+    fn ua_fieldset_has_border_and_block() {
+        let mut doc = Document::new();
+        let fs = one(&mut doc, "fieldset", vec![]);
+        let cs = computed_style(&doc, fs, &ComputedStyle::initial(), &Stylesheet::default());
+        assert_eq!(cs.display, Display::Block);
+        assert!(cs.border.top > 0.0, "fieldset has a default border");
+        let legend = one(&mut doc, "legend", vec![]);
+        let cl = computed_style(&doc, legend, &ComputedStyle::initial(), &Stylesheet::default());
+        assert_eq!(cl.display, Display::Block);
+        assert!(cl.bold, "legend is bold by default");
     }
 
     #[test]
