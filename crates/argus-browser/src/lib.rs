@@ -1302,6 +1302,12 @@ fn extract_links(doc: &argus_dom::Document, base: Option<&str>) -> String {
                     let text = t.split_whitespace().collect::<Vec<_>>().join(" ");
                     out.push_str(&format!("{text}\t{}\n", resolve_url(base, href)));
                 }
+            } else if e.name.is_html("area") {
+                // Image-map links carry their label in `alt` (no text content).
+                if let Some(href) = e.attr("href") {
+                    let text = e.attr("alt").unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ");
+                    out.push_str(&format!("{text}\t{}\n", resolve_url(base, href)));
+                }
             }
         }
         for c in doc.children(id) {
@@ -1847,7 +1853,8 @@ mod tests {
              <a href=\"contact.html\">Contact us</a>\
              <a href=\"https://other.example/x\">External</a>\
              <span>not a link</span>\
-             <a href=\"//cdn.example/lib.js\">proto-relative</a>",
+             <a href=\"//cdn.example/lib.js\">proto-relative</a>\
+             <map><area href=\"/region\" alt=\"Map region\"></map>",
         );
         let out = extract_links(&doc, Some("https://site.example/dir/page.html"));
         let lines: Vec<&str> = out.lines().collect();
@@ -1855,7 +1862,9 @@ mod tests {
         assert_eq!(lines[1], "Contact us\thttps://site.example/dir/contact.html");
         assert_eq!(lines[2], "External\thttps://other.example/x");
         assert_eq!(lines[3], "proto-relative\thttps://cdn.example/lib.js");
-        assert_eq!(lines.len(), 4, "only <a href> elements are listed");
+        // <area href> (image-map link) is listed with its alt as the text.
+        assert_eq!(lines[4], "Map region\thttps://site.example/region");
+        assert_eq!(lines.len(), 5, "<a href> and <area href> are listed");
     }
 
     #[test]
