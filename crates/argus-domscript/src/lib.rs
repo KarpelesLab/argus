@@ -259,6 +259,10 @@ fn run_scripts(
     events: &[Interaction],
     storage: &mut std::collections::HashMap<String, String>,
 ) -> Option<String> {
+    // A Content-Security-Policy meta can forbid inline scripts; honor it.
+    if csp_blocks_inline_scripts(doc) {
+        return Some("[CSP] blocked inline scripts\n".to_string());
+    }
     let scripts = collect_scripts(doc);
     if scripts.is_empty() {
         return None;
@@ -309,6 +313,57 @@ fn storage_json(storage: &std::collections::HashMap<String, String>) -> String {
         .map(|(k, v)| format!("{}:{}", json_string(k), json_string(v)))
         .collect();
     format!("{{{}}}", entries.join(","))
+}
+
+/// Whether a `<meta http-equiv="Content-Security-Policy">` forbids inline scripts.
+/// Inline scripts are blocked when the effective directive (`script-src`, else
+/// `default-src`) is present and lacks `'unsafe-inline'` (and isn't `*`).
+fn csp_blocks_inline_scripts(doc: &Document) -> bool {
+    let Some(policy) = find_csp(doc) else {
+        return false;
+    };
+    let directive =
+        csp_directive(&policy, "script-src").or_else(|| csp_directive(&policy, "default-src"));
+    match directive {
+        None => false, // no script-src/default-src → scripts aren't restricted
+        Some(tokens) => {
+            let allows = tokens
+                .split_whitespace()
+                .any(|t| t == "'unsafe-inline'" || t == "*");
+            !allows
+        }
+    }
+}
+
+/// The CSP policy string from a `<meta http-equiv>` tag, if present.
+fn find_csp(doc: &Document) -> Option<String> {
+    fn walk(doc: &Document, id: NodeId) -> Option<String> {
+        if let NodeData::Element(e) = &doc.node(id).data {
+            if e.name.is_html("meta")
+                && e.attr("http-equiv")
+                    .is_some_and(|v| v.eq_ignore_ascii_case("content-security-policy"))
+            {
+                return e.attr("content").map(|s| s.to_ascii_lowercase());
+            }
+        }
+        for c in doc.children(id) {
+            if let Some(p) = walk(doc, c) {
+                return Some(p);
+            }
+        }
+        None
+    }
+    walk(doc, doc.root())
+}
+
+/// Extract a named directive's value (the tokens after the name) from a policy.
+fn csp_directive<'a>(policy: &'a str, name: &str) -> Option<&'a str> {
+    policy.split(';').find_map(|d| {
+        let d = d.trim();
+        d.strip_prefix(name)
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+            .map(|rest| rest.trim())
+    })
 }
 
 /// Collect inline (`src`-less) `<script>` text in document order.
@@ -1252,6 +1307,35 @@ mod tests {
         apply_scripts(&mut doc);
         assert!(attr_of(&doc, "d", "open").is_some(), "details opened");
         assert!(attr_of(&doc, "b", "disabled").is_none(), "button enabled");
+    }
+
+    #[test]
+    fn csp_meta_blocks_inline_scripts() {
+        // A restrictive CSP stops the inline script from mutating the DOM.
+        let blocked = "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'self'\">\
+             <div id=\"o\">before</div>\
+             <script>document.getElementById('o').textContent = 'after';</script>";
+        let mut doc = argus_html::parse(blocked);
+        apply_scripts(&mut doc);
+        assert_eq!(text_of(&doc, "o"), "before", "CSP should block the script");
+
+        // 'unsafe-inline' permits it; no CSP permits it.
+        for policy in [
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'unsafe-inline'\">",
+            "",
+        ] {
+            let html = format!(
+                "{policy}<div id=\"o\">before</div>\
+                 <script>document.getElementById('o').textContent = 'after';</script>"
+            );
+            let mut doc = argus_html::parse(&html);
+            apply_scripts(&mut doc);
+            assert_eq!(
+                text_of(&doc, "o"),
+                "after",
+                "script should run for: {policy:?}"
+            );
+        }
     }
 
     #[test]
