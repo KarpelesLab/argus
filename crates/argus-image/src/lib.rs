@@ -1420,7 +1420,7 @@ mod tests {
         assert_eq!((img.width, img.height), (4, 2));
         assert_eq!(img.rgba[0], 10, "(0,0)");
         assert_eq!(img.rgba[2 * 4], 30, "(2,0) from tile 1");
-        assert_eq!(img.rgba[(4 + 0) * 4], 50, "(0,1)");
+        assert_eq!(img.rgba[4 * 4], 50, "(0,1)");
         assert_eq!(img.rgba[(4 + 3) * 4], 80, "(3,1) from tile 1");
     }
 
