@@ -1676,7 +1676,13 @@ impl Ctx<'_> {
         let attr_h = istyle
             .height
             .map(|l| l.to_px(istyle.font_size, avail))
-            .or_else(|| e.attr("height").and_then(|v| v.parse::<f32>().ok()));
+            .or_else(|| e.attr("height").and_then(|v| v.parse::<f32>().ok()))
+            // CSS `aspect-ratio` derives the height from the width (overriding the
+            // intrinsic ratio) when no explicit height is given.
+            .or_else(|| match (attr_w, istyle.aspect_ratio) {
+                (Some(w), Some(ar)) if ar > 0.0 => Some(w / ar),
+                _ => None,
+            });
         let cap = image_width_cap(istyle, avail);
         let (w, h) = image_dims(attr_w, attr_h, iw, ih, cap);
         if w > 0.0 && h > 0.0 {
@@ -1700,7 +1706,11 @@ impl Ctx<'_> {
         let attr_h = istyle
             .height
             .map(|l| l.to_px(istyle.font_size, avail))
-            .or_else(|| e.attr("height").and_then(|v| v.parse::<f32>().ok()));
+            .or_else(|| e.attr("height").and_then(|v| v.parse::<f32>().ok()))
+            .or_else(|| match (attr_w, istyle.aspect_ratio) {
+                (Some(w), Some(ar)) if ar > 0.0 => Some(w / ar),
+                _ => None,
+            });
         let cap = image_width_cap(istyle, avail);
         let (mut w, mut h) = image_dims(attr_w, attr_h, iw, ih, cap);
         if w <= 0.0 || h <= 0.0 {
@@ -5325,6 +5335,23 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         let img = &l.images[0];
         assert!((img.w - 200.0).abs() < 1.0, "CSS width wins: {}", img.w);
         assert!((img.h - 100.0).abs() < 1.0, "height keeps aspect: {}", img.h);
+    }
+
+    #[test]
+    fn css_aspect_ratio_sizes_image_height() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Intrinsic 100x100, but CSS aspect-ratio 2/1 + width 200 → height 100.
+        let mut sizes = ImageSizes::new();
+        sizes.insert("a.png".to_string(), (100, 100));
+        let html = "<img src=\"a.png\" style=\"width:200px; aspect-ratio:2/1\">";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 600.0, &sizes);
+        let img = &l.images[0];
+        assert!((img.w - 200.0).abs() < 1.0, "width: {}", img.w);
+        assert!((img.h - 100.0).abs() < 1.0, "height from aspect-ratio (not intrinsic): {}", img.h);
     }
 
     #[test]
