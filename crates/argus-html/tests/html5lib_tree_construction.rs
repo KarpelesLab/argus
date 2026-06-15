@@ -1042,4 +1042,63 @@ a</br>b
 |       <b>
 |         "2"
 |       "3"
+
+#data
+<p>a<!--c-->b</p>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <p>
+|       "a"
+|       <!-- c -->
+|       "b"
+
+#data
+<ul><li>1<li>2</ul>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <ul>
+|       <li>
+|         "1"
+|       <li>
+|         "2"
+
+#data
+caf&eacute; &amp; tea
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     "café & tea"
+
+#data
+<table><tr><td>x</table>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <table>
+|       <tbody>
+|         <tr>
+|           <td>
+|             "x"
+
+#data
+<a href="/x"><b>link</b></a>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <a>
+|       href="/x"
+|       <b>
+|         "link"
 "####;
