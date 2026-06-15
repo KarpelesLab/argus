@@ -24,7 +24,8 @@
 //! collections resolved in JS against a seeded document-order element tree, simple
 //! selectors) / `createElement` / `body` / `write`, and on elements
 //! `textContent`/`innerText`,
-//! `innerHTML`, `className`, `setAttribute`/`getAttribute`, `style.<camelCase>`,
+//! `innerHTML`, `className`, `setAttribute`/`getAttribute`/`toggleAttribute`,
+//! `style.<camelCase>`,
 //! `classList`, scoped `querySelector`/`querySelectorAll`, `matches`/`closest`,
 //! tree traversal (`parentNode`/`parentElement`, `children`, `childElementCount`,
 //! `first`/`lastElementChild`, `next`/`previousElementSibling`), `tagName`/
@@ -228,6 +229,23 @@ function __argus_el(tgt) {
       }
       if (k === "hasAttribute") {
         return function(name) { return __read(tgt, seed, "" + name) != null; };
+      }
+      if (k === "toggleAttribute") {
+        return function(name, force) {
+          name = "" + name;
+          var present = __read(tgt, seed, name) != null;
+          var add = (arguments.length > 1) ? !!force : !present;
+          var sk = __sk(tgt);
+          __argus_state[sk] = __argus_state[sk] || {};
+          if (add) {
+            __argus_state[sk][name] = "";
+            __argus_ops.push({op: "attr", tgt: tgt, key: name, value: ""});
+          } else {
+            __argus_state[sk][name] = null;
+            __argus_ops.push({op: "removeattr", tgt: tgt, key: name});
+          }
+          return add;
+        };
       }
       if (k === "appendChild" || k === "append") {
         return function(child) {
@@ -1804,6 +1822,24 @@ mod tests {
         apply_scripts(&mut doc);
         assert!(attr_of(&doc, "d", "open").is_some(), "details opened");
         assert!(attr_of(&doc, "b", "disabled").is_none(), "button enabled");
+    }
+
+    #[test]
+    fn toggle_attribute_works() {
+        let mut doc = argus_html::parse(
+            "<details id=\"d\"></details>\
+             <button id=\"b\" disabled>x</button>\
+             <input id=\"i\" hidden>\
+             <script>\
+               document.getElementById('d').toggleAttribute('open');        /* add */\
+               document.getElementById('b').toggleAttribute('disabled');    /* remove */\
+               document.getElementById('i').toggleAttribute('hidden', true);/* force keep */\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        assert!(attr_of(&doc, "d", "open").is_some(), "open toggled on");
+        assert!(attr_of(&doc, "b", "disabled").is_none(), "disabled toggled off");
+        assert!(attr_of(&doc, "i", "hidden").is_some(), "hidden force-kept");
     }
 
     #[test]
