@@ -1045,18 +1045,21 @@ impl Ctx<'_> {
             }
         }
 
-        // `outline`: four rects just outside the border box (no layout effect).
+        // `outline`: four rects `outline-offset` outside the border box (no layout
+        // effect).
         if style.outline_width > 0.0 && style.outline_color.a > 0 && !style.hidden {
             let ow = style.outline_width;
-            let (ol, ot) = (border_box_left - ow, border_box_top - ow);
-            let (ow_full, oh_full) = (border_box_w + 2.0 * ow, border_box_h + 2.0 * ow);
+            let g = style.outline_offset;
+            let (ol, ot) = (border_box_left - g - ow, border_box_top - g - ow);
+            let ow_full = border_box_w + 2.0 * (g + ow);
+            let oh_full = border_box_h + 2.0 * (g + ow);
             let oc = style.outline_color;
             self.rects.push(rect(ol, ot, ow_full, ow, oc)); // top
             self.rects
-                .push(rect(ol, border_box_top + border_box_h, ow_full, ow, oc)); // bottom
+                .push(rect(ol, border_box_top + border_box_h + g, ow_full, ow, oc)); // bottom
             self.rects.push(rect(ol, ot, ow, oh_full, oc)); // left
             self.rects
-                .push(rect(border_box_left + border_box_w, ot, ow, oh_full, oc));
+                .push(rect(border_box_left + border_box_w + g, ot, ow, oh_full, oc));
             // right
         }
 
@@ -3885,6 +3888,28 @@ mod tests {
             red.iter().any(|r| r.x < PAGE_MARGIN),
             "outline extends left of border box"
         );
+    }
+
+    #[test]
+    fn outline_offset_pushes_outline_outward() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let leftmost = |css: &str| -> f32 {
+            let html = format!("<div style=\"width:50px; outline: 3px solid #ff0000; {css}\">x</div>");
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 200.0, &ImageSizes::new());
+            l.rects
+                .iter()
+                .filter(|r| r.color.r == 255 && r.color.g == 0 && r.color.b == 0)
+                .map(|r| r.x)
+                .fold(f32::MAX, f32::min)
+        };
+        // With a 6px offset the outline's left edge is ~6px further left.
+        let no_offset = leftmost("");
+        let offset = leftmost("outline-offset: 6px");
+        assert!((no_offset - offset - 6.0).abs() < 1.0, "offset shifts ~6px: {no_offset} -> {offset}");
     }
 
     #[test]

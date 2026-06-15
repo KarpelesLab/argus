@@ -330,6 +330,8 @@ pub struct ComputedStyle {
     /// `outline` — drawn just outside the border box; does not affect layout.
     pub outline_width: f32,
     pub outline_color: Color,
+    /// `outline-offset` — gap between the border box and the outline (px).
+    pub outline_offset: f32,
     /// `position` and its inset offsets (resolved during layout; not inherited).
     pub position: Position,
     pub inset_top: Option<Length>,
@@ -410,6 +412,7 @@ impl ComputedStyle {
             row_gap: 0.0,
             hidden: false,
             outline_width: 0.0,
+            outline_offset: 0.0,
             outline_color: Color::TRANSPARENT,
             position: Position::Static,
             inset_top: None,
@@ -1162,6 +1165,9 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     }
     if let Some(v) = map.get("outline-width").and_then(|v| len_px(v, fs)) {
         cs.outline_width = v;
+    }
+    if let Some(v) = map.get("outline-offset").and_then(|v| len_px(v, fs)) {
+        cs.outline_offset = v.max(0.0);
     }
     if let Some(v) = map
         .get("outline-color")
