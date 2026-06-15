@@ -113,8 +113,10 @@ pub struct Compound {
     /// `::before` / `::after` — the rule targets a generated-content box, not the
     /// element itself.
     pub pseudo_element: Option<PseudoElement>,
-    /// `:not(...)` arguments — the compound matches only if none of these do.
-    pub negations: Vec<Compound>,
+    /// `:not(...)` groups — one per `:not()`, each a selector list. The compound
+    /// matches only if it matches no alternative; each `:not()` contributes the
+    /// specificity of its *most specific* argument (CSS4).
+    pub negations: Vec<Vec<Compound>>,
     /// `:is(...)` groups — each group is a list of alternatives; the group matches
     /// if any alternative matches. Contributes the most specific argument's weight.
     pub is_groups: Vec<Vec<Compound>>,
@@ -153,8 +155,10 @@ impl Selector {
                 s.2 += 1;
             }
             // `:not()` contributes the specificity of its argument.
-            for n in &c.negations {
-                s = s.add(compound_specificity(n));
+            for group in &c.negations {
+                if let Some(max) = group.iter().map(compound_specificity).max() {
+                    s = s.add(max);
+                }
             }
             // `:is()` contributes the specificity of its most specific argument.
             for group in &c.is_groups {
@@ -184,8 +188,10 @@ fn compound_specificity(c: &Compound) -> Specificity {
     if c.tag.is_some() {
         s.2 += 1;
     }
-    for n in &c.negations {
-        s = s.add(compound_specificity(n));
+    for group in &c.negations {
+        if let Some(max) = group.iter().map(compound_specificity).max() {
+            s = s.add(max);
+        }
     }
     for group in &c.is_groups {
         if let Some(max) = group.iter().map(compound_specificity).max() {
@@ -398,12 +404,16 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                         } else if is_not {
                             // `:not(<list>)` — a comma-separated selector list (CSS4);
                             // the compound fails if it matches any alternative.
-                            for alt in args.split(|t| *t == Token::Comma) {
-                                let mut j = 0;
-                                skip_ws(alt, &mut j);
-                                if let Some(inner) = parse_compound(alt, &mut j) {
-                                    c.negations.push(inner);
-                                }
+                            let group: Vec<Compound> = args
+                                .split(|t| *t == Token::Comma)
+                                .filter_map(|alt| {
+                                    let mut j = 0;
+                                    skip_ws(alt, &mut j);
+                                    parse_compound(alt, &mut j)
+                                })
+                                .collect();
+                            if !group.is_empty() {
+                                c.negations.push(group);
                             }
                         } else if is_is || is_where {
                             // `:is(...)` / `:where(...)` — a comma-separated list of
@@ -620,8 +630,8 @@ fn matches_compound(doc: &Document, node: NodeId, compound: &Compound) -> bool {
         }
     }
     // `:not(...)` — the compound fails if any negated selector matches.
-    for n in &compound.negations {
-        if matches_compound(doc, node, n) {
+    for group in &compound.negations {
+        if group.iter().any(|n| matches_compound(doc, node, n)) {
             return false;
         }
     }
@@ -830,6 +840,11 @@ mod tests {
         assert!(sel("#x").specificity() > sel(".c").specificity());
         assert!(sel(".c").specificity() > sel("div").specificity());
         assert_eq!(sel("div.c.d#x").specificity(), Specificity(1, 2, 1));
+        // `:not(<list>)` takes the most specific argument (max), not the sum:
+        // :not(.a, #b) contributes (1,0,0) — the #b — not (1,1,0).
+        assert_eq!(sel(":not(.a, #b)").specificity(), Specificity(1, 0, 0));
+        // Two separate :not()s each contribute their arg.
+        assert_eq!(sel(":not(.a):not(.b)").specificity(), Specificity(0, 2, 0));
     }
 
     #[test]
