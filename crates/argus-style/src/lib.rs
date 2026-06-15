@@ -134,6 +134,8 @@ pub struct ComputedStyle {
     pub max_width: Option<Length>,
     /// Specified content `height` (`None` = auto, sized to content).
     pub height: Option<Length>,
+    /// `min-height` — a block grows to at least this (resolved during layout).
+    pub min_height: Option<Length>,
     pub text_align: TextAlign,
     /// `text-decoration: underline`.
     pub underline: bool,
@@ -199,6 +201,7 @@ impl ComputedStyle {
             min_width: None,
             max_width: None,
             height: None,
+            min_height: None,
             text_align: TextAlign::Left,
             underline: false,
             strike: false,
@@ -700,6 +703,13 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     }
     if let Some(v) = map.get("height") {
         cs.height = if v == "auto" { None } else { parse_length(v) };
+    }
+    if let Some(v) = map.get("min-height") {
+        cs.min_height = if v == "auto" || v == "0" {
+            None
+        } else {
+            parse_length(v)
+        };
     }
     if let Some(v) = map.get("grid-template-columns") {
         cs.grid_columns = grid_track_count(v);

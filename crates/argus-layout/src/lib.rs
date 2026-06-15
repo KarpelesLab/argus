@@ -595,11 +595,12 @@ impl Ctx<'_> {
             self.flush_words(&mut words, &style, content_left, content_w);
         } // end !white_space_pre
 
-        // Honor a specified `height`: extend the content box down to it (we don't
-        // clip overflow, so taller content still grows the box).
-        if let Some(h) = style.height {
-            let content_top = border_box_top + style.border.top + style.padding.top;
-            let target = content_top + h.to_px(style.font_size, content_w);
+        // Honor a specified `height` / `min-height`: extend the content box down to
+        // it (we don't clip overflow, so taller content still grows the box). Both
+        // only extend, so the larger target wins.
+        let content_top = border_box_top + style.border.top + style.padding.top;
+        for len in [style.height, style.min_height].into_iter().flatten() {
+            let target = content_top + len.to_px(style.font_size, content_w);
             if self.cursor_y < target {
                 self.cursor_y = target;
             }
@@ -2061,6 +2062,25 @@ mod tests {
         assert!(
             two.x > one.x + 100.0,
             "second item should be in the next column"
+        );
+    }
+
+    #[test]
+    fn min_height_extends_a_short_block() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A one-line block with min-height:200px occupies at least 200px of height,
+        // so a following block starts below it.
+        let html = "<div style=\"min-height:200px\">a</div><div id=\"next\">b</div>";
+        let doc = parse(html);
+        let lay = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let b = lay.runs.iter().find(|r| r.text == "b").unwrap();
+        assert!(
+            b.baseline > 200.0,
+            "second block should start below the 200px min-height, got {}",
+            b.baseline
         );
     }
 
