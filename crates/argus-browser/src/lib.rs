@@ -1159,6 +1159,126 @@ pub fn dump_jsonld(url: Option<&str>) -> io::Result<String> {
     Ok(extract_jsonld(&doc))
 }
 
+/// Headless automation: fetch a page and return its HTML **microdata**
+/// (`itemscope`/`itemtype`/`itemprop`) as a JSON array of `{type, props}` items,
+/// for structured-data scraping. Used by `--dump-microdata`.
+pub fn dump_microdata(url: Option<&str>) -> io::Result<String> {
+    log::set_role(Role::Browser);
+    let mut net = spawn_child(Role::NetService)?;
+    proto::parent_handshake(net.channel(), Size::new(800, 600))?;
+    let html = resolve_html(&net, url);
+    proto::send(net.channel(), Msg::Shutdown, &[])?;
+    net.wait()?;
+    let mut doc = argus_html::parse(&html);
+    argus_domscript::apply_scripts_with_url(&mut doc, url);
+    let base = effective_base(&doc, url);
+    Ok(extract_microdata(&doc, base.as_deref()))
+}
+
+/// Collect top-level microdata items (`itemscope` elements not nested inside
+/// another item) as a JSON array of `{"type": …, "props": {name: value}}`. A
+/// property's value is its `content`/`href`/`src`/`datetime` attribute where it
+/// has one, else its text. Nested item values are the nested item's type URL.
+/// Pure (no I/O), unit-testable.
+fn extract_microdata(doc: &argus_dom::Document, base: Option<&str>) -> String {
+    use argus_dom::{Document, NodeData, NodeId};
+
+    fn text_of(doc: &Document, id: NodeId, out: &mut String) {
+        match &doc.node(id).data {
+            NodeData::Text(t) => out.push_str(t),
+            _ => {
+                for c in doc.children(id) {
+                    text_of(doc, c, out);
+                }
+            }
+        }
+    }
+    // The value of an `itemprop` element.
+    fn prop_value(doc: &Document, id: NodeId, base: Option<&str>) -> String {
+        let Some(e) = doc.node(id).as_element() else {
+            return String::new();
+        };
+        let tag = &*e.name.local;
+        if let Some(t) = e.attr("itemtype") {
+            // A nested item: use its type URL as the value.
+            return t.trim().to_string();
+        }
+        // URL-valued elements resolve against the base; others use their value attr.
+        match tag {
+            "a" | "area" | "link" => return e.attr("href").map(|h| resolve_url(base, h)).unwrap_or_default(),
+            "img" | "audio" | "video" | "source" | "iframe" | "embed" | "track" => {
+                return e.attr("src").map(|h| resolve_url(base, h)).unwrap_or_default()
+            }
+            "object" => return e.attr("data").map(|h| resolve_url(base, h)).unwrap_or_default(),
+            "meta" => return e.attr("content").unwrap_or("").to_string(),
+            "time" => {
+                if let Some(dt) = e.attr("datetime") {
+                    return dt.to_string();
+                }
+            }
+            _ => {}
+        }
+        let mut s = String::new();
+        text_of(doc, id, &mut s);
+        s.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    // Collect each item's direct `itemprop` descendants (not crossing into a
+    // nested `itemscope`).
+    fn item_props(doc: &Document, item: NodeId, base: Option<&str>, out: &mut Vec<(String, String)>) {
+        for c in doc.children(item) {
+            let Some(e) = doc.node(c).as_element() else {
+                continue;
+            };
+            if let Some(name) = e.attr("itemprop") {
+                out.push((name.trim().to_string(), prop_value(doc, c, base)));
+            }
+            // Recurse unless this child starts a new (nested) item.
+            if e.attr("itemscope").is_none() {
+                item_props(doc, c, base, out);
+            }
+        }
+    }
+
+    // Find top-level itemscope elements (no itemscope ancestor).
+    fn find_items(doc: &Document, id: NodeId, in_item: bool, out: &mut Vec<NodeId>) {
+        let is_scope = doc
+            .node(id)
+            .as_element()
+            .is_some_and(|e| e.attr("itemscope").is_some());
+        if is_scope && !in_item {
+            out.push(id);
+        }
+        for c in doc.children(id) {
+            find_items(doc, c, in_item || is_scope, out);
+        }
+    }
+
+    let mut items = Vec::new();
+    find_items(doc, doc.root(), false, &mut items);
+    let mut json = Vec::new();
+    for item in items {
+        let ty = doc
+            .node(item)
+            .as_element()
+            .and_then(|e| e.attr("itemtype"))
+            .unwrap_or("")
+            .trim();
+        let mut props = Vec::new();
+        item_props(doc, item, base, &mut props);
+        let props_json: Vec<String> = props
+            .iter()
+            .map(|(k, v)| format!("\"{}\":\"{}\"", json_escape(k), json_escape(v)))
+            .collect();
+        json.push(format!(
+            "{{\"type\":\"{}\",\"props\":{{{}}}}}",
+            json_escape(ty),
+            props_json.join(",")
+        ));
+    }
+    format!("[{}]\n", json.join(","))
+}
+
 /// Collect the bodies of every `<script type="application/ld+json">` element
 /// (type matched case-insensitively, ignoring any `; charset=…` suffix) into a
 /// JSON array of their verbatim, whitespace-trimmed contents. Blank blocks are
@@ -1894,8 +2014,8 @@ fn verify_uniform(fb: &Framebuffer) -> io::Result<Color> {
 mod tests {
     use super::{
         decode_html, dom_node_json, effective_base, extract_forms, extract_images, extract_json,
-        extract_jsonld, extract_links, extract_meta, extract_tables, page_title, render_text,
-        resolve_url, srcset_best, History,
+        extract_jsonld, extract_links, extract_meta, extract_microdata, extract_tables,
+        page_title, render_text, resolve_url, srcset_best, History,
     };
 
     #[test]
@@ -2166,6 +2286,29 @@ mod tests {
             "[{\"@type\":\"Article\",\"name\":\"A\"},{\"@type\":\"Person\"}]\n",
             "{out}"
         );
+    }
+
+    #[test]
+    fn extract_microdata_collects_items() {
+        let doc = argus_html::parse(
+            "<div itemscope itemtype=\"https://schema.org/Person\">\
+               <span itemprop=\"name\">Ada Lovelace</span>\
+               <a itemprop=\"url\" href=\"/ada\">link</a>\
+               <meta itemprop=\"birthYear\" content=\"1815\">\
+             </div>\
+             <p>not an item</p>",
+        );
+        let out = extract_microdata(&doc, Some("https://site.example/"));
+        assert!(out.contains("\"type\":\"https://schema.org/Person\""), "{out}");
+        assert!(out.contains("\"name\":\"Ada Lovelace\""), "{out}");
+        assert!(out.contains("\"url\":\"https://site.example/ada\""), "resolved href: {out}");
+        assert!(out.contains("\"birthYear\":\"1815\""), "meta content: {out}");
+    }
+
+    #[test]
+    fn extract_microdata_empty_when_none() {
+        let doc = argus_html::parse("<p>plain page</p>");
+        assert_eq!(extract_microdata(&doc, None), "[]\n");
     }
 
     #[test]

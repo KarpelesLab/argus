@@ -128,6 +128,17 @@ fn main() {
             }
             return;
         }
+        // `--dump-microdata`: print the page's HTML microdata items as JSON.
+        if has_flag("--dump-microdata") {
+            match argus_browser::dump_microdata(url.as_deref()) {
+                Ok(j) => print!("{j}"),
+                Err(err) => {
+                    eprintln!("[browser] dump-microdata failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         // `--dump-json`: print a structured JSON summary (title/headings/links).
         if has_flag("--dump-json") {
             match argus_browser::dump_json(url.as_deref()) {
