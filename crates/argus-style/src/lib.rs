@@ -484,6 +484,7 @@ ul { list-style-type: disc }
 ol { list-style-type: decimal }
 ul, ol { padding-left: 40px }
 blockquote { margin: 1em 40px }
+dd { margin-left: 40px }
 hr { margin: 8px 0; border-top: 1px solid #c0c0c0 }
 td, th { padding: 4px }
 th { font-weight: bold; text-align: center }
@@ -2061,6 +2062,15 @@ mod tests {
         assert!(cs.bold);
         assert_eq!(cs.font_size, 32.0);
         assert!(cs.margin.top > 0.0);
+    }
+
+    #[test]
+    fn ua_dd_is_indented() {
+        let mut doc = Document::new();
+        let dd = one(&mut doc, "dd", vec![]);
+        let cs = computed_style(&doc, dd, &ComputedStyle::initial(), &Stylesheet::default());
+        assert_eq!(cs.display, Display::Block);
+        assert_eq!(cs.margin.left, 40.0, "dd is indented by the UA default");
     }
 
     #[test]
