@@ -655,6 +655,10 @@ fn presentational_hints(doc: &Document, node: NodeId) -> Vec<(String, String)> {
             out.push(("border-spacing".into(), format!("{n}px")));
         }
     }
+    // The legacy `<td nowrap>` boolean attribute prevents the cell from wrapping.
+    if matches!(tag, "td" | "th") && e.attr("nowrap").is_some() {
+        out.push(("white-space".into(), "nowrap".into()));
+    }
     // A cell's `valign` (or its row's, since vertical-align doesn't inherit) maps
     // to `vertical-align`; cells honor top/middle/bottom.
     if matches!(tag, "td" | "th") {
@@ -2224,6 +2228,11 @@ mod tests {
         let ol = one(&mut doc, "ol", vec![Attribute::new("type", "A")]);
         let cs4 = computed_style(&doc, ol, &ComputedStyle::initial(), &Stylesheet::default());
         assert_eq!(cs4.list_style, ListStyle::UpperAlpha);
+
+        // <td nowrap> suppresses wrapping in the cell.
+        let td = one(&mut doc, "td", vec![Attribute::new("nowrap", "")]);
+        let cs5 = computed_style(&doc, td, &ComputedStyle::initial(), &Stylesheet::default());
+        assert!(cs5.nowrap, "td nowrap → white-space: nowrap");
     }
 
     #[test]
