@@ -122,6 +122,22 @@ fn doctype() {
 }
 
 #[test]
+fn comment_edge_cases() {
+    // Abrupt close `<!-->` and `<!--->` produce empty / single-char comments.
+    check("<!-->", vec![comment("")]);
+    check("<!--->", vec![comment("")]);
+    // A comment with dashes inside.
+    check("<!-- a -- b -->", vec![comment(" a -- b ")]);
+}
+
+#[test]
+fn bogus_comment_forms() {
+    // `<!bogus>`, `<?xml?>`, and `</%>` are parsed as bogus comments (not tags).
+    check("<!bogus>", vec![comment("bogus")]);
+    check("<?php echo 1?>", vec![comment("?php echo 1?")]);
+}
+
+#[test]
 fn rawtext_script_does_not_decode_entities() {
     // Script content is RAWTEXT: `&amp;` and `<b>` stay literal.
     check(

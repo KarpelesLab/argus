@@ -160,7 +160,8 @@ impl Tokenizer {
                     }
                     Some('?') => {
                         self.flush(&mut text);
-                        self.pos += 2;
+                        // Consume only `<`; the `?` is reconsumed as bogus-comment data.
+                        self.pos += 1;
                         self.bogus_comment();
                     }
                     _ => {
@@ -337,6 +338,18 @@ impl Tokenizer {
 
     /// Positioned just after `<!--`.
     fn comment(&mut self) {
+        // Comment-start / comment-start-dash states: `<!-->` and `<!--->` abruptly
+        // close with an empty comment.
+        if self.matches(">", false) {
+            self.pos += 1;
+            self.emit(Token::Comment(String::new()));
+            return;
+        }
+        if self.matches("->", false) {
+            self.pos += 2;
+            self.emit(Token::Comment(String::new()));
+            return;
+        }
         let mut s = String::new();
         loop {
             if self.matches("-->", false) {
