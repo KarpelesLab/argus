@@ -978,4 +978,28 @@ a</br>b
 |         "a"
 |       <option>
 |         "b"
+
+#data
+<svg><circle></svg>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <svg svg>
+|       <svg circle>
+
+#data
+<table>x<td>y</table>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     "x"
+|     <table>
+|       <tbody>
+|         <tr>
+|           <td>
+|             "y"
 "####;
