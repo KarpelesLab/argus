@@ -1002,4 +1002,44 @@ a</br>b
 |         <tr>
 |           <td>
 |             "y"
+
+#data
+<ul><li>1<li>2</ul>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <ul>
+|       <li>
+|         "1"
+|       <li>
+|         "2"
+
+#data
+<dl><dt>a<dd>b</dl>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <dl>
+|       <dt>
+|         "a"
+|       <dd>
+|         "b"
+
+#data
+<b>1<p>2</b>3</p>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <b>
+|       "1"
+|     <p>
+|       <b>
+|         "2"
+|       "3"
 "####;
