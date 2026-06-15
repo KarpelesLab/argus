@@ -812,6 +812,10 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
     let mut predictor = 1u32;
     let mut strip_offsets: Vec<u32> = Vec::new();
     let mut strip_counts: Vec<u32> = Vec::new();
+    let mut tile_w = 0u32;
+    let mut tile_l = 0u32;
+    let mut tile_offsets: Vec<u32> = Vec::new();
+    let mut tile_counts: Vec<u32> = Vec::new();
     for i in 0..count {
         let e = ifd + 2 + i * 12;
         let tag = u16a(e)?;
@@ -839,6 +843,10 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
             317 => predictor = first,
             273 => strip_offsets = vals,
             279 => strip_counts = vals,
+            322 => tile_w = first,
+            323 => tile_l = first,
+            324 => tile_offsets = vals,
+            325 => tile_counts = vals,
             _ => {}
         }
     }
@@ -858,7 +866,10 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
     if !matches!(predictor, 1 | 2) || (predictor == 2 && bits != 8) {
         return None;
     }
-    if (width as u64) * (height as u64) > 64_000_000 || strip_offsets.is_empty() {
+    let tiled = tile_w > 0 && tile_l > 0 && !tile_offsets.is_empty();
+    if (width as u64) * (height as u64) > 64_000_000
+        || (strip_offsets.is_empty() && !tiled)
+    {
         return None;
     }
     let (w, h) = (width as usize, height as usize);
@@ -868,17 +879,54 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
     // Total decoded sample budget — also the per-strip Deflate output cap so a
     // decompression bomb can never balloon past one image's worth of pixels.
     let total = (w * h * spp * sb) as u64;
-    // Decompress every strip into one row-major sample buffer.
-    let mut data: Vec<u8> = Vec::with_capacity(w * h * spp);
-    for (so, &off) in strip_offsets.iter().enumerate() {
-        let bc = *strip_counts.get(so).unwrap_or(&0) as usize;
-        let strip = bytes.get(off as usize..off as usize + bc)?;
+    let row_bytes = w * spp * sb;
+    // Decompress one strip/tile chunk to raw sample bytes (bounded output).
+    let decompress = |off: usize, bc: usize| -> Option<Vec<u8>> {
+        let chunk = bytes.get(off..off.checked_add(bc)?)?;
+        let mut out = Vec::new();
         match compression {
-            1 => data.extend_from_slice(strip),
-            5 => lzw_decode_tiff(strip, &mut data),
-            8 | 32946 => deflate_decode_tiff(strip, &mut data, total)?,
-            32773 => packbits_decode(strip, &mut data),
+            1 => out.extend_from_slice(chunk),
+            5 => lzw_decode_tiff(chunk, &mut out),
+            8 | 32946 => deflate_decode_tiff(chunk, &mut out, total)?,
+            32773 => packbits_decode(chunk, &mut out),
             _ => return None,
+        }
+        Some(out)
+    };
+    let mut data: Vec<u8>;
+    if tiled {
+        // Tiled: decode each (tile_w × tile_l) tile and copy its rows into the
+        // full row-major buffer, clipping tiles that overhang the image edge.
+        let (tw, tl) = (tile_w as usize, tile_l as usize);
+        if tw * tl > 64_000_000 {
+            return None;
+        }
+        data = vec![0u8; w * h * spp * sb];
+        let tiles_across = w.div_ceil(tw);
+        let tile_row_bytes = tw * spp * sb;
+        for (ti, &off) in tile_offsets.iter().enumerate() {
+            let bc = *tile_counts.get(ti).unwrap_or(&0) as usize;
+            let tile = decompress(off as usize, bc)?;
+            let (x0, y0) = ((ti % tiles_across) * tw, (ti / tiles_across) * tl);
+            let copy_bytes = (w.saturating_sub(x0)).min(tw) * spp * sb;
+            for ty in 0..tl {
+                let iy = y0 + ty;
+                if iy >= h {
+                    break;
+                }
+                let src = ty * tile_row_bytes;
+                let dst = iy * row_bytes + x0 * spp * sb;
+                if src + copy_bytes <= tile.len() && dst + copy_bytes <= data.len() {
+                    data[dst..dst + copy_bytes].copy_from_slice(&tile[src..src + copy_bytes]);
+                }
+            }
+        }
+    } else {
+        // Stripped: decompress each strip and concatenate row-major.
+        data = Vec::with_capacity(w * h * spp * sb);
+        for (so, &off) in strip_offsets.iter().enumerate() {
+            let bc = *strip_counts.get(so).unwrap_or(&0) as usize;
+            data.extend_from_slice(&decompress(off as usize, bc)?);
         }
     }
     // Undo horizontal differencing (predictor 2): each sample is stored as its
@@ -1332,6 +1380,48 @@ mod tests {
         assert_eq!(&img.rgba[4..8], &[255, 255, 255, 255], "(1,0) white");
         assert_eq!(&img.rgba[8..12], &[255, 0, 0, 255], "(0,1) red");
         assert_eq!(&img.rgba[12..16], &[0, 255, 0, 255], "(1,1) green");
+    }
+
+    #[test]
+    fn decodes_tiled_grayscale_tiff() {
+        // 4x2 grayscale, two 2x2 tiles. Image rows: [10 20 30 40] / [50 60 70 80].
+        // Tile 0 (cols 0-1): 10 20 50 60.  Tile 1 (cols 2-3): 30 40 70 80.
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(b"II");
+        b.extend_from_slice(&42u16.to_le_bytes());
+        b.extend_from_slice(&16u32.to_le_bytes()); // IFD offset
+        b.extend_from_slice(&[10, 20, 50, 60]); // tile 0 at offset 8
+        b.extend_from_slice(&[30, 40, 70, 80]); // tile 1 at offset 12
+        // IFD at 16: 10 entries.
+        let entry = |b: &mut Vec<u8>, tag: u16, ty: u16, cnt: u32, val: u32| {
+            b.extend_from_slice(&tag.to_le_bytes());
+            b.extend_from_slice(&ty.to_le_bytes());
+            b.extend_from_slice(&cnt.to_le_bytes());
+            b.extend_from_slice(&val.to_le_bytes());
+        };
+        b.extend_from_slice(&10u16.to_le_bytes());
+        entry(&mut b, 256, 3, 1, 4); // width
+        entry(&mut b, 257, 3, 1, 2); // height
+        entry(&mut b, 258, 3, 1, 8); // bits
+        entry(&mut b, 259, 3, 1, 1); // compression none
+        entry(&mut b, 262, 3, 1, 1); // BlackIsZero
+        entry(&mut b, 277, 3, 1, 1); // samples
+        entry(&mut b, 322, 3, 1, 2); // TileWidth
+        entry(&mut b, 323, 3, 1, 2); // TileLength
+        entry(&mut b, 324, 4, 2, 142); // TileOffsets array at 142
+        entry(&mut b, 325, 4, 2, 150); // TileByteCounts array at 150
+        b.extend_from_slice(&0u32.to_le_bytes()); // next IFD (ends at 142)
+        b.extend_from_slice(&8u32.to_le_bytes()); // tile offsets [8, 12]
+        b.extend_from_slice(&12u32.to_le_bytes());
+        b.extend_from_slice(&4u32.to_le_bytes()); // tile counts [4, 4]
+        b.extend_from_slice(&4u32.to_le_bytes());
+
+        let img = decode(&b).expect("decode tiled tiff");
+        assert_eq!((img.width, img.height), (4, 2));
+        assert_eq!(img.rgba[0], 10, "(0,0)");
+        assert_eq!(img.rgba[2 * 4], 30, "(2,0) from tile 1");
+        assert_eq!(img.rgba[(4 + 0) * 4], 50, "(0,1)");
+        assert_eq!(img.rgba[(4 + 3) * 4], 80, "(3,1) from tile 1");
     }
 
     #[test]
