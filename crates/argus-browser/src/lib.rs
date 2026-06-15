@@ -522,6 +522,12 @@ fn a11y_tree(doc: &argus_dom::Document) -> String {
                     .or_else(|| {
                         if tag == "input" {
                             input_role(e.attr("type").unwrap_or("text"))
+                        } else if tag == "th" {
+                            // `<th scope=row>` is a row header, else a column header.
+                            match e.attr("scope") {
+                                Some(s) if s.eq_ignore_ascii_case("row") => Some("rowheader"),
+                                _ => Some("columnheader"),
+                            }
                         } else {
                             implicit_role(tag)
                         }
@@ -1835,6 +1841,12 @@ mod tests {
         let tree = super::a11y_tree(&doc);
         assert!(tree.contains("separator"), "hr→separator:\n{tree}");
         assert!(tree.contains("meter \"Disk\""), "meter role:\n{tree}");
+        // <th scope=row> is a rowheader; a plain <th> is a columnheader.
+        let t2 = super::a11y_tree(&argus_html::parse(
+            "<table><tr><th scope=\"row\">R</th><th>C</th></tr></table>",
+        ));
+        assert!(t2.contains("rowheader"), "th scope=row → rowheader:\n{t2}");
+        assert!(t2.contains("columnheader"), "plain th → columnheader:\n{t2}");
         assert!(tree.contains("spinbutton \"Qty\""), "number→spinbutton:\n{tree}");
         assert!(tree.contains("textbox \"Email\""), "email→textbox:\n{tree}");
     }
