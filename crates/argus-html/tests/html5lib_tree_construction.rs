@@ -801,4 +801,48 @@ a</br>b
 |             "h"
 |           <td>
 |             "d"
+
+#data
+<b>1<p>2</b>3
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <b>
+|       "1"
+|     <p>
+|       <b>
+|         "2"
+|       "3"
+
+#data
+<b><i>1</b>2
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <b>
+|       <i>
+|         "1"
+|     <i>
+|       "2"
+
+#data
+<a>1<div>2<div>3</a>4
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <a>
+|       "1"
+|     <div>
+|       <a>
+|         "2"
+|       <div>
+|         <a>
+|           "3"
+|         "4"
 "####;

@@ -7,13 +7,13 @@
 //! table-text foster parenting, the `<image>`→`<img>` / `</br>` / empty-`</p>`
 //! quirks, and a basic subset of **SVG/MathML foreign content** (namespaced
 //! subtrees) — enough to build faithful trees for typical content. It also keeps
-//! the **list of active formatting elements** and **reconstructs** them, so inline
-//! formatting a block boundary closed is re-opened for following content
-//! (`<p>x<b>y</p>z` → `<p>x<b>y</b></p><b>z</b>`). The harder machinery — full table
-//! modes, the *reparenting* half of the adoption agency algorithm (misnested
-//! block-in-formatting), foreign-content integration points/breakout tags, and
-//! template contents — is deferred and tracked in `docs/subsystems/dom.md`.
-//! Conformance against html5lib-tests comes with it.
+//! the **list of active formatting elements**, **reconstructs** them, and runs the
+//! **adoption agency algorithm** — so misnested inline formatting is reparented
+//! (`<b>1<p>2</b>3` → `<b>1</b><p><b>2</b>3</p>`, including multi-level nesting). The
+//! harder machinery that remains — full table insertion modes, foreign-content
+//! integration points/breakout tags, and template contents — is deferred and
+//! tracked in `docs/subsystems/dom.md`. Conformance against html5lib-tests comes
+//! with it.
 
 use crate::tokenizer::{tokenize, Token};
 use argus_dom::{Attribute, Document, Namespace, NodeData, NodeId, QualName};
@@ -103,6 +103,19 @@ const SCOPE_BOUNDARY: &[&str] = &[
     "applet", "caption", "html", "table", "td", "th", "marquee", "object", "template",
 ];
 
+/// HTML "special" category — block/structural elements (NOT inline formatting).
+/// Used by the adoption agency to find the "furthest block".
+const SPECIAL: &[&str] = &[
+    "address", "applet", "area", "article", "aside", "base", "basefont", "bgsound", "blockquote",
+    "body", "br", "button", "caption", "center", "col", "colgroup", "dd", "details", "dir", "div",
+    "dl", "dt", "embed", "fieldset", "figcaption", "figure", "footer", "form", "frame", "frameset",
+    "h1", "h2", "h3", "h4", "h5", "h6", "head", "header", "hgroup", "hr", "html", "iframe", "img",
+    "input", "li", "link", "listing", "main", "marquee", "menu", "meta", "nav", "noembed",
+    "noframes", "noscript", "object", "ol", "p", "param", "plaintext", "pre", "script", "section",
+    "select", "source", "style", "summary", "table", "tbody", "td", "template", "textarea",
+    "tfoot", "th", "thead", "title", "tr", "track", "ul", "wbr", "xmp",
+];
+
 /// An entry in the list of active formatting elements: a scope marker, or a
 /// formatting element open on the stack.
 enum Afe {
@@ -187,21 +200,189 @@ impl TreeBuilder {
         }
     }
 
-    /// Remove the most recent active-formatting entry for `name` (an end tag).
-    fn remove_formatting(&mut self, name: &str) {
-        if let Some(pos) = self.active_formatting.iter().rposition(|e| match e {
-            Afe::Element(id) => self.is_named(*id, name),
-            Afe::Marker => false,
-        }) {
-            self.active_formatting.remove(pos);
-        }
-    }
-
     /// Drop active-formatting entries back to (and including) the last marker.
     fn clear_formatting_to_marker(&mut self) {
         while let Some(e) = self.active_formatting.pop() {
             if matches!(e, Afe::Marker) {
                 break;
+            }
+        }
+    }
+
+    // --- Adoption agency helpers --------------------------------------------
+
+    fn afe_index_of(&self, node: NodeId) -> Option<usize> {
+        self.active_formatting
+            .iter()
+            .position(|e| matches!(e, Afe::Element(id) if *id == node))
+    }
+
+    fn afe_node(&self, idx: usize) -> Option<NodeId> {
+        match self.active_formatting.get(idx) {
+            Some(Afe::Element(id)) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// The AFE index of the last element named `name` scanning back to the last
+    /// marker (or list start).
+    fn afe_last_named_after_marker(&self, name: &str) -> Option<usize> {
+        for i in (0..self.active_formatting.len()).rev() {
+            match &self.active_formatting[i] {
+                Afe::Marker => return None,
+                Afe::Element(id) if self.is_named(*id, name) => return Some(i),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn is_special(&self, node: NodeId) -> bool {
+        self.name_of(node).is_some_and(|n| SPECIAL.contains(&n))
+    }
+
+    /// Whether `node` is in scope on the open stack (scope boundaries stop the scan).
+    fn node_in_scope(&self, node: NodeId) -> bool {
+        for &id in self.open.iter().rev() {
+            if id == node {
+                return true;
+            }
+            if let Some(n) = self.name_of(id) {
+                if SCOPE_BOUNDARY.contains(&n) {
+                    return false;
+                }
+            }
+        }
+        false
+    }
+
+    /// Deep-copy-less clone: a new element with the same name + attributes, no kids.
+    fn clone_element(&mut self, node: NodeId) -> NodeId {
+        let (name, attrs) = match &self.doc.node(node).data {
+            NodeData::Element(e) => (
+                e.name.clone(),
+                e.attrs
+                    .iter()
+                    .map(|a| Attribute::new(a.name.clone(), a.value.clone()))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => (QualName::html("span"), vec![]),
+        };
+        self.doc.create_element(name, attrs)
+    }
+
+    /// Fallback for a formatting end tag with no matching active formatting element:
+    /// generate implied end tags and pop back to the named element.
+    fn any_other_end_tag(&mut self, name: &str) {
+        if self.has_in_scope(name, false) {
+            self.generate_implied_end_tags(Some(name));
+            self.pop_until(name);
+        }
+    }
+
+    /// The WHATWG adoption agency algorithm — reparents misnested formatting
+    /// elements (`<b>1<p>2</b>3` → `<b>1</b><p><b>2</b>3</p>`).
+    fn adoption_agency(&mut self, subject: &str) {
+        // 1. If the current node is `subject` and not in the AFE list, just pop it.
+        if let Some(&cur) = self.open.last() {
+            if self.is_named(cur, subject) && self.afe_index_of(cur).is_none() {
+                self.open.pop();
+                return;
+            }
+        }
+        // Outer loop, at most 8 iterations.
+        for _ in 0..8 {
+            // The formatting element = last AFE entry named subject (after a marker).
+            let Some(fe_afe) = self.afe_last_named_after_marker(subject) else {
+                self.any_other_end_tag(subject);
+                return;
+            };
+            let Some(fe) = self.afe_node(fe_afe) else { return };
+            // Not on the open stack → remove from AFE and stop.
+            let Some(fe_stack) = self.open.iter().position(|&x| x == fe) else {
+                self.active_formatting.remove(fe_afe);
+                return;
+            };
+            // On the stack but not in scope → parse error, stop.
+            if !self.node_in_scope(fe) {
+                return;
+            }
+            // Furthest block: the nearest "special" element above `fe` on the stack.
+            let furthest = self.open[fe_stack + 1..]
+                .iter()
+                .copied()
+                .find(|&id| self.is_special(id));
+            let Some(furthest) = furthest else {
+                // No furthest block: pop through `fe` and drop it from the AFE.
+                self.open.truncate(fe_stack);
+                self.active_formatting.remove(fe_afe);
+                return;
+            };
+            let common_ancestor = self.open[fe_stack - 1];
+            let mut bookmark = fe_afe;
+            let mut last_node = furthest;
+            let mut node_idx = self.open.iter().position(|&x| x == furthest).unwrap();
+            // Inner loop.
+            let mut inner = 0;
+            loop {
+                inner += 1;
+                node_idx -= 1;
+                let node = self.open[node_idx];
+                if node == fe {
+                    break;
+                }
+                let mut node_afe = self.afe_index_of(node);
+                if inner > 3 {
+                    if let Some(ai) = node_afe {
+                        self.active_formatting.remove(ai);
+                        if ai < bookmark {
+                            bookmark -= 1;
+                        }
+                        node_afe = None;
+                    }
+                }
+                let Some(node_afe) = node_afe else {
+                    self.open.remove(node_idx);
+                    continue;
+                };
+                // Clone `node`, replacing it in both the AFE list and the stack.
+                let clone = self.clone_element(node);
+                self.active_formatting[node_afe] = Afe::Element(clone);
+                self.open[node_idx] = clone;
+                if last_node == furthest {
+                    bookmark = node_afe + 1;
+                }
+                // Reparent last_node under the clone.
+                self.doc.detach(last_node);
+                self.doc.append(clone, last_node);
+                last_node = clone;
+            }
+            // Place last_node into the common ancestor.
+            self.doc.detach(last_node);
+            self.doc.append(common_ancestor, last_node);
+            // Clone the formatting element; move furthest block's children into it.
+            let fe_clone = self.clone_element(fe);
+            let kids: Vec<NodeId> = self.doc.children(furthest).collect();
+            for k in kids {
+                self.doc.detach(k);
+                self.doc.append(fe_clone, k);
+            }
+            self.doc.append(furthest, fe_clone);
+            // Remove `fe` from the AFE and insert the clone at the bookmark.
+            if let Some(cur_fe_afe) = self.afe_index_of(fe) {
+                self.active_formatting.remove(cur_fe_afe);
+                if cur_fe_afe < bookmark {
+                    bookmark -= 1;
+                }
+            }
+            let bm = bookmark.min(self.active_formatting.len());
+            self.active_formatting.insert(bm, Afe::Element(fe_clone));
+            // Remove `fe` from the stack; put the clone just above the furthest block.
+            if let Some(fe_idx) = self.open.iter().position(|&x| x == fe) {
+                self.open.remove(fe_idx);
+            }
+            if let Some(furthest_idx) = self.open.iter().position(|&x| x == furthest) {
+                self.open.insert(furthest_idx + 1, fe_clone);
             }
         }
     }
@@ -758,14 +939,8 @@ impl TreeBuilder {
                 }
             }
             n if FORMATTING.contains(&n) => {
-                // Simplified adoption: drop the formatting element from both the
-                // active-formatting list and the open stack (the full reparenting
-                // algorithm isn't modeled; reconstruction handles the common case).
-                self.remove_formatting(n);
-                if self.has_in_scope(n, false) {
-                    self.generate_implied_end_tags(Some(n));
-                    self.pop_until(n);
-                }
+                // The adoption agency algorithm handles (mis)nested formatting.
+                self.adoption_agency(n);
             }
             "td" | "th" | "caption" | "applet" | "object" | "marquee" => {
                 if self.has_in_scope(name, false) {
