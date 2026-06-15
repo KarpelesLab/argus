@@ -20,9 +20,9 @@
 use argus_dom::{Document, ElementData, NodeData, NodeId};
 use argus_gfx::{Font, RectFill, TextRun};
 use argus_style::{
-    author_stylesheet, computed_style, AuthorStylesheet, BoxSizing, ComputedStyle, Display,
-    FlexDirection, Length, ListStyle, Position, PseudoElement, TextAlign, TextTransform,
-    VerticalAlign,
+    author_stylesheet, computed_style, AlignItems, AuthorStylesheet, BoxSizing, ComputedStyle,
+    Display, FlexDirection, JustifyContent, Length, ListStyle, Position, PseudoElement, TextAlign,
+    TextTransform, VerticalAlign,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -130,6 +130,10 @@ fn clamp_content_width(style: &ComputedStyle, width: f32, avail: f32) -> f32 {
     }
     w.max(0.0)
 }
+
+/// A snapshot of the display-list lengths (rects, runs, images, links, bounds),
+/// used to shift everything appended after the mark by a delta.
+type DisplayListMark = (usize, usize, usize, usize, usize);
 
 /// Convert a specified `width` into a content-box width, honoring `box-sizing`.
 /// For `border-box`, the horizontal padding and border are subtracted.
@@ -741,7 +745,7 @@ impl Ctx<'_> {
     }
 
     /// Shift every display-list item appended since `start` by `(dx, dy)`.
-    fn shift_display_list(&mut self, start: (usize, usize, usize, usize, usize), dx: f32, dy: f32) {
+    fn shift_display_list(&mut self, start: DisplayListMark, dx: f32, dy: f32) {
         for r in &mut self.rects[start.0..] {
             r.x += dx;
             r.y += dy;
@@ -845,7 +849,9 @@ impl Ctx<'_> {
     /// Lay out a `display: flex` container. In the default `row` direction the
     /// children share the content width equally on a single line (height = tallest
     /// item); in `flex-direction: column` they stack vertically at full width, `gap`
-    /// apart. A basic subset — no wrapping, `flex-grow`, or `justify`/`align`.
+    /// apart. Honors fixed item widths, `justify-content` (when all items are
+    /// fixed-width), and `align-items` cross-axis placement. No wrapping or
+    /// `flex-grow` yet.
     fn layout_flex(&mut self, id: NodeId, style: ComputedStyle, x: f32, avail: f32) {
         let items: Vec<NodeId> = self
             .doc
@@ -909,16 +915,94 @@ impl Ctx<'_> {
             }
             self.cursor_y += style.padding.bottom + style.border.bottom;
         } else {
-            // Row: items share the main axis, each an equal slice of the free width.
+            // Row: items lay out along the main axis. Items with an explicit `width`
+            // take that as a fixed slot; the rest (flexible) share the remaining
+            // width equally. If every item is fixed, the leftover free space is
+            // distributed per `justify-content`; cross-axis placement within the
+            // line height follows `align-items`.
             let total_gap = style.gap * (n - 1.0);
-            let item_w = ((content_w - total_gap) / n).max(0.0);
+            let istyles: Vec<ComputedStyle> = items
+                .iter()
+                .map(|&it| computed_style(self.doc, it, &style, self.author))
+                .collect();
+            // Fixed main-axis footprint (margin box) for items with explicit width.
+            let fixed: Vec<Option<f32>> = istyles
+                .iter()
+                .map(|s| {
+                    s.width.map(|len| {
+                        let c = border_box_to_content(s, len.to_px(s.font_size, content_w));
+                        c + s.padding.left
+                            + s.padding.right
+                            + s.border.left
+                            + s.border.right
+                            + s.margin.left
+                            + s.margin.right
+                    })
+                })
+                .collect();
+            let flex_count = fixed.iter().filter(|f| f.is_none()).count();
+            let fixed_sum: f32 = fixed.iter().filter_map(|f| *f).sum();
+            let flex_w = if flex_count > 0 {
+                ((content_w - total_gap - fixed_sum) / flex_count as f32).max(0.0)
+            } else {
+                0.0
+            };
+            let sizes: Vec<f32> = fixed.iter().map(|f| f.unwrap_or(flex_w)).collect();
+            let used: f32 = sizes.iter().sum::<f32>() + total_gap;
+            let free = (content_w - used).max(0.0);
+
+            // Justify-content only has free space to distribute when no item is
+            // flexible (flexible items already absorb it).
+            let (lead, between_extra) = if flex_count > 0 {
+                (0.0, 0.0)
+            } else {
+                match style.justify_content {
+                    JustifyContent::FlexStart => (0.0, 0.0),
+                    JustifyContent::FlexEnd => (free, 0.0),
+                    JustifyContent::Center => (free / 2.0, 0.0),
+                    JustifyContent::SpaceBetween => {
+                        (0.0, if n > 1.0 { free / (n - 1.0) } else { 0.0 })
+                    }
+                    JustifyContent::SpaceAround => {
+                        let unit = free / n;
+                        (unit / 2.0, unit)
+                    }
+                    JustifyContent::SpaceEvenly => {
+                        let unit = free / (n + 1.0);
+                        (unit, unit)
+                    }
+                }
+            };
+
+            let mut cx = content_left + lead;
             let mut max_h = 0.0f32;
+            // Per-item display-list snapshot + height, for the cross-axis shift.
+            let mut snaps: Vec<(DisplayListMark, f32)> = Vec::new();
             for (i, &item) in items.iter().enumerate() {
                 self.cursor_y = row_top;
-                let istyle = computed_style(self.doc, item, &style, self.author);
-                let item_x = content_left + i as f32 * (item_w + style.gap);
-                self.layout_block(item, istyle, item_x, item_w, None);
-                max_h = max_h.max(self.cursor_y - row_top);
+                let ds = (
+                    self.rects.len(),
+                    self.runs.len(),
+                    self.images.len(),
+                    self.links.len(),
+                    self.bounds.len(),
+                );
+                self.layout_block(item, istyles[i], cx, sizes[i], None);
+                let h = self.cursor_y - row_top;
+                max_h = max_h.max(h);
+                snaps.push((ds, h));
+                cx += sizes[i] + style.gap + between_extra;
+            }
+            // align-items: offset each item vertically within the line box.
+            for (ds, h) in &snaps {
+                let dy = match style.align_items {
+                    AlignItems::FlexStart | AlignItems::Stretch => 0.0,
+                    AlignItems::Center => (max_h - h) / 2.0,
+                    AlignItems::FlexEnd => max_h - h,
+                };
+                if dy != 0.0 {
+                    self.shift_display_list(*ds, 0.0, dy);
+                }
             }
             self.cursor_y = row_top + max_h + style.padding.bottom + style.border.bottom;
         }
@@ -2137,6 +2221,78 @@ mod tests {
             two.x > one.x + 100.0,
             "second item should be in the next column"
         );
+    }
+
+    #[test]
+    fn justify_content_center_offsets_fixed_items() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Two 40px-wide items in a 400px row. Default (flex-start) puts the first at
+        // the left edge; `center` shifts the whole group right by half the free space.
+        let first_x = |jc: &str| -> f32 {
+            let html = format!(
+                "<div style=\"display:flex; width:400px; justify-content:{jc}\">\
+                   <div style=\"width:40px\">aaa</div>\
+                   <div style=\"width:40px\">bbb</div>\
+                 </div>"
+            );
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 800.0, &ImageSizes::new());
+            l.runs.iter().find(|r| r.text == "aaa").unwrap().x
+        };
+        let start = first_x("flex-start");
+        let center = first_x("center");
+        let end = first_x("flex-end");
+        assert!(center > start + 100.0, "center should shift right: {start} -> {center}");
+        assert!(end > center + 100.0, "flex-end further right: {center} -> {end}");
+    }
+
+    #[test]
+    fn justify_space_between_pushes_items_to_edges() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // space-between: first item at the left edge, last item flush to the right.
+        let html = "<div style=\"display:flex; width:400px; justify-content:space-between\">\
+                      <div style=\"width:40px\">aaa</div>\
+                      <div style=\"width:40px\">bbb</div>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 800.0, &ImageSizes::new());
+        let a = l.runs.iter().find(|r| r.text == "aaa").unwrap();
+        let b = l.runs.iter().find(|r| r.text == "bbb").unwrap();
+        // First sits near the left (page margin ~8); the second is pushed far right.
+        assert!(a.x < 20.0, "first item near left, got {}", a.x);
+        assert!(b.x > 300.0, "second item near right edge, got {}", b.x);
+    }
+
+    #[test]
+    fn align_items_center_centers_items_vertically() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A tall item (forced height) sets the line height; a short item is centered
+        // vertically against it. Compared with the default (flex-start) it sits lower.
+        let baseline = |ai: &str| -> f32 {
+            let html = format!(
+                "<div style=\"display:flex; align-items:{ai}\">\
+                   <div style=\"height:100px; width:40px\">tall</div>\
+                   <div style=\"width:40px\">x</div>\
+                 </div>"
+            );
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+            l.runs.iter().find(|r| r.text == "x").unwrap().baseline
+        };
+        let start = baseline("flex-start");
+        let center = baseline("center");
+        let end = baseline("flex-end");
+        assert!(center > start + 20.0, "center lower than start: {start} -> {center}");
+        assert!(end > center + 20.0, "end lower than center: {center} -> {end}");
     }
 
     #[test]

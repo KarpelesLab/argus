@@ -95,6 +95,26 @@ pub enum FlexDirection {
     Column,
 }
 
+/// `justify-content` — main-axis distribution of free space in a flex container.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum JustifyContent {
+    FlexStart,
+    FlexEnd,
+    Center,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly,
+}
+
+/// `align-items` — cross-axis placement of items within the flex line.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AlignItems {
+    Stretch,
+    FlexStart,
+    FlexEnd,
+    Center,
+}
+
 /// Four edge values (top/right/bottom/left) in CSS pixels.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Edges {
@@ -152,6 +172,10 @@ pub struct ComputedStyle {
     pub grid_columns: u32,
     /// `flex-direction` for a `display: flex` container (not inherited).
     pub flex_direction: FlexDirection,
+    /// `justify-content` — main-axis free-space distribution (flex container).
+    pub justify_content: JustifyContent,
+    /// `align-items` — cross-axis item placement (flex container).
+    pub align_items: AlignItems,
     /// Uniform `border-radius` in pixels.
     pub border_radius: f32,
     /// Element `opacity` in `0.0..=1.0`.
@@ -215,6 +239,8 @@ impl ComputedStyle {
             strike: false,
             grid_columns: 1,
             flex_direction: FlexDirection::Row,
+            justify_content: JustifyContent::FlexStart,
+            align_items: AlignItems::Stretch,
             border_radius: 0.0,
             opacity: 1.0,
             white_space_pre: false,
@@ -840,6 +866,24 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             FlexDirection::Column
         } else {
             FlexDirection::Row
+        };
+    }
+    if let Some(v) = map.get("justify-content") {
+        cs.justify_content = match v.trim() {
+            "flex-end" | "end" | "right" => JustifyContent::FlexEnd,
+            "center" => JustifyContent::Center,
+            "space-between" => JustifyContent::SpaceBetween,
+            "space-around" => JustifyContent::SpaceAround,
+            "space-evenly" => JustifyContent::SpaceEvenly,
+            _ => JustifyContent::FlexStart,
+        };
+    }
+    if let Some(v) = map.get("align-items") {
+        cs.align_items = match v.trim() {
+            "flex-start" | "start" => AlignItems::FlexStart,
+            "flex-end" | "end" => AlignItems::FlexEnd,
+            "center" => AlignItems::Center,
+            _ => AlignItems::Stretch,
         };
     }
     if let Some(px) = map
