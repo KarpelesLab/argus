@@ -905,10 +905,13 @@ impl Ctx<'_> {
 
         if style.flex_direction == FlexDirection::Column {
             // Column: stack items vertically, each at full content width, with `gap`
-            // between them. The container height is the sum of item heights + gaps.
-            // `align-items` controls cross-axis (horizontal) placement; an item with
-            // an explicit width can be flush-left (default/stretch), centered, or
-            // flush-right within the content box via a post-layout shift.
+            // between them. `align-items` controls cross-axis (horizontal) placement;
+            // an item with an explicit width can be flush-left (default/stretch),
+            // centered, or flush-right within the content box via a post-layout
+            // shift. When the container has an explicit `height` that exceeds the
+            // items' stacked extent, the leftover space is distributed on the main
+            // (vertical) axis per `justify-content`.
+            let mut snaps: Vec<DisplayListMark> = Vec::new();
             for (i, &item) in items.iter().enumerate() {
                 if i > 0 {
                     self.cursor_y += style.gap;
@@ -940,6 +943,43 @@ impl Ctx<'_> {
                     if dx != 0.0 {
                         self.shift_display_list(ds, dx, 0.0);
                     }
+                }
+                snaps.push(ds);
+            }
+            // Vertical justify-content: distribute free space when an explicit height
+            // leaves room below the stacked items.
+            let items_total = self.cursor_y - row_top;
+            let explicit_h = [style.height, style.min_height]
+                .into_iter()
+                .flatten()
+                .map(|len| len.to_px(style.font_size, content_w))
+                .fold(None, |acc: Option<f32>, v| Some(acc.map_or(v, |a| a.max(v))));
+            if let Some(target_h) = explicit_h {
+                let free = (target_h - items_total).max(0.0);
+                if free > 0.0 {
+                    let (lead, between_extra) = match style.justify_content {
+                        JustifyContent::FlexStart => (0.0, 0.0),
+                        JustifyContent::FlexEnd => (free, 0.0),
+                        JustifyContent::Center => (free / 2.0, 0.0),
+                        JustifyContent::SpaceBetween => {
+                            (0.0, if n > 1.0 { free / (n - 1.0) } else { 0.0 })
+                        }
+                        JustifyContent::SpaceAround => {
+                            let unit = free / n;
+                            (unit / 2.0, unit)
+                        }
+                        JustifyContent::SpaceEvenly => {
+                            let unit = free / (n + 1.0);
+                            (unit, unit)
+                        }
+                    };
+                    for (idx, ds) in snaps.iter().enumerate() {
+                        let dy = lead + idx as f32 * between_extra;
+                        if dy != 0.0 {
+                            self.shift_display_list(*ds, 0.0, dy);
+                        }
+                    }
+                    self.cursor_y = row_top + target_h;
                 }
             }
             self.cursor_y += style.padding.bottom + style.border.bottom;
@@ -2347,6 +2387,32 @@ mod tests {
         let end = item_x("flex-end");
         assert!(center > start + 100.0, "center shifts right: {start} -> {center}");
         assert!(end > center + 100.0, "flex-end further right: {center} -> {end}");
+    }
+
+    #[test]
+    fn column_justify_content_distributes_vertical_space() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A 300px-tall column holding two short items. flex-start keeps the first at
+        // the top; center/flex-end push it down into the free vertical space.
+        let first_baseline = |jc: &str| -> f32 {
+            let html = format!(
+                "<div style=\"display:flex; flex-direction:column; height:300px; justify-content:{jc}\">\
+                   <div>aaa</div>\
+                   <div>bbb</div>\
+                 </div>"
+            );
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+            l.runs.iter().find(|r| r.text == "aaa").unwrap().baseline
+        };
+        let start = first_baseline("flex-start");
+        let center = first_baseline("center");
+        let end = first_baseline("flex-end");
+        assert!(center > start + 80.0, "center pushes down: {start} -> {center}");
+        assert!(end > center + 80.0, "flex-end further down: {center} -> {end}");
     }
 
     #[test]
