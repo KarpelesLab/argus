@@ -3,13 +3,13 @@
 //! Decodes image bytes into RGBA8 for the renderer, using the first-party oxideav
 //! codecs: PNG (`oxideav-png`), GIF (`oxideav-gif`), **JPEG** (`oxideav-mjpeg` via
 //! the `oxideav-core` registry, YUV→RGBA through `oxideav-pixfmt`), **WebP**
-//! (`oxideav-webp`, lossless), **QOI** (`oxideav-qoi`), and **ICO/CUR favicons**
+//! (`oxideav-webp` lossless + lossy VP8 via `oxideav-vp8`), **QOI** (`oxideav-qoi`), and **ICO/CUR favicons**
 //! (`oxideav-ico`, largest sub-image) — plus uncompressed 1/4/8-bit-palette & 24/32-bit BMP, **TGA**
 //! (Truevision true-color, grayscale, + color-mapped, uncompressed + RLE), **Netpbm** (PPM/PGM,
 //! ASCII + binary), **PCX** (RLE 24-bit + 8-bit palette), **TIFF** (baseline
-//! uncompressed + PackBits + LZW + Deflate RGB/RGBA/grayscale, horizontal predictor, both byte orders), all built in, and `data:` URLs.
-//! AVIF and lossy-WebP
-//! (VP8) decode here once that glue lands. See `docs/subsystems/media.md`.
+//! uncompressed + PackBits + LZW + Deflate RGB/RGBA/grayscale, 8/16-bit, predictor, strips + tiles, both byte orders), all built in, and `data:` URLs.
+//! AVIF awaits a working AV1 pixel decoder (oxideav-av1 is currently stubbed).
+//! See `docs/subsystems/media.md`.
 
 /// A decoded image: `width * height * 4` straight-alpha RGBA bytes.
 #[derive(Clone, Debug)]
@@ -129,14 +129,41 @@ fn decode_registry(
     frame_to_rgba(&frame)
 }
 
-/// Decode a WebP (lossless; lossy VP8 is reported unsupported by the codec).
+/// Decode a WebP: lossless (VP8L) via `oxideav-webp`, or lossy (VP8 key frame)
+/// by handing the extracted `VP8 ` bitstream to `oxideav-vp8` and converting its
+/// I420 output (BT.601 limited range) to RGBA.
 fn decode_webp(bytes: &[u8]) -> Option<DecodedImage> {
-    let img = oxideav_webp::decode_webp(bytes).ok()?;
-    let frame = img.frames.into_iter().next()?;
+    // Lossless / animated path first.
+    if let Ok(img) = oxideav_webp::decode_webp(bytes) {
+        if let Some(frame) = img.frames.into_iter().next() {
+            return Some(DecodedImage {
+                width: frame.width,
+                height: frame.height,
+                rgba: frame.rgba,
+            });
+        }
+    }
+    // Lossy VP8: extract the `VP8 ` chunk and decode its key frame.
+    let chunk = oxideav_webp::extract_lossy_chunk(bytes).ok().flatten()?;
+    let f = oxideav_vp8::decode_vp8(chunk.bitstream()).ok()?;
+    let (w, h) = (f.width as usize, f.height as usize);
+    if w == 0 || h == 0 || w * h > 64_000_000 {
+        return None;
+    }
+    let mut rgb = vec![0u8; w * h * 3];
+    oxideav_pixfmt::yuv::yuv420_to_rgb24(
+        &f.y,
+        &f.u,
+        &f.v,
+        &mut rgb,
+        w,
+        h,
+        oxideav_pixfmt::yuv::YuvMatrix::BT601.with_range(true), // VP8 is studio-range
+    );
     Some(DecodedImage {
-        width: frame.width,
-        height: frame.height,
-        rgba: frame.rgba,
+        width: f.width,
+        height: f.height,
+        rgba: rgb24_to_rgba(&rgb, w, h),
     })
 }
 
@@ -1380,6 +1407,32 @@ mod tests {
         assert_eq!(&img.rgba[4..8], &[255, 255, 255, 255], "(1,0) white");
         assert_eq!(&img.rgba[8..12], &[255, 0, 0, 255], "(0,1) red");
         assert_eq!(&img.rgba[12..16], &[0, 255, 0, 255], "(1,1) green");
+    }
+
+    #[test]
+    fn decodes_lossy_vp8_webp() {
+        // Encode a 16x16 VP8 key frame and wrap it in a `VP8 ` (lossy) WebP RIFF;
+        // decode it back through the lossy path (pixels are encoder-defined, so we
+        // assert dimensions + a full RGBA buffer, not exact colors).
+        let (w, h) = (16u32, 16u32);
+        let bits = oxideav_vp8::encode_vp8_keyframe(&vec![0u8; (w * h * 3) as usize], w, h)
+            .expect("encode vp8");
+        let chunk_size = bits.len() as u32;
+        let pad = chunk_size & 1;
+        let file_size = 4 + 8 + chunk_size + pad; // "WEBP" + chunk header + payload(+pad)
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&file_size.to_le_bytes());
+        b.extend_from_slice(b"WEBP");
+        b.extend_from_slice(b"VP8 ");
+        b.extend_from_slice(&chunk_size.to_le_bytes());
+        b.extend_from_slice(&bits);
+        if pad == 1 {
+            b.push(0);
+        }
+        let img = decode(&b).expect("decode lossy webp");
+        assert_eq!((img.width, img.height), (16, 16));
+        assert_eq!(img.rgba.len(), 16 * 16 * 4);
     }
 
     #[test]

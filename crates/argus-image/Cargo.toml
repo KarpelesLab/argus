@@ -11,6 +11,7 @@ rust-version.workspace = true
 oxideav-png = "0.1"
 oxideav-gif = "0.0"
 oxideav-webp = "0.2"
+oxideav-vp8 = "0.2"
 oxideav-mjpeg = "0.1"
 oxideav-qoi = "0.0"
 oxideav-ico = "0.0"

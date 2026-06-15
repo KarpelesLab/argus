@@ -116,6 +116,7 @@ dependencies = [
  "oxideav-pixfmt",
  "oxideav-png",
  "oxideav-qoi",
+ "oxideav-vp8",
  "oxideav-webp",
 ]
 
