@@ -197,13 +197,37 @@ fn system_font_bytes() -> Option<Vec<u8>> {
     None
 }
 
-/// Send the content process a font and a document to render.
-fn provide_page(content: &Child, html: &str) -> io::Result<()> {
+/// Fallback fonts (emoji, CJK, broad-coverage) for glyphs the primary lacks; sent
+/// to the content process after the primary so its FaceChain can consult them.
+fn fallback_font_bytes() -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    for path in [
+        "/System/Library/Fonts/Apple Color Emoji.ttc", // emoji
+        "/System/Library/Fonts/Apple Symbols.ttf",     // symbols
+        "/System/Library/Fonts/PingFang.ttc",          // CJK
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",  // CJK fallback
+    ] {
+        if let Ok(bytes) = std::fs::read(path) {
+            out.push(bytes);
+        }
+    }
+    out
+}
+
+/// Send the primary system font then any available glyph-fallback fonts.
+fn provide_fonts(content: &Child) -> io::Result<()> {
     if let Some(bytes) = system_font_bytes() {
         proto::send(content.channel(), Msg::ProvideFont { bytes }, &[])?;
-    } else {
-        log!("no system font found; content will render the fallback color");
+        for bytes in fallback_font_bytes() {
+            proto::send(content.channel(), Msg::ProvideFont { bytes }, &[])?;
+        }
     }
+    Ok(())
+}
+
+/// Send the content process a font and a document to render.
+fn provide_page(content: &Child, html: &str) -> io::Result<()> {
+    provide_fonts(content)?;
     proto::send(
         content.channel(),
         Msg::LoadDocument {
@@ -1283,9 +1307,7 @@ pub fn render_once(url: Option<&str>, viewport: Size) -> io::Result<(Size, Vec<u
     proto::parent_handshake(net.channel(), viewport)?;
 
     let html = resolve_html(&net, url);
-    if let Some(bytes) = system_font_bytes() {
-        proto::send(content.channel(), Msg::ProvideFont { bytes }, &[])?;
-    }
+    provide_fonts(&content)?;
     proto::send(content.channel(), Msg::LoadDocument { html }, &[])?;
 
     let (frame, _) = request_frame(&content, &net, url)?;

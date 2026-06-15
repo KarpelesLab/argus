@@ -52,6 +52,18 @@ impl Font {
         })
     }
 
+    /// Return this font with an added fallback face (from TTF/OTF bytes), consulted
+    /// for glyphs the primary face lacks (emoji, CJK, symbols). On a parse failure
+    /// the font is returned unchanged.
+    pub fn with_fallback(self, bytes: Vec<u8>) -> Font {
+        match Face::from_ttf_bytes(bytes.clone()).or_else(|_| Face::from_otf_bytes(bytes)) {
+            Ok(face) => Font {
+                chain: self.chain.push_fallback(face),
+            },
+            Err(_) => self,
+        }
+    }
+
     /// Distance from the top of a line to the baseline, in pixels, at `size_px`.
     pub fn ascent_px(&self, size_px: f32) -> f32 {
         self.chain.face(0).ascent_px(size_px)
@@ -370,6 +382,35 @@ mod tests {
                 if let Ok(font) = Font::from_bytes(bytes) {
                     return Some(font);
                 }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn with_fallback_keeps_font_usable() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font found; skipping");
+            return;
+        };
+        let before = font.measure("hello", 16.0);
+        // Pushing the same bytes as a fallback must keep the primary working; garbage
+        // bytes are ignored (font returned unchanged).
+        let font = font.with_fallback(system_font_bytes().unwrap());
+        let font = font.with_fallback(vec![0, 1, 2, 3]);
+        let after = font.measure("hello", 16.0);
+        assert!((before - after).abs() < 0.01, "primary face still drives measurement");
+    }
+
+    fn system_font_bytes() -> Option<Vec<u8>> {
+        for path in [
+            "/System/Library/Fonts/Geneva.ttf",
+            "/System/Library/Fonts/Monaco.ttf",
+            "/System/Library/Fonts/SFNS.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+        ] {
+            if let Ok(b) = std::fs::read(path) {
+                return Some(b);
             }
         }
         None

@@ -46,12 +46,20 @@ pub fn run(channel: Channel) -> io::Result<()> {
         match msg {
             Msg::ProvideFont { bytes } => {
                 let n = bytes.len();
-                match Font::from_bytes(bytes) {
-                    Ok(font) => {
-                        content.font = Some(font);
-                        log!("loaded font ({n} bytes)");
+                // The first font is the primary; subsequent ones are glyph fallbacks
+                // (emoji/CJK/symbols the primary lacks).
+                match content.font.take() {
+                    Some(font) => {
+                        content.font = Some(font.with_fallback(bytes));
+                        log!("added fallback font ({n} bytes)");
                     }
-                    Err(e) => log!("WARNING: failed to load font: {e}"),
+                    None => match Font::from_bytes(bytes) {
+                        Ok(font) => {
+                            content.font = Some(font);
+                            log!("loaded font ({n} bytes)");
+                        }
+                        Err(e) => log!("WARNING: failed to load font: {e}"),
+                    },
                 }
             }
             Msg::LoadDocument { html } => {
