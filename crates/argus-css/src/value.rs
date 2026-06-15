@@ -223,6 +223,12 @@ pub fn parse_color(s: &str) -> Option<Color> {
     if let Some(inner) = s.strip_prefix("hwb(").and_then(|s| s.strip_suffix(')')) {
         return parse_hwb(inner);
     }
+    if let Some(inner) = s.strip_prefix("oklab(").and_then(|s| s.strip_suffix(')')) {
+        return parse_oklab(inner, false);
+    }
+    if let Some(inner) = s.strip_prefix("oklch(").and_then(|s| s.strip_suffix(')')) {
+        return parse_oklab(inner, true);
+    }
     let sb = s.as_bytes();
     if sb.len() > 10 && sb[..10].eq_ignore_ascii_case(b"color-mix(") && s.ends_with(')') {
         return parse_color_mix(&s[10..s.len() - 1]);
@@ -327,6 +333,57 @@ fn parse_hue(s: &str) -> Option<f32> {
     } else {
         s.trim_end_matches("deg").trim().parse::<f32>().ok()
     }
+}
+
+/// Parse `oklab(L a b[ / A])` or, when `polar`, `oklch(L C H[ / A])` to RGBA.
+/// `L` is `0..1` (or a percentage); for `oklch`, `C` is chroma and `H` is an angle.
+fn parse_oklab(inner: &str, polar: bool) -> Option<Color> {
+    let parts: Vec<&str> = inner
+        .split(['/', ',', ' '])
+        .filter(|p| !p.trim().is_empty())
+        .collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let num = |s: &str| -> Option<f32> {
+        let s = s.trim();
+        if let Some(p) = s.strip_suffix('%') {
+            Some(p.trim().parse::<f32>().ok()? / 100.0)
+        } else {
+            s.parse::<f32>().ok()
+        }
+    };
+    let l = num(parts[0])?;
+    let (a, b) = if polar {
+        let c = num(parts[1])?;
+        let h = parse_hue(parts[2].trim())?.to_radians();
+        (c * h.cos(), c * h.sin())
+    } else {
+        (num(parts[1])?, num(parts[2])?)
+    };
+    let alpha = if parts.len() >= 4 {
+        parse_alpha(parts[3])?
+    } else {
+        255
+    };
+    // OKLab → linear sRGB (Björn Ottosson's matrices), then linear → gamma sRGB.
+    let l_ = l + 0.396_337_8 * a + 0.215_803_76 * b;
+    let m_ = l - 0.105_561_346 * a - 0.063_854_17 * b;
+    let s_ = l - 0.089_484_18 * a - 1.291_485_5 * b;
+    let (lc, mc, sc) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
+    let lin_r = 4.076_741_7 * lc - 3.307_711_6 * mc + 0.230_969_94 * sc;
+    let lin_g = -1.268_438 * lc + 2.609_757_4 * mc - 0.341_319_38 * sc;
+    let lin_b = -0.004_196_086 * lc - 0.703_418_6 * mc + 1.707_614_7 * sc;
+    let gamma = |c: f32| {
+        let c = c.clamp(0.0, 1.0);
+        let v = if c <= 0.0031308 {
+            12.92 * c
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        };
+        (v * 255.0).round().clamp(0.0, 255.0) as u8
+    };
+    Some(Color::rgba(gamma(lin_r), gamma(lin_g), gamma(lin_b), alpha))
 }
 
 /// Parse `hwb(H W% B%[ / A])` (hue-whiteness-blackness) to RGBA. When W+B ≥ 100%
@@ -657,6 +714,18 @@ mod tests {
         // Angle units for hue: 0.5turn and 200grad are both 180° (cyan).
         assert_eq!(parse_color("hsl(0.5turn, 100%, 50%)"), Some(Color::rgb(0, 255, 255)));
         assert_eq!(parse_color("hsl(200grad, 100%, 50%)"), Some(Color::rgb(0, 255, 255)));
+    }
+
+    #[test]
+    fn oklab_oklch_colors() {
+        // Achromatic anchors are exact: L=0 → black, L=1 → white.
+        assert_eq!(parse_color("oklab(0 0 0)"), Some(Color::rgb(0, 0, 0)));
+        assert_eq!(parse_color("oklch(0% 0 0)"), Some(Color::rgb(0, 0, 0)));
+        assert_eq!(parse_color("oklab(1 0 0)"), Some(Color::rgb(255, 255, 255)));
+        assert_eq!(parse_color("oklch(100% 0 0)"), Some(Color::rgb(255, 255, 255)));
+        // Pure sRGB red is approximately oklch(0.628 0.2577 29.23deg).
+        let red = parse_color("oklch(0.628 0.2577 29.23)").unwrap();
+        assert!(red.r > 245 && red.g < 12 && red.b < 12, "≈ red: {red:?}");
     }
 
     #[test]
