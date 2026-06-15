@@ -517,6 +517,45 @@ pub fn dump_links(url: Option<&str>) -> io::Result<String> {
     Ok(extract_links(&doc, base.as_deref()))
 }
 
+/// Headless automation: fetch a page and return its `<img>`s as
+/// `resolved-src<TAB>alt<TAB>WxH` lines (W/H from the `width`/`height` attrs, `?`
+/// if absent), in document order. Used by `--dump-images`.
+pub fn dump_images(url: Option<&str>) -> io::Result<String> {
+    log::set_role(Role::Browser);
+    let mut net = spawn_child(Role::NetService)?;
+    proto::parent_handshake(net.channel(), Size::new(800, 600))?;
+    let html = resolve_html(&net, url);
+    proto::send(net.channel(), Msg::Shutdown, &[])?;
+    net.wait()?;
+    let mut doc = argus_html::parse(&html);
+    argus_domscript::apply_scripts_with_url(&mut doc, url);
+    let base = effective_base(&doc, url);
+    Ok(extract_images(&doc, base.as_deref()))
+}
+
+/// Collect `<img>` elements as `src<TAB>alt<TAB>WxH` lines (pure, unit-testable).
+fn extract_images(doc: &argus_dom::Document, base: Option<&str>) -> String {
+    use argus_dom::{Document, NodeData, NodeId};
+    fn walk(doc: &Document, id: NodeId, base: Option<&str>, out: &mut String) {
+        if let NodeData::Element(e) = &doc.node(id).data {
+            if e.name.is_html("img") {
+                if let Some(src) = e.attr("src") {
+                    let alt = e.attr("alt").unwrap_or("");
+                    let w = e.attr("width").unwrap_or("?");
+                    let h = e.attr("height").unwrap_or("?");
+                    out.push_str(&format!("{}\t{alt}\t{w}x{h}\n", resolve_url(base, src)));
+                }
+            }
+        }
+        for c in doc.children(id) {
+            walk(doc, c, base, out);
+        }
+    }
+    let mut out = String::new();
+    walk(doc, doc.root(), base, &mut out);
+    out
+}
+
 /// The base URL for resolving the document's relative links: the first
 /// `<base href>` (resolved against the page URL), else the page URL itself.
 fn effective_base(doc: &argus_dom::Document, url: Option<&str>) -> Option<String> {
@@ -1554,8 +1593,8 @@ fn verify_uniform(fb: &Framebuffer) -> io::Result<Color> {
 #[cfg(test)]
 mod tests {
     use super::{
-        dom_node_json, effective_base, extract_forms, extract_json, extract_links, extract_meta,
-        extract_tables, page_title, render_text, resolve_url, History,
+        dom_node_json, effective_base, extract_forms, extract_images, extract_json, extract_links,
+        extract_meta, extract_tables, page_title, render_text, resolve_url, History,
     };
 
     #[test]
@@ -1664,6 +1703,20 @@ mod tests {
             out.contains("{\"text\":\"Link\",\"href\":\"https://site.example/x\"}"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn extract_images_lists_src_alt_dims() {
+        let doc = argus_html::parse(
+            "<img src=\"/a.png\" alt=\"Logo\" width=\"64\" height=\"32\">\
+             <img src=\"b.jpg\">\
+             <span>not an image</span>",
+        );
+        let out = extract_images(&doc, Some("https://site.example/dir/"));
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "https://site.example/a.png\tLogo\t64x32");
+        assert_eq!(lines[1], "https://site.example/dir/b.jpg\t\t?x?");
+        assert_eq!(lines.len(), 2, "only <img> elements: {out:?}");
     }
 
     #[test]

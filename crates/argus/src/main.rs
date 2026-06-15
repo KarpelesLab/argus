@@ -128,6 +128,17 @@ fn main() {
             }
             return;
         }
+        // `--dump-images`: print the page's images (src/alt/dimensions) and exit.
+        if has_flag("--dump-images") {
+            match argus_browser::dump_images(url.as_deref()) {
+                Ok(t) => print!("{t}"),
+                Err(err) => {
+                    eprintln!("[browser] dump-images failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         // `--dump-tables`: print the page's tables as TSV and exit.
         if has_flag("--dump-tables") {
             match argus_browser::dump_tables(url.as_deref()) {
