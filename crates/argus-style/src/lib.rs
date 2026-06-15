@@ -528,6 +528,36 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             _ => Display::Inline,
         };
     }
+    // `font` shorthand: `[style] [variant] [weight] [stretch] size[/line-height]
+    // family`. We extract the font-size (the first length-ish token), an optional
+    // `/line-height`, and a `bold`/700+ weight before it. The longhands below
+    // override, so an explicit `font-size`/`font-weight` still wins.
+    if let Some(v) = map.get("font").filter(|v| !is_system_font(v)) {
+        let toks: Vec<&str> = v.split_whitespace().collect();
+        if let Some(idx) = toks
+            .iter()
+            .position(|t| resolve_font_size(t.split('/').next().unwrap_or(t), parent.font_size).is_some())
+        {
+            let (size_part, lh_part) = match toks[idx].split_once('/') {
+                Some((s, l)) => (s, Some(l)),
+                None => (toks[idx], None),
+            };
+            if let Some(px) = resolve_font_size(size_part, parent.font_size) {
+                cs.font_size = px;
+            }
+            if let Some(lh) = lh_part {
+                if let Ok(n) = lh.parse::<f32>() {
+                    cs.line_height = n;
+                } else if let Some(l) = parse_length(lh) {
+                    let px = l.to_px(cs.font_size, 0.0);
+                    if cs.font_size > 0.0 {
+                        cs.line_height = px / cs.font_size;
+                    }
+                }
+            }
+            cs.bold = toks[..idx].iter().any(|t| is_bold(t));
+        }
+    }
     if let Some(v) = map.get("font-size") {
         if let Some(px) = resolve_font_size(v, parent.font_size) {
             cs.font_size = px;
@@ -949,6 +979,15 @@ fn is_bold(v: &str) -> bool {
     }
 }
 
+/// Whether a `font` shorthand value is a system-font keyword (which has no explicit
+/// size to extract).
+fn is_system_font(v: &str) -> bool {
+    matches!(
+        v.trim(),
+        "caption" | "icon" | "menu" | "message-box" | "small-caption" | "status-bar"
+    )
+}
+
 fn color_in(v: &str) -> Option<Color> {
     parse_color(v).or_else(|| v.split_whitespace().find_map(parse_color))
 }
@@ -1074,6 +1113,29 @@ mod tests {
         assert_eq!(cs.border, Edges::uniform(2.0));
         assert_eq!(cs.text_align, TextAlign::Center);
         assert_eq!(cs.width, Some(Length::Percent(50.0)));
+    }
+
+    #[test]
+    fn font_shorthand_extracts_size_weight_line_height() {
+        let mut doc = Document::new();
+        let d = one(&mut doc, "div", vec![]);
+        let cs = computed_style(
+            &doc,
+            d,
+            &ComputedStyle::initial(),
+            &parse_stylesheet("div { font: italic bold 20px/1.5 Helvetica, sans-serif }"),
+        );
+        assert_eq!(cs.font_size, 20.0);
+        assert!(cs.bold);
+        assert_eq!(cs.line_height, 1.5);
+        // An explicit font-size longhand overrides the shorthand.
+        let cs2 = computed_style(
+            &doc,
+            d,
+            &ComputedStyle::initial(),
+            &parse_stylesheet("div { font: 20px serif; font-size: 30px }"),
+        );
+        assert_eq!(cs2.font_size, 30.0);
     }
 
     #[test]
