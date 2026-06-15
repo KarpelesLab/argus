@@ -1159,4 +1159,49 @@ caf&eacute; &amp; tea
 |       "a"
 |     <div>
 |       "b"
+
+#data
+<textarea>
+x</textarea>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <textarea>
+|       "x"
+
+#data
+<pre>
+hi</pre>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <pre>
+|       "hi"
+
+#data
+<head><meta charset="utf-8"></head><body>y</body>
+#errors
+#document
+| <html>
+|   <head>
+|     <meta>
+|       charset="utf-8"
+|   <body>
+|     "y"
+
+#data
+<form action="/post"><input name="q"></form>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <form>
+|       action="/post"
+|       <input>
+|         name="q"
 "####;
