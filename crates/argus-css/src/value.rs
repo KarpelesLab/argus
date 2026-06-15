@@ -146,9 +146,9 @@ fn parse_hsl(inner: &str) -> Option<Color> {
     if parts.len() < 3 {
         return None;
     }
-    // Hue in degrees (wrapped to [0,360)); a bare number or a `deg` suffix.
-    let h_raw: f32 = parts[0].trim().trim_end_matches("deg").trim().parse().ok()?;
-    let h = h_raw.rem_euclid(360.0);
+    // Hue as an angle, wrapped to [0,360). Accepts a bare number (degrees) or a
+    // `deg`/`grad`/`rad`/`turn` unit.
+    let h = parse_hue(parts[0].trim())?.rem_euclid(360.0);
     let pct = |s: &str| -> Option<f32> {
         Some(s.trim().trim_end_matches('%').trim().parse::<f32>().ok()? / 100.0)
     };
@@ -173,6 +173,21 @@ fn parse_alpha(s: &str) -> Option<u8> {
         s.parse::<f32>().ok()?
     };
     Some((frac.clamp(0.0, 1.0) * 255.0).round() as u8)
+}
+
+/// Parse a CSS `<angle>` to degrees: a bare number, or a `deg`/`grad`/`rad`/`turn`
+/// unit (`1turn = 360deg`, `400grad = 360deg`, `2π rad = 360deg`).
+fn parse_hue(s: &str) -> Option<f32> {
+    let s = s.trim();
+    if let Some(n) = s.strip_suffix("turn") {
+        Some(n.trim().parse::<f32>().ok()? * 360.0)
+    } else if let Some(n) = s.strip_suffix("grad") {
+        Some(n.trim().parse::<f32>().ok()? * 0.9)
+    } else if let Some(n) = s.strip_suffix("rad") {
+        Some(n.trim().parse::<f32>().ok()?.to_degrees())
+    } else {
+        s.trim_end_matches("deg").trim().parse::<f32>().ok()
+    }
 }
 
 /// Convert HSL (`h` in degrees, `s`/`l` in `0..=1`) to 8-bit RGB.
@@ -467,6 +482,9 @@ mod tests {
             parse_color("hsl(240 100% 50% / 50%)"),
             Some(Color::rgba(0, 0, 255, 128))
         );
+        // Angle units for hue: 0.5turn and 200grad are both 180° (cyan).
+        assert_eq!(parse_color("hsl(0.5turn, 100%, 50%)"), Some(Color::rgb(0, 255, 255)));
+        assert_eq!(parse_color("hsl(200grad, 100%, 50%)"), Some(Color::rgb(0, 255, 255)));
     }
 
     #[test]
