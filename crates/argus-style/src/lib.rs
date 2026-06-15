@@ -637,6 +637,11 @@ fn presentational_hints(doc: &Document, node: NodeId) -> Vec<(String, String)> {
                     {
                         out.push(("border".into(), "1px solid #b0b0b0".into()));
                     }
+                    // `<table cellpadding=N>` sets every cell's padding.
+                    if let Some(n) = pe.attr("cellpadding").and_then(|v| v.trim().parse::<f32>().ok())
+                    {
+                        out.push(("padding".into(), format!("{n}px")));
+                    }
                     break;
                 }
             }
@@ -677,11 +682,12 @@ pub fn computed_style(
         &mut order,
     );
     // Legacy presentational attributes (`align`, `bgcolor`, …) map to CSS at the
-    // bottom of the cascade — UA rank, but ordered after UA rules — so any real
-    // author or inline rule still overrides them.
+    // very bottom of the *author* origin: they beat UA rules (e.g. `td { padding }`)
+    // but, being specificity-0 and ordered before the real author rules, lose to
+    // any author or inline declaration.
     for (name, value) in presentational_hints(doc, node) {
         cands.push(Cand {
-            rank: rank(Origin::Ua, false),
+            rank: rank(Origin::Author, false),
             spec: Specificity::default(),
             order,
             name,
@@ -2068,6 +2074,16 @@ mod tests {
         doc.append(tr0, td0);
         let cs0 = computed_style(&doc, td0, &ComputedStyle::initial(), &Stylesheet::default());
         assert_eq!(cs0.border.top, 0.0, "border=0 draws no cell border");
+
+        // <table cellpadding="10"> sets every cell's padding (over the UA 4px).
+        let tablep = doc.create_element(QualName::html("table"), vec![Attribute::new("cellpadding", "10")]);
+        doc.append(root, tablep);
+        let trp = doc.create_element(QualName::html("tr"), vec![]);
+        doc.append(tablep, trp);
+        let tdp = doc.create_element(QualName::html("td"), vec![]);
+        doc.append(trp, tdp);
+        let csp = computed_style(&doc, tdp, &ComputedStyle::initial(), &Stylesheet::default());
+        assert_eq!(csp.padding.top, 10.0, "cellpadding sets cell padding");
     }
 
     #[test]
