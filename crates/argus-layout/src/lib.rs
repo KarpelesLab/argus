@@ -1484,14 +1484,27 @@ impl Ctx<'_> {
             radius,
         });
         // Filled portion: `accent-color` if set, else blue (progress) / green (meter).
-        if frac > 0.0 {
-            let fill = istyle.accent_color.unwrap_or_else(|| {
-                if is_meter {
-                    argus_geometry::Color::rgb(0x3c, 0xb0, 0x37)
-                } else {
-                    argus_geometry::Color::rgb(0x2b, 0x6c, 0xde)
-                }
+        let fill = istyle.accent_color.unwrap_or_else(|| {
+            if is_meter {
+                argus_geometry::Color::rgb(0x3c, 0xb0, 0x37)
+            } else {
+                argus_geometry::Color::rgb(0x2b, 0x6c, 0xde)
+            }
+        });
+        let indeterminate = !is_meter && e.attr("value").is_none();
+        if indeterminate {
+            // No value → render a centered "activity" chunk (a static stand-in for
+            // the animated indeterminate bar) so it reads as in-progress, not empty.
+            let cw = w * 0.4;
+            self.rects.push(RectFill {
+                x: x + (w - cw) / 2.0,
+                y: top,
+                w: cw,
+                h,
+                color: fill,
+                radius,
             });
+        } else if frac > 0.0 {
             self.rects.push(RectFill {
                 x,
                 y: top,
@@ -4107,10 +4120,20 @@ mod tests {
             .find(|r| r.color.b > 150 && r.w < track.w * 0.5)
             .expect("fill rect");
         assert!((fill.w - track.w * 0.25).abs() < 2.0, "fill ~25% of track: {} vs {}", fill.w, track.w);
-        // An indeterminate progress (no value) draws only the track, no blue fill.
+        // An indeterminate progress (no value) draws a centered activity chunk.
         let doc2 = parse("<progress></progress>");
         let l2 = layout(&doc2, &font, 400.0, &ImageSizes::new());
-        assert!(l2.rects.iter().all(|r| !(r.color.b > 150 && r.color.r < 100)), "no fill when indeterminate");
+        let track2 = l2.rects.iter().find(|r| r.w > 100.0).expect("track rect");
+        let chunk = l2
+            .rects
+            .iter()
+            .find(|r| r.color.b > 150 && r.color.r < 100)
+            .expect("indeterminate chunk");
+        assert!((chunk.w - track2.w * 0.4).abs() < 2.0, "chunk ~40% of track");
+        // Centered: equal gap on each side.
+        let left = chunk.x - track2.x;
+        let right = (track2.x + track2.w) - (chunk.x + chunk.w);
+        assert!((left - right).abs() < 2.0, "chunk centered: {left} vs {right}");
     }
 
     #[test]
