@@ -636,6 +636,17 @@ fn a11y_tree(doc: &argus_dom::Document) -> String {
                     if !name.is_empty() {
                         out.push_str(&format!(" \"{name}\""));
                     }
+                    // Headings annotate their level (h1–h6 or `aria-level`).
+                    if role == "heading" {
+                        let level = tag
+                            .strip_prefix('h')
+                            .and_then(|n| n.parse::<u32>().ok())
+                            .filter(|n| (1..=6).contains(n))
+                            .or_else(|| e.attr("aria-level").and_then(|l| l.trim().parse().ok()));
+                        if let Some(level) = level {
+                            out.push_str(&format!(" [level={level}]"));
+                        }
+                    }
                     out.push_str(&aria_states(e));
                     out.push('\n');
                     next_depth = depth + 1;
@@ -1887,7 +1898,7 @@ mod tests {
         let tree = super::a11y_tree(&doc);
         assert!(tree.contains("navigation"), "nav role:\n{tree}");
         assert!(tree.contains("link \"Home\""), "link name:\n{tree}");
-        assert!(tree.contains("heading \"Title\""), "heading:\n{tree}");
+        assert!(tree.contains("heading \"Title\" [level=1]"), "heading w/ level:\n{tree}");
         // aria-label overrides the text content as the accessible name.
         assert!(tree.contains("button \"Close dialog\""), "aria-label:\n{tree}");
         // An explicit role attribute is honored.
