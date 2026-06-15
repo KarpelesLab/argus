@@ -1120,6 +1120,11 @@ mod tests {
             b"RIFF\0\0\0\0WEBPVP8L",     // WebP
             b"qoif",                     // QOI
             &[0x00, 0x00, 0x01, 0x00],   // ICO
+            b"P6\n",                     // Netpbm
+            b"P3 ",                      // Netpbm ASCII
+            &[0x0A, 0x05, 0x01, 0x08],   // PCX
+            b"II\x2A\x00",               // TIFF little-endian
+            b"MM\x00\x2A",               // TIFF big-endian
         ];
         let mut seed = 0x9E3779B97F4A7C15u64;
         let mut byte = || {
