@@ -214,12 +214,31 @@ fn fallback_font_bytes() -> Vec<Vec<u8>> {
     out
 }
 
-/// Send the primary system font then any available glyph-fallback fonts.
+/// A fixed-width system font for `font-family: monospace` and `<code>`/`<pre>`.
+fn monospace_font_bytes() -> Option<Vec<u8>> {
+    for path in [
+        "/System/Library/Fonts/Menlo.ttc",
+        "/System/Library/Fonts/Monaco.ttf",
+        "/System/Library/Fonts/SFNSMono.ttf",
+        "/System/Library/Fonts/Courier New.ttf",
+        "/System/Library/Fonts/Supplemental/Courier New.ttf",
+    ] {
+        if let Ok(bytes) = std::fs::read(path) {
+            return Some(bytes);
+        }
+    }
+    None
+}
+
+/// Send the primary system font, glyph-fallback fonts, then a monospace face.
 fn provide_fonts(content: &Child) -> io::Result<()> {
     if let Some(bytes) = system_font_bytes() {
         proto::send(content.channel(), Msg::ProvideFont { bytes }, &[])?;
         for bytes in fallback_font_bytes() {
             proto::send(content.channel(), Msg::ProvideFont { bytes }, &[])?;
+        }
+        if let Some(bytes) = monospace_font_bytes() {
+            proto::send(content.channel(), Msg::ProvideMonoFont { bytes }, &[])?;
         }
     }
     Ok(())

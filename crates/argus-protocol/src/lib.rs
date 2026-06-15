@@ -108,6 +108,9 @@ pub enum Msg {
     /// browser → content: font file bytes for text rendering (the sandboxed content
     /// process cannot read fonts from disk itself).
     ProvideFont { bytes: Vec<u8> },
+    /// browser → content: a monospace font face (for `font-family: monospace` and
+    /// `<code>`/`<pre>`), sent after the primary/fallback fonts.
+    ProvideMonoFont { bytes: Vec<u8> },
     /// browser → content: the HTML document to render.
     LoadDocument { html: String },
     /// browser → net service: fetch this URL.
@@ -161,6 +164,7 @@ const TAG_RESOURCE_DATA: u8 = 12;
 const TAG_CLICK_RESULT: u8 = 13;
 const TAG_SET_SCROLL: u8 = 14;
 const TAG_INPUT_KEY: u8 = 15;
+const TAG_PROVIDE_MONO_FONT: u8 = 16;
 
 impl Msg {
     /// Number of file descriptors that accompany this message out-of-band.
@@ -200,6 +204,10 @@ impl Msg {
             }
             Msg::ProvideFont { bytes } => {
                 buf.push(TAG_PROVIDE_FONT);
+                put_bytes(&mut buf, bytes);
+            }
+            Msg::ProvideMonoFont { bytes } => {
+                buf.push(TAG_PROVIDE_MONO_FONT);
                 put_bytes(&mut buf, bytes);
             }
             Msg::LoadDocument { html } => {
@@ -260,6 +268,9 @@ impl Msg {
                 y: c.u32()?,
             },
             TAG_PROVIDE_FONT => Msg::ProvideFont {
+                bytes: c.bytes()?.to_vec(),
+            },
+            TAG_PROVIDE_MONO_FONT => Msg::ProvideMonoFont {
                 bytes: c.bytes()?.to_vec(),
             },
             TAG_LOAD_DOCUMENT => Msg::LoadDocument {
@@ -368,6 +379,9 @@ mod tests {
         round_trip(Msg::InputClick { x: 12, y: 345 });
         round_trip(Msg::ProvideFont {
             bytes: vec![0, 1, 2, 250, 255],
+        });
+        round_trip(Msg::ProvideMonoFont {
+            bytes: vec![9, 8, 7, 0, 255],
         });
         round_trip(Msg::LoadDocument {
             html: "<p>hi & bye</p>".to_string(),

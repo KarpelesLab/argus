@@ -36,9 +36,12 @@ fn recolor(node: &mut Node, paint: &Paint) {
     }
 }
 
-/// A loaded font face ready to shape and render text.
+/// A loaded font face ready to shape and render text. Holds the primary
+/// (proportional) face chain and, optionally, a separate monospace chain used for
+/// `font-family: monospace` and `<code>`/`<pre>`-style content.
 pub struct Font {
     chain: FaceChain,
+    mono_chain: Option<FaceChain>,
 }
 
 impl Font {
@@ -49,6 +52,7 @@ impl Font {
             .map_err(|e| format!("failed to parse font: {e:?}"))?;
         Ok(Font {
             chain: FaceChain::new(face),
+            mono_chain: None,
         })
     }
 
@@ -59,8 +63,31 @@ impl Font {
         match Face::from_ttf_bytes(bytes.clone()).or_else(|_| Face::from_otf_bytes(bytes)) {
             Ok(face) => Font {
                 chain: self.chain.push_fallback(face),
+                mono_chain: self.mono_chain,
             },
             Err(_) => self,
+        }
+    }
+
+    /// Return this font with a monospace face (from TTF/OTF bytes) used to shape
+    /// monospace runs. On a parse failure the font is returned unchanged (monospace
+    /// runs then fall back to the primary face).
+    pub fn with_monospace(self, bytes: Vec<u8>) -> Font {
+        match Face::from_ttf_bytes(bytes.clone()).or_else(|_| Face::from_otf_bytes(bytes)) {
+            Ok(face) => Font {
+                mono_chain: Some(FaceChain::new(face)),
+                ..self
+            },
+            Err(_) => self,
+        }
+    }
+
+    /// The face chain to shape with: the monospace chain when `mono` and one is
+    /// loaded, else the primary chain.
+    fn chain_for(&self, mono: bool) -> &FaceChain {
+        match (mono, &self.mono_chain) {
+            (true, Some(c)) => c,
+            _ => &self.chain,
         }
     }
 
@@ -76,7 +103,13 @@ impl Font {
 
     /// Advance width of `text` at `size_px`, in pixels (sum of glyph advances).
     pub fn measure(&self, text: &str, size_px: f32) -> f32 {
-        match self.chain.shape(text, size_px) {
+        self.measure_in(text, size_px, false)
+    }
+
+    /// Like [`measure`](Self::measure), shaping with the monospace face when
+    /// `mono` is set and a monospace face is loaded.
+    pub fn measure_in(&self, text: &str, size_px: f32, mono: bool) -> f32 {
+        match self.chain_for(mono).shape(text, size_px) {
             Ok(glyphs) => glyphs.iter().map(|g| g.x_advance).sum(),
             Err(_) => 0.0,
         }
@@ -100,6 +133,8 @@ pub struct TextRun {
     pub shadow: Option<(f32, f32, Color)>,
     /// `letter-spacing`: extra pixels inserted after each glyph (0 = none).
     pub letter_spacing: f32,
+    /// Shape with the monospace face (`font-family: monospace`, `<code>`/`<pre>`).
+    pub monospace: bool,
 }
 
 /// A filled rectangle in canvas pixels (e.g. an element background), optionally
@@ -212,7 +247,7 @@ pub fn render_text(
     height: u32,
     _color: Color,
 ) -> Canvas {
-    let root = build_run(font, text, size_px, origin_x, baseline_y, 0.0);
+    let root = build_run(font, text, size_px, origin_x, baseline_y, 0.0, false);
     let video = render_run(root, width, height);
     let pixels = video
         .planes
@@ -356,6 +391,7 @@ fn push_run_nodes(font: &Font, run: &TextRun, out: &mut Vec<Node>) {
             run.x + dx,
             run.baseline + dy,
             run.letter_spacing,
+            run.monospace,
         );
         if run.italic {
             sgroup.transform = sgroup.transform.compose(&Transform2D::skew_x(-0.21));
@@ -375,6 +411,7 @@ fn push_run_nodes(font: &Font, run: &TextRun, out: &mut Vec<Node>) {
             run.x + dx,
             run.baseline,
             run.letter_spacing,
+            run.monospace,
         );
         // Faux-italic: shear the run's baseline-local space so glyph tops lean right.
         if run.italic {
@@ -390,6 +427,7 @@ fn push_run_nodes(font: &Font, run: &TextRun, out: &mut Vec<Node>) {
 /// Build the placed-glyph run group for `text` (baseline at `origin_x`,
 /// `baseline_y`). `letter_spacing` shifts each glyph right by its index times the
 /// spacing. Shared by [`render_text`] and diagnostics.
+#[allow(clippy::too_many_arguments)]
 fn build_run(
     font: &Font,
     text: &str,
@@ -397,8 +435,9 @@ fn build_run(
     origin_x: f32,
     baseline_y: f32,
     letter_spacing: f32,
+    monospace: bool,
 ) -> Group {
-    let placed = Shaper::shape_to_paths(&font.chain, text, size_px);
+    let placed = Shaper::shape_to_paths(font.chain_for(monospace), text, size_px);
     let children: Vec<Node> = placed
         .into_iter()
         .enumerate()
@@ -466,7 +505,7 @@ mod tests {
         };
         // Each glyph i is shifted right by i*spacing relative to no spacing.
         let xs = |ls: f32| -> Vec<f32> {
-            let g = build_run(&font, "abc", 16.0, 0.0, 0.0, ls);
+            let g = build_run(&font, "abc", 16.0, 0.0, 0.0, ls, false);
             g.children
                 .iter()
                 .map(|c| match c {

@@ -62,6 +62,18 @@ pub fn run(channel: Channel) -> io::Result<()> {
                     },
                 }
             }
+            Msg::ProvideMonoFont { bytes } => {
+                let n = bytes.len();
+                // Attach the monospace face to the primary font (used to shape
+                // monospace runs); ignored if the primary hasn't arrived yet.
+                match content.font.take() {
+                    Some(font) => {
+                        content.font = Some(font.with_monospace(bytes));
+                        log!("added monospace font ({n} bytes)");
+                    }
+                    None => log!("WARNING: monospace font arrived before primary"),
+                }
+            }
             Msg::LoadDocument { html } => {
                 log!("loaded document ({} bytes)", html.len());
                 // Parse once, run the page's scripts against a JS-side DOM shim, and
