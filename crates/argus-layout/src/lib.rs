@@ -3902,6 +3902,23 @@ mod tests {
     }
 
     #[test]
+    fn dialog_and_template_visibility() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let has_text = |html: &str, t: &str| -> bool {
+            let doc = parse(html);
+            let l = layout(&doc, &font, 300.0, &ImageSizes::new());
+            l.runs.iter().any(|r| r.text == t)
+        };
+        // A closed <dialog> and a <template> are hidden; an open dialog shows.
+        assert!(!has_text("<dialog>secret</dialog>", "secret"), "closed dialog hidden");
+        assert!(has_text("<dialog open>shown</dialog>", "shown"), "open dialog shown");
+        assert!(!has_text("<template>tmpl</template>", "tmpl"), "template hidden");
+    }
+
+    #[test]
     fn list_style_position_inside_marker_is_inline() {
         let Some(font) = system_font() else {
             eprintln!("no system font; skipping");

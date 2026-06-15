@@ -446,7 +446,9 @@ main, aside, figure, blockquote, ul, ol, li, dl, dt, dd, pre, table, form, hr, a
 details, summary \
 { display: block }
 summary { font-weight: bold }
-head, title, style, script, meta, link, base, noscript { display: none }
+head, title, style, script, meta, link, base, noscript, template { display: none }
+dialog:not([open]) { display: none }
+datalist { display: none }
 h1 { font-size: 2em; font-weight: bold; margin: 0.67em 0 }
 h2 { font-size: 1.5em; font-weight: bold; margin: 0.83em 0 }
 h3 { font-size: 1.17em; font-weight: bold; margin: 1em 0 }
