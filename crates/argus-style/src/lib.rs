@@ -616,6 +616,33 @@ fn presentational_hints(doc: &Document, node: NodeId) -> Vec<(String, String)> {
             out.push(("color".into(), c));
         }
     }
+    // `<table border=N>` (N>0) draws an N-px table border and a 1px border on
+    // every cell; `border=0` (and no attr) draws nothing.
+    if tag == "table" {
+        if let Some(n) = e.attr("border").and_then(|v| v.trim().parse::<f32>().ok()) {
+            if n > 0.0 {
+                out.push(("border".into(), format!("{n}px solid #808080")));
+            }
+        }
+    }
+    if matches!(tag, "td" | "th") {
+        let mut p = doc.node(node).parent();
+        while let Some(pid) = p {
+            if let Some(pe) = doc.node(pid).as_element() {
+                if pe.name.is_html("table") {
+                    if pe
+                        .attr("border")
+                        .and_then(|v| v.trim().parse::<f32>().ok())
+                        .is_some_and(|n| n > 0.0)
+                    {
+                        out.push(("border".into(), "1px solid #b0b0b0".into()));
+                    }
+                    break;
+                }
+            }
+            p = doc.node(pid).parent();
+        }
+    }
     // `width`/`height` attributes on tables and cells map to CSS lengths (a bare
     // number is px; a trailing `%` a percentage). Images are sized in layout.
     if matches!(tag, "table" | "td" | "th" | "col" | "colgroup") {
@@ -2017,6 +2044,30 @@ mod tests {
         let img = one(&mut doc, "img", vec![Attribute::new("align", "right")]);
         let cs3 = computed_style(&doc, img, &ComputedStyle::initial(), &Stylesheet::default());
         assert_eq!(cs3.float, Float::Right);
+    }
+
+    #[test]
+    fn table_border_attr_borders_cells() {
+        // <table border="1"><tr><td>…: the cell gets a 1px border; border="0" none.
+        let mut doc = Document::new();
+        let root = doc.root();
+        let table = doc.create_element(QualName::html("table"), vec![Attribute::new("border", "1")]);
+        doc.append(root, table);
+        let tr = doc.create_element(QualName::html("tr"), vec![]);
+        doc.append(table, tr);
+        let td = doc.create_element(QualName::html("td"), vec![]);
+        doc.append(tr, td);
+        let cs = computed_style(&doc, td, &ComputedStyle::initial(), &Stylesheet::default());
+        assert!(cs.border.top > 0.0, "cell inherits a border from table[border=1]");
+
+        let table0 = doc.create_element(QualName::html("table"), vec![Attribute::new("border", "0")]);
+        doc.append(root, table0);
+        let tr0 = doc.create_element(QualName::html("tr"), vec![]);
+        doc.append(table0, tr0);
+        let td0 = doc.create_element(QualName::html("td"), vec![]);
+        doc.append(tr0, td0);
+        let cs0 = computed_style(&doc, td0, &ComputedStyle::initial(), &Stylesheet::default());
+        assert_eq!(cs0.border.top, 0.0, "border=0 draws no cell border");
     }
 
     #[test]
