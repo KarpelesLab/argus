@@ -418,14 +418,23 @@ pub struct Interaction {
 /// Returns the console output (minus the internal ops line) for logging.
 pub fn apply_scripts(doc: &mut Document) -> Option<String> {
     let mut storage = std::collections::HashMap::new();
-    run_scripts(doc, &[], &mut storage)
+    run_scripts(doc, &[], &mut storage, &[])
 }
 
 /// Like [`apply_scripts`], but also replays `events` (deterministic event replay)
 /// with a throwaway storage (no cross-call persistence).
 pub fn apply_scripts_with_events(doc: &mut Document, events: &[Interaction]) -> Option<String> {
     let mut storage = std::collections::HashMap::new();
-    run_scripts(doc, events, &mut storage)
+    run_scripts(doc, events, &mut storage, &[])
+}
+
+/// Like [`apply_scripts`], but also honors **header-delivered** Content-Security-
+/// Policy strings (one per `Content-Security-Policy` response header) in addition to
+/// any `<meta>` policies. A resource must satisfy every policy, so inline scripts are
+/// blocked if *any* meta or header policy forbids them.
+pub fn apply_scripts_with_csp(doc: &mut Document, header_csp: &[String]) -> Option<String> {
+    let mut storage = std::collections::HashMap::new();
+    run_scripts(doc, &[], &mut storage, header_csp)
 }
 
 /// The full session entry point: run scripts, replay `events`, and persist
@@ -436,16 +445,18 @@ pub fn apply_scripts_session(
     events: &[Interaction],
     storage: &mut std::collections::HashMap<String, String>,
 ) -> Option<String> {
-    run_scripts(doc, events, storage)
+    run_scripts(doc, events, storage, &[])
 }
 
 fn run_scripts(
     doc: &mut Document,
     events: &[Interaction],
     storage: &mut std::collections::HashMap<String, String>,
+    header_csp: &[String],
 ) -> Option<String> {
-    // A Content-Security-Policy meta can forbid inline scripts; honor it.
-    if csp_blocks_inline_scripts(doc) {
+    // Content-Security-Policy (from <meta> and/or response headers) can forbid
+    // inline scripts; a resource must satisfy every policy.
+    if csp_blocks_inline_scripts(doc, header_csp) {
         return Some("[CSP] blocked inline scripts\n".to_string());
     }
     let scripts = collect_scripts(doc);
@@ -522,45 +533,50 @@ fn storage_json(storage: &std::collections::HashMap<String, String>) -> String {
     format!("{{{}}}", entries.join(","))
 }
 
-/// Whether a `<meta http-equiv="Content-Security-Policy">` forbids inline scripts.
-/// Inline scripts are blocked when the effective directive (`script-src`, else
-/// `default-src`) is present and lacks `'unsafe-inline'` (and isn't `*`).
-fn csp_blocks_inline_scripts(doc: &Document) -> bool {
-    let Some(policy) = find_csp(doc) else {
-        return false;
-    };
-    let directive =
-        csp_directive(&policy, "script-src").or_else(|| csp_directive(&policy, "default-src"));
-    match directive {
+/// Whether Content-Security-Policy forbids inline scripts. Considers every policy —
+/// each `<meta http-equiv>` plus each header-delivered string — and blocks if **any**
+/// of them does (a resource must satisfy all policies).
+fn csp_blocks_inline_scripts(doc: &Document, header_csp: &[String]) -> bool {
+    let meta_blocks = collect_meta_csp(doc)
+        .iter()
+        .any(|p| policy_blocks_inline_scripts(p));
+    let header_blocks = header_csp
+        .iter()
+        .any(|p| policy_blocks_inline_scripts(&p.to_ascii_lowercase()));
+    meta_blocks || header_blocks
+}
+
+/// Whether one CSP policy forbids inline scripts: its effective directive
+/// (`script-src`, else `default-src`) is present and lacks `'unsafe-inline'`/`*`.
+fn policy_blocks_inline_scripts(policy: &str) -> bool {
+    match csp_directive(policy, "script-src").or_else(|| csp_directive(policy, "default-src")) {
         None => false, // no script-src/default-src → scripts aren't restricted
-        Some(tokens) => {
-            let allows = tokens
-                .split_whitespace()
-                .any(|t| t == "'unsafe-inline'" || t == "*");
-            !allows
-        }
+        Some(tokens) => !tokens
+            .split_whitespace()
+            .any(|t| t == "'unsafe-inline'" || t == "*"),
     }
 }
 
-/// The CSP policy string from a `<meta http-equiv>` tag, if present.
-fn find_csp(doc: &Document) -> Option<String> {
-    fn walk(doc: &Document, id: NodeId) -> Option<String> {
+/// Every `<meta http-equiv="Content-Security-Policy">` policy string (lowercased).
+fn collect_meta_csp(doc: &Document) -> Vec<String> {
+    fn walk(doc: &Document, id: NodeId, out: &mut Vec<String>) {
         if let NodeData::Element(e) = &doc.node(id).data {
             if e.name.is_html("meta")
                 && e.attr("http-equiv")
                     .is_some_and(|v| v.eq_ignore_ascii_case("content-security-policy"))
             {
-                return e.attr("content").map(|s| s.to_ascii_lowercase());
+                if let Some(c) = e.attr("content") {
+                    out.push(c.to_ascii_lowercase());
+                }
             }
         }
         for c in doc.children(id) {
-            if let Some(p) = walk(doc, c) {
-                return Some(p);
-            }
+            walk(doc, c, out);
         }
-        None
     }
-    walk(doc, doc.root())
+    let mut out = Vec::new();
+    walk(doc, doc.root(), &mut out);
+    out
 }
 
 /// Extract a named directive's value (the tokens after the name) from a policy.
@@ -1758,6 +1774,42 @@ mod tests {
                 "script should run for: {policy:?}"
             );
         }
+    }
+
+    #[test]
+    fn csp_header_blocks_inline_scripts() {
+        // A header-delivered policy (no meta) blocks the inline script.
+        let html = "<div id=\"o\">before</div>\
+             <script>document.getElementById('o').textContent = 'after';</script>";
+        let mut doc = argus_html::parse(html);
+        apply_scripts_with_csp(&mut doc, &["script-src 'self'".to_string()]);
+        assert_eq!(text_of(&doc, "o"), "before", "header CSP should block");
+
+        // A permissive header policy lets it run.
+        let mut doc = argus_html::parse(html);
+        apply_scripts_with_csp(&mut doc, &["script-src 'unsafe-inline'".to_string()]);
+        assert_eq!(text_of(&doc, "o"), "after", "permissive header CSP allows");
+    }
+
+    #[test]
+    fn csp_all_policies_must_allow() {
+        // A resource must satisfy EVERY policy: a permissive meta plus a restrictive
+        // header → still blocked (the strictest wins).
+        let html = "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'unsafe-inline'\">\
+             <div id=\"o\">before</div>\
+             <script>document.getElementById('o').textContent = 'after';</script>";
+        let mut doc = argus_html::parse(html);
+        apply_scripts_with_csp(&mut doc, &["script-src 'self'".to_string()]);
+        assert_eq!(text_of(&doc, "o"), "before", "the strictest of all policies applies");
+
+        // Two metas, the second restrictive → blocked even though the first allows.
+        let html2 = "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'unsafe-inline'\">\
+             <meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'self'\">\
+             <div id=\"o\">before</div>\
+             <script>document.getElementById('o').textContent = 'after';</script>";
+        let mut doc2 = argus_html::parse(html2);
+        apply_scripts(&mut doc2);
+        assert_eq!(text_of(&doc2, "o"), "before", "a second restrictive meta blocks");
     }
 
     #[test]
