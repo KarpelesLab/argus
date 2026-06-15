@@ -25,7 +25,9 @@
 //! selectors) / `createElement` / `body` / `write`, and on elements
 //! `textContent`/`innerText`,
 //! `innerHTML`, `className`, `setAttribute`/`getAttribute`, `style.<camelCase>`,
-//! `classList`, scoped `querySelector`, and `appendChild`/`append`/`remove`.
+//! `classList`, scoped `querySelector`/`querySelectorAll`, tree traversal
+//! (`parentNode`/`parentElement`, `children`, `first`/`lastElementChild`,
+//! `next`/`previousElementSibling`), and `appendChild`/`append`/`remove`.
 
 use argus_dom::{Attribute, Document, NodeData, NodeId, QualName};
 
@@ -243,6 +245,38 @@ function __argus_el(tgt) {
       }
       if (k === "getElementsByClassName") {
         return function(c) { return __collectClass("" + c, __idxOf(tgt)); };
+      }
+      // --- Read-only tree traversal (resolved against the seeded __tree) ---
+      if (k === "parentNode" || k === "parentElement") {
+        var pn = __byIdx[__idxOf(tgt)];
+        return (pn && pn.p >= 0) ? __argus_el({kind: "idx", val: pn.p}) : null;
+      }
+      if (k === "children") {
+        var cix = __idxOf(tgt); var kids = [];
+        for (var ci = 0; ci < __tree.length; ci++) {
+          if (__tree[ci].p === cix) kids.push(__argus_el({kind: "idx", val: __tree[ci].i}));
+        }
+        return kids;
+      }
+      if (k === "firstElementChild" || k === "lastElementChild") {
+        var fix = __idxOf(tgt); var found = null;
+        for (var fi = 0; fi < __tree.length; fi++) {
+          if (__tree[fi].p === fix) { found = __tree[fi]; if (k === "firstElementChild") break; }
+        }
+        return found ? __argus_el({kind: "idx", val: found.i}) : null;
+      }
+      if (k === "nextElementSibling" || k === "previousElementSibling") {
+        var six = __idxOf(tgt); var sn = __byIdx[six];
+        if (!sn) return null;
+        var sibs = [];
+        for (var si = 0; si < __tree.length; si++) { if (__tree[si].p === sn.p) sibs.push(__tree[si]); }
+        for (var sj = 0; sj < sibs.length; sj++) {
+          if (sibs[sj].i === six) {
+            var nb = (k === "nextElementSibling") ? sibs[sj + 1] : sibs[sj - 1];
+            return nb ? __argus_el({kind: "idx", val: nb.i}) : null;
+          }
+        }
+        return null;
       }
       var r = __read(tgt, seed, k);
       return r == null ? "" : r;
@@ -1595,6 +1629,29 @@ mod tests {
         assert_eq!(text_of(&doc, "in1"), "Q");
         assert_eq!(text_of(&doc, "in2"), "Q");
         assert_eq!(text_of(&doc, "out"), "z"); // outside #box, untouched
+    }
+
+    #[test]
+    fn tree_traversal_parent_children_siblings() {
+        // parentElement, children, and nextElementSibling resolve against the seeded
+        // tree; each resolved handle can then be mutated.
+        let mut doc = argus_html::parse(
+            "<ul id=\"list\">\
+               <li id=\"x\">x</li><li id=\"y\">y</li><li id=\"z\">z</li>\
+             </ul>\
+             <script>\
+               // Mark the parent of #y.
+               document.getElementById('y').parentElement.setAttribute('data-role', 'parent');\
+               // Count children of the list and tag the next sibling of #x.
+               var n = document.getElementById('list').children.length;\
+               document.getElementById('list').setAttribute('data-count', '' + n);\
+               document.getElementById('x').nextElementSibling.textContent = 'after-x';\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        assert_eq!(attr_of(&doc, "list", "data-role").as_deref(), Some("parent"));
+        assert_eq!(attr_of(&doc, "list", "data-count").as_deref(), Some("3"));
+        assert_eq!(text_of(&doc, "y"), "after-x"); // #y is #x's next sibling
     }
 
     #[test]
