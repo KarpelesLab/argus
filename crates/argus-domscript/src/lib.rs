@@ -508,6 +508,26 @@ function MutationObserver(cb) {
 }
 window.MutationObserver = MutationObserver;
 
+// `history`: pushState/replaceState update `location` (no real navigation); the
+// nav methods are no-ops. Enough for SPA routers that read location after pushing.
+function __historyUpdate(url) {
+  if (url == null) return;
+  url = "" + url;
+  var hash = "", search = "";
+  var hi = url.indexOf("#"); if (hi >= 0) { hash = url.substring(hi); url = url.substring(0, hi); }
+  var qi = url.indexOf("?"); if (qi >= 0) { search = url.substring(qi); url = url.substring(0, qi); }
+  if (url.length > 0 && url.charAt(0) === "/") location.pathname = url;
+  location.search = search;
+  location.hash = hash;
+  location.href = location.origin + location.pathname + location.search + location.hash;
+}
+var history = window.history = {
+  length: 1, state: null, scrollRestoration: "auto",
+  pushState: function(s, t, url) { history.state = s; __historyUpdate(url); },
+  replaceState: function(s, t, url) { history.state = s; __historyUpdate(url); },
+  back: function() {}, forward: function() {}, go: function() {}
+};
+
 // Timers: there is no wall clock in the synchronous reconciliation model, so
 // scheduled callbacks are queued and drained (earliest delay first) after the
 // script + event dispatches run. This makes deferred-init patterns work; it does
@@ -2185,6 +2205,21 @@ mod tests {
             .collect();
         assert_eq!(kids, vec!["ab", "be"], "afterbegin first, beforeend last");
         assert_eq!(text_of(&doc, "t"), "ABmidBE");
+    }
+
+
+    #[test]
+    fn history_pushstate_updates_location() {
+        let mut doc = argus_html::parse(
+            "<div id=\"o\"></div>\
+             <script>\
+               history.pushState({a:1}, '', '/new/path?x=2#frag');\
+               document.getElementById('o').textContent =\
+                 location.pathname + '|' + location.search + '|' + location.hash + '|' + history.state.a;\
+             </script>",
+        );
+        apply_scripts_with_url(&mut doc, Some("https://ex.com/old"));
+        assert_eq!(text_of(&doc, "o"), "/new/path|?x=2|#frag|1");
     }
 
     #[test]
