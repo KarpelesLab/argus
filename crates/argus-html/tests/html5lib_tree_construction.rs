@@ -1352,4 +1352,53 @@ hi</pre>
 |   <body>
 |     <button>
 |       "click"
+
+#data
+<table><tbody><tr><td>1</td></tr></tbody></table>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <table>
+|       <tbody>
+|         <tr>
+|           <td>
+|             "1"
+
+#data
+<h1>Heading</h1><h2>Sub</h2>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <h1>
+|       "Heading"
+|     <h2>
+|       "Sub"
+
+#data
+<p>a <span>b</span> c</p>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <p>
+|       "a "
+|       <span>
+|         "b"
+|       " c"
+
+#data
+<img src="x" alt="y">
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <img>
+|       alt="y"
+|       src="x"
 "####;
