@@ -488,6 +488,7 @@ input, textarea, select { display: block; border: 1px solid #999; background: #f
 button { display: block; border: 1px solid #888; background: #e8e8e8; padding: 4px 12px; \
   width: 120px; text-align: center; margin: 4px 0; border-radius: 4px }
 option { display: none }
+input[type=hidden] { display: none }
 input[type=checkbox], input[type=radio] { width: 14px; height: 14px; padding: 0; margin: 4px 6px 4px 0 }
 input[type=radio] { border-radius: 8px }
 input:disabled, textarea:disabled, select:disabled, button:disabled \
@@ -1911,6 +1912,17 @@ mod tests {
         assert!(cs.bold);
         assert_eq!(cs.font_size, 32.0);
         assert!(cs.margin.top > 0.0);
+    }
+
+    #[test]
+    fn hidden_input_is_display_none() {
+        let mut doc = Document::new();
+        let hidden = one(&mut doc, "input", vec![Attribute::new("type", "hidden")]);
+        let text = one(&mut doc, "input", vec![Attribute::new("type", "text")]);
+        let cs_hidden = computed_style(&doc, hidden, &ComputedStyle::initial(), &Stylesheet::default());
+        let cs_text = computed_style(&doc, text, &ComputedStyle::initial(), &Stylesheet::default());
+        assert_eq!(cs_hidden.display, Display::None, "type=hidden is not rendered");
+        assert_eq!(cs_text.display, Display::Block, "type=text still renders");
     }
 
     #[test]
