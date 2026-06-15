@@ -93,6 +93,16 @@ function __argus_el(tgt) {
       if (k === "getAttribute") {
         return function(name) { var r = __read(tgt, seed, "" + name); return r == null ? null : r; };
       }
+      if (k === "removeAttribute") {
+        return function(name) {
+          var sk = __sk(tgt);
+          if (__argus_state[sk]) __argus_state[sk]["" + name] = null;
+          __argus_ops.push({op: "removeattr", tgt: tgt, key: "" + name});
+        };
+      }
+      if (k === "hasAttribute") {
+        return function(name) { return __read(tgt, seed, "" + name) != null; };
+      }
       if (k === "appendChild" || k === "append") {
         return function(child) {
           __argus_ops.push({op: "append", tgt: tgt, child: child ? child.__tgt : null});
@@ -444,6 +454,7 @@ fn apply_ops(
             "prop" => apply_prop(doc, node, &key, &value),
             "style" => merge_style(doc, node, &key, &value),
             "attr" => set_attribute(doc, node, &key, &value),
+            "removeattr" => remove_attribute(doc, node, &key),
             "class" => apply_class_list(doc, node, &key, &value),
             "remove" => doc.detach(node),
             "append" => {
@@ -640,6 +651,13 @@ fn apply_class_list(doc: &mut Document, node: NodeId, action: &str, class: &str)
         classes.retain(|c| *c != class);
     }
     set_attribute(doc, node, "class", &classes.join(" "));
+}
+
+/// Remove an attribute from an element.
+fn remove_attribute(doc: &mut Document, node: NodeId, name: &str) {
+    if let NodeData::Element(e) = doc.data_mut(node) {
+        e.attrs.retain(|a| &*a.name != name);
+    }
 }
 
 /// Set or replace an attribute on an element.
@@ -1218,6 +1236,22 @@ mod tests {
         );
         apply_scripts(&mut doc);
         assert_eq!(attr_of(&doc, "f", "value").as_deref(), Some("typed text"));
+    }
+
+    #[test]
+    fn remove_attribute_works() {
+        // A script can toggle a boolean attribute (e.g. open a <details>).
+        let mut doc = argus_html::parse(
+            "<details id=\"d\"><summary>S</summary>body</details>\
+             <button id=\"b\" disabled>x</button>\
+             <script>\
+               document.getElementById('d').setAttribute('open', '');\
+               document.getElementById('b').removeAttribute('disabled');\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        assert!(attr_of(&doc, "d", "open").is_some(), "details opened");
+        assert!(attr_of(&doc, "b", "disabled").is_none(), "button enabled");
     }
 
     #[test]
