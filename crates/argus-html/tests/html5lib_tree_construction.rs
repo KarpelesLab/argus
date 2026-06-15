@@ -1586,4 +1586,80 @@ hi</pre>
 |       "1"
 |     <a>
 |       "2"
+
+#data
+<div><span>x</span></div>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <div>
+|       <span>
+|         "x"
+
+#data
+<ul><li>a<li>b</ul>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <ul>
+|       <li>
+|         "a"
+|       <li>
+|         "b"
+
+#data
+<h1>hi</h1><h2>bye</h2>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <h1>
+|       "hi"
+|     <h2>
+|       "bye"
+
+#data
+<p>x<br>y
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <p>
+|       "x"
+|       <br>
+|       "y"
+
+#data
+<select><option>a<option>b</select>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <select>
+|       <option>
+|         "a"
+|       <option>
+|         "b"
+
+#data
+<dl><dt>a<dd>b<dt>c</dl>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <dl>
+|       <dt>
+|         "a"
+|       <dd>
+|         "b"
+|       <dt>
+|         "c"
 "####;
