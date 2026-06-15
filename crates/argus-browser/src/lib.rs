@@ -503,6 +503,20 @@ fn a11y_tree(doc: &argus_dom::Document) -> String {
         }
     }
 
+    /// The text of the first child element named `child_tag` (e.g. a `<figure>`'s
+    /// `<figcaption>`, a `<fieldset>`'s `<legend>`, a `<table>`'s `<caption>`).
+    fn child_name(doc: &Document, id: NodeId, child_tag: &str) -> Option<String> {
+        for c in doc.children(id) {
+            if matches!(&doc.node(c).data, NodeData::Element(e) if e.name.is_html(child_tag)) {
+                let mut s = String::new();
+                text_of(doc, c, &mut s);
+                let s = clean(&s);
+                return (!s.is_empty()).then_some(s);
+            }
+        }
+        None
+    }
+
     /// The text content of the element with `id` (for `aria-labelledby`).
     fn id_text(doc: &Document, node: NodeId, id: &str) -> Option<String> {
         if doc.node(node).as_element().and_then(|e| e.attr("id")) == Some(id) {
@@ -595,6 +609,15 @@ fn a11y_tree(doc: &argus_dom::Document) -> String {
                     } else if matches!(tag, "input" | "select" | "textarea") {
                         // Form controls take their name from an associated <label>.
                         label_name(doc, id).unwrap_or_default()
+                    } else if let Some(cap) = match tag {
+                        // These containers are named by a specific caption child, not
+                        // by all of their descendant text.
+                        "fieldset" => Some("legend"),
+                        "figure" => Some("figcaption"),
+                        "table" => Some("caption"),
+                        _ => None,
+                    } {
+                        child_name(doc, id, cap).unwrap_or_default()
                     } else {
                         let mut s = String::new();
                         text_of(doc, id, &mut s);
@@ -1919,6 +1942,14 @@ mod tests {
              <button aria-labelledby=\"a b\">x</button>",
         ));
         assert!(t4.contains("button \"Save changes\""), "labelledby joins refs:\n{t4}");
+
+        // Containers are named by their caption child, not all descendant text.
+        let t5 = super::a11y_tree(&argus_html::parse(
+            "<figure><img src=\"x\" alt=\"\"><figcaption>A cat</figcaption></figure>\
+             <fieldset><legend>Address</legend><input></fieldset>",
+        ));
+        assert!(t5.contains("figure \"A cat\""), "figure named by figcaption:\n{t5}");
+        assert!(t5.contains("group \"Address\""), "fieldset named by legend:\n{t5}");
         assert!(tree.contains("spinbutton \"Qty\""), "number→spinbutton:\n{tree}");
         assert!(tree.contains("textbox \"Email\""), "email→textbox:\n{tree}");
     }
