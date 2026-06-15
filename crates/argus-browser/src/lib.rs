@@ -573,12 +573,17 @@ fn a11y_tree(doc: &argus_dom::Document) -> String {
         if let NodeData::Element(e) = &doc.node(id).data {
             let tag = &*e.name.local;
             if !matches!(tag, "head" | "title" | "style" | "script" | "meta" | "link") {
+                // `role="presentation"`/`"none"` strips the element's semantics: it
+                // emits no line of its own, but its children are still walked.
+                let presentational = e
+                    .attr("role")
+                    .is_some_and(|r| matches!(r.trim(), "presentation" | "none"));
                 // An explicit `role` attribute overrides the tag's implicit role;
                 // `<input>` refines its role by `type`.
-                let role: Option<&str> = e
-                    .attr("role")
-                    .filter(|r| !r.is_empty())
-                    .or_else(|| {
+                let role: Option<&str> = if presentational {
+                    None
+                } else {
+                    e.attr("role").filter(|r| !r.is_empty()).or_else(|| {
                         if tag == "input" {
                             input_role(e.attr("type").unwrap_or("text"))
                         } else if tag == "th" {
@@ -590,7 +595,8 @@ fn a11y_tree(doc: &argus_dom::Document) -> String {
                         } else {
                             implicit_role(tag)
                         }
-                    });
+                    })
+                };
                 if let Some(role) = role {
                     // Accessible name: `aria-label`, else `alt` for images, else text.
                     let name = if let Some(ids) = e.attr("aria-labelledby") {
@@ -1950,6 +1956,13 @@ mod tests {
         ));
         assert!(t5.contains("figure \"A cat\""), "figure named by figcaption:\n{t5}");
         assert!(t5.contains("group \"Address\""), "fieldset named by legend:\n{t5}");
+
+        // role=presentation strips the element's own line but keeps its children.
+        let t6 = super::a11y_tree(&argus_html::parse(
+            "<ul role=\"presentation\"><li>Item</li></ul>",
+        ));
+        assert!(!t6.lines().any(|l| l.trim() == "list"), "presentation removes the list role:\n{t6}");
+        assert!(t6.lines().any(|l| l.trim().starts_with("listitem")), "children still appear:\n{t6}");
         assert!(tree.contains("spinbutton \"Qty\""), "number→spinbutton:\n{tree}");
         assert!(tree.contains("textbox \"Email\""), "email→textbox:\n{tree}");
     }
