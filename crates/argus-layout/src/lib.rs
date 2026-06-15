@@ -1040,6 +1040,86 @@ impl Ctx<'_> {
                     })
                 })
                 .collect();
+            if style.flex_wrap {
+                // Multi-line flex: pack items (at their base size — explicit width or
+                // shrink-to-content, capped to the line) onto lines that fit the
+                // content width, breaking when the next item would overflow. Lines
+                // stack vertically `gap` apart; `align-items` applies within each
+                // line. (Per-line `justify-content` and line stretching are not yet
+                // modeled — lines are left-packed.)
+                let bases: Vec<f32> = istyles
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        fixed[i]
+                            .unwrap_or_else(|| {
+                                self.intrinsic_border_width(items[i], s)
+                                    + s.margin.left
+                                    + s.margin.right
+                            })
+                            .min(content_w)
+                    })
+                    .collect();
+                let mut line_top = row_top;
+                let mut i = 0usize;
+                while i < items.len() {
+                    // Greedily fill one line.
+                    let mut line: Vec<usize> = Vec::new();
+                    let mut line_w = 0.0f32;
+                    while i < items.len() {
+                        let add = if line.is_empty() {
+                            bases[i]
+                        } else {
+                            style.gap + bases[i]
+                        };
+                        if !line.is_empty() && line_w + add > content_w {
+                            break;
+                        }
+                        line_w += add;
+                        line.push(i);
+                        i += 1;
+                    }
+                    // Lay out the line, left-packed, recording snapshots for align.
+                    let mut cx = content_left;
+                    let mut max_h = 0.0f32;
+                    let mut snaps: Vec<(DisplayListMark, f32)> = Vec::new();
+                    for &idx in &line {
+                        self.cursor_y = line_top;
+                        let ds = (
+                            self.rects.len(),
+                            self.runs.len(),
+                            self.images.len(),
+                            self.links.len(),
+                            self.bounds.len(),
+                        );
+                        self.layout_block(items[idx], istyles[idx], cx, bases[idx], None);
+                        let h = self.cursor_y - line_top;
+                        max_h = max_h.max(h);
+                        snaps.push((ds, h));
+                        cx += bases[idx] + style.gap;
+                    }
+                    for (ds, h) in &snaps {
+                        let dy = match style.align_items {
+                            AlignItems::FlexStart | AlignItems::Stretch => 0.0,
+                            AlignItems::Center => (max_h - h) / 2.0,
+                            AlignItems::FlexEnd => max_h - h,
+                        };
+                        if dy != 0.0 {
+                            self.shift_display_list(*ds, 0.0, dy);
+                        }
+                    }
+                    line_top += max_h;
+                    if i < items.len() {
+                        line_top += style.gap;
+                    }
+                }
+                self.cursor_y = line_top + style.padding.bottom + style.border.bottom;
+                if let Some(idx) = bg_idx {
+                    self.rects[idx].h = self.cursor_y - border_box_top;
+                }
+                return;
+            }
+
             // When any item declares `flex-grow`, use the proper grow model: each
             // item starts at its base size (explicit-width footprint, else
             // shrink-to-content) and positive free space is split in proportion to
@@ -2526,6 +2606,31 @@ mod tests {
         let grow = l.runs.iter().find(|r| r.text == "grow").unwrap();
         // The grower starts just after the fixed 50px slot (plus page margin ~8).
         assert!(grow.x > 50.0 && grow.x < 80.0, "grower starts after fixed slot, got {}", grow.x);
+    }
+
+    #[test]
+    fn flex_wrap_breaks_items_onto_multiple_lines() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Three 120px items in a 300px container with flex-wrap: only two fit per
+        // line, so the third drops to a second line (lower baseline, back at the
+        // left). Without wrap they'd all share one row.
+        let html = "<div style=\"display:flex; flex-wrap:wrap; width:300px\">\
+                      <div style=\"width:120px\">one</div>\
+                      <div style=\"width:120px\">two</div>\
+                      <div style=\"width:120px\">three</div>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 600.0, &ImageSizes::new());
+        let one = l.runs.iter().find(|r| r.text == "one").unwrap();
+        let two = l.runs.iter().find(|r| r.text == "two").unwrap();
+        let three = l.runs.iter().find(|r| r.text == "three").unwrap();
+        // First two on the same line; third wraps below and starts at the left.
+        assert!((one.baseline - two.baseline).abs() < 1.0, "one/two share a line");
+        assert!(three.baseline > one.baseline + 10.0, "three wrapped to a new line");
+        assert!((three.x - one.x).abs() < 1.0, "wrapped item back at the left edge");
     }
 
     #[test]

@@ -178,6 +178,8 @@ pub struct ComputedStyle {
     pub align_items: AlignItems,
     /// `flex-grow` factor for a flex item (0 = does not grow).
     pub flex_grow: f32,
+    /// `flex-wrap: wrap` — allow flex items to break onto multiple lines.
+    pub flex_wrap: bool,
     /// Uniform `border-radius` in pixels.
     pub border_radius: f32,
     /// Element `opacity` in `0.0..=1.0`.
@@ -244,6 +246,7 @@ impl ComputedStyle {
             justify_content: JustifyContent::FlexStart,
             align_items: AlignItems::Stretch,
             flex_grow: 0.0,
+            flex_wrap: false,
             border_radius: 0.0,
             opacity: 1.0,
             white_space_pre: false,
@@ -907,6 +910,12 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
                 .map(|g| g.max(0.0))
                 .unwrap_or(0.0),
         };
+    }
+    // `flex-wrap` (also expressible as a token of the `flex-flow` shorthand).
+    if let Some(v) = map.get("flex-wrap").or_else(|| map.get("flex-flow")) {
+        cs.flex_wrap = v
+            .split_whitespace()
+            .any(|tok| tok == "wrap" || tok == "wrap-reverse");
     }
     if let Some(px) = map
         .get("border-radius")
