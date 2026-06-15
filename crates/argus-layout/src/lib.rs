@@ -622,6 +622,14 @@ impl Ctx<'_> {
                         let istyle = computed_style(self.doc, child, &style, self.author);
                         self.place_image(e, &istyle, content_left, content_w);
                     }
+                    NodeData::Element(e)
+                        if e.name.is_html("progress") || e.name.is_html("meter") =>
+                    {
+                        self.flush_words(&mut words, &style, content_left, content_w);
+                        pending_space = false;
+                        let cstyle = computed_style(self.doc, child, &style, self.author);
+                        self.place_bar(e, &cstyle, content_left, content_w);
+                    }
                     NodeData::Element(e) if e.name.is_html("hr") => {
                         self.flush_words(&mut words, &style, content_left, content_w);
                         pending_space = false;
@@ -962,6 +970,61 @@ impl Ctx<'_> {
             b.w *= sx;
             b.h *= sy;
         }
+    }
+
+    /// Render a `<progress>`/`<meter>` as a horizontal bar: a light track with a
+    /// colored portion filled to `value / max` (meter offsets by `min`). A
+    /// `<progress>` with no `value` is indeterminate and shows an empty track.
+    fn place_bar(&mut self, e: &ElementData, istyle: &ComputedStyle, x: f32, avail: f32) {
+        if istyle.hidden {
+            return;
+        }
+        let attr = |name: &str| e.attr(name).and_then(|v| v.trim().parse::<f32>().ok());
+        let is_meter = e.name.is_html("meter");
+        let min = if is_meter { attr("min").unwrap_or(0.0) } else { 0.0 };
+        let max = attr("max").unwrap_or(1.0).max(min + f32::EPSILON);
+        let frac = match attr("value") {
+            Some(v) => ((v - min) / (max - min)).clamp(0.0, 1.0),
+            None => 0.0, // indeterminate progress → empty track
+        };
+        // Default size ~ a typical UA control; honor explicit width/height.
+        let w = istyle
+            .width
+            .map(|l| l.to_px(istyle.font_size, avail))
+            .unwrap_or(160.0)
+            .min(avail);
+        let h = istyle
+            .height
+            .map(|l| l.to_px(istyle.font_size, avail))
+            .unwrap_or((istyle.font_size * 0.9).max(10.0));
+        let top = self.cursor_y + istyle.margin.top;
+        let radius = (h / 2.0).min(6.0);
+        // Track.
+        self.rects.push(RectFill {
+            x,
+            y: top,
+            w,
+            h,
+            color: argus_geometry::Color::rgb(0xd0, 0xd0, 0xd0),
+            radius,
+        });
+        // Filled portion (blue for progress, green for meter).
+        if frac > 0.0 {
+            let fill = if is_meter {
+                argus_geometry::Color::rgb(0x3c, 0xb0, 0x37)
+            } else {
+                argus_geometry::Color::rgb(0x2b, 0x6c, 0xde)
+            };
+            self.rects.push(RectFill {
+                x,
+                y: top,
+                w: w * frac,
+                h,
+                color: fill,
+                radius,
+            });
+        }
+        self.cursor_y = top + h + istyle.margin.bottom;
     }
 
     /// Place an `<img>` as a block-level replaced box on its own line. A broken or
@@ -2771,6 +2834,30 @@ mod tests {
             line_count("overflow-wrap: break-word") > 1,
             "break-word splits the long word across lines"
         );
+    }
+
+    #[test]
+    fn progress_renders_a_filled_bar() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // <progress value=0.25 max=1> → a 160px track with a ~40px blue fill.
+        let html = "<progress value=\"0.25\" max=\"1\"></progress>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        // Track is the wider light-gray rect; fill is the narrower colored rect.
+        let track = l.rects.iter().find(|r| r.w > 100.0).expect("track rect");
+        let fill = l
+            .rects
+            .iter()
+            .find(|r| r.color.b > 150 && r.w < track.w * 0.5)
+            .expect("fill rect");
+        assert!((fill.w - track.w * 0.25).abs() < 2.0, "fill ~25% of track: {} vs {}", fill.w, track.w);
+        // An indeterminate progress (no value) draws only the track, no blue fill.
+        let doc2 = parse("<progress></progress>");
+        let l2 = layout(&doc2, &font, 400.0, &ImageSizes::new());
+        assert!(l2.rects.iter().all(|r| !(r.color.b > 150 && r.color.r < 100)), "no fill when indeterminate");
     }
 
     #[test]
