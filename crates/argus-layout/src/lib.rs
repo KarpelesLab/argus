@@ -503,6 +503,8 @@ impl Ctx<'_> {
                 // long lines; `pre`/`pre-wrap` keep each newline-delimited line whole.
                 let visual: Vec<String> = if style.pre_line {
                     self.wrap_collapsed(line, fs, content_w)
+                } else if style.pre_wrap {
+                    self.wrap_preserving(line, fs, content_w)
                 } else {
                     vec![line.to_string()]
                 };
@@ -973,6 +975,39 @@ impl Ctx<'_> {
             }
         }
         out.push(cur); // keep a trailing/only line even when empty
+        out
+    }
+
+    /// Greedily wrap a line into sub-lines that fit `width` while **preserving**
+    /// whitespace (for `white-space: pre-wrap`). Breaks at the last space before
+    /// overflow; a token wider than `width` overflows rather than being split.
+    fn wrap_preserving(&self, line: &str, fs: f32, width: f32) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let mut last_break: Option<usize> = None; // byte index just past a space
+        for ch in line.chars() {
+            cur.push(ch);
+            if ch == ' ' {
+                last_break = Some(cur.len());
+            }
+            if self.font.measure(&cur, fs) > width && cur.chars().count() > 1 {
+                match last_break.filter(|&b| b < cur.len()) {
+                    Some(bp) => {
+                        let rest = cur.split_off(bp);
+                        out.push(std::mem::take(&mut cur));
+                        cur = rest;
+                    }
+                    None => {
+                        // No break opportunity yet: break before the current char.
+                        let last = cur.pop().unwrap();
+                        out.push(std::mem::take(&mut cur));
+                        cur.push(last);
+                    }
+                }
+                last_break = None;
+            }
+        }
+        out.push(cur);
         out
     }
 
@@ -2533,6 +2568,26 @@ mod tests {
             line_count("overflow-wrap: break-word") > 1,
             "break-word splits the long word across lines"
         );
+    }
+
+    #[test]
+    fn pre_wrap_preserves_spaces_and_wraps() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // pre-wrap keeps the multiple spaces (unlike pre-line) and still wraps the
+        // long content within the narrow box.
+        let html = "<p style=\"white-space: pre-wrap; width:90px\">a    b the quick brown fox jumps over</p>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        // The first visual run preserves the 4-space gap between a and b.
+        assert!(l.runs[0].text.starts_with("a    b") || l.runs[0].text == "a    b ", "spaces preserved, got {:?}", l.runs[0].text);
+        // Long content wraps to multiple visual lines.
+        let mut ys: Vec<i32> = l.runs.iter().map(|r| r.baseline as i32).collect();
+        ys.sort_unstable();
+        ys.dedup();
+        assert!(ys.len() >= 2, "pre-wrap wraps long lines, got {} lines", ys.len());
     }
 
     #[test]

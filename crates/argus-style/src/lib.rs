@@ -237,6 +237,9 @@ pub struct ComputedStyle {
     /// `white-space: pre-line` — collapse spaces but keep newlines, and wrap
     /// (inherited). Distinguishes pre-line from `pre`/`pre-wrap` in the pre path.
     pub pre_line: bool,
+    /// `white-space: pre-wrap` — preserve whitespace and newlines, but wrap long
+    /// lines (inherited).
+    pub pre_wrap: bool,
     /// `overflow-wrap`/`word-break: break-word` — split words too long to fit
     /// rather than letting them overflow the line (inherited).
     pub break_word: bool,
@@ -313,6 +316,7 @@ impl ComputedStyle {
             white_space_pre: false,
             nowrap: false,
             pre_line: false,
+            pre_wrap: false,
             break_word: false,
             list_style: ListStyle::Disc,
             text_transform: TextTransform::None,
@@ -515,6 +519,7 @@ pub fn computed_style(
         white_space_pre: parent.white_space_pre, // white-space inherits
         nowrap: parent.nowrap,                   // white-space inherits
         pre_line: parent.pre_line,               // white-space inherits
+        pre_wrap: parent.pre_wrap,               // white-space inherits
         break_word: parent.break_word,           // overflow-wrap inherits
         list_style: parent.list_style,           // list-style-type inherits
         text_transform: parent.text_transform,   // text-transform inherits
@@ -1078,6 +1083,7 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         // `nowrap` and `pre` both suppress automatic wrapping.
         cs.nowrap = matches!(ws.as_str(), "nowrap" | "pre");
         cs.pre_line = ws.as_str() == "pre-line";
+        cs.pre_wrap = matches!(ws.as_str(), "pre-wrap" | "break-spaces");
     }
     // `overflow-wrap`/`word-wrap: break-word` (or `word-break: break-all`) splits
     // over-long words to avoid overflow.
