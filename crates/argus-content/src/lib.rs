@@ -35,6 +35,7 @@ pub fn run(channel: Channel) -> io::Result<()> {
         focused: None,
         input_values: std::collections::HashMap::new(),
         checked: std::collections::HashMap::new(),
+        selected: std::collections::HashMap::new(),
         links: Vec::new(),
         submits: Vec::new(),
         bounds: Vec::new(),
@@ -110,6 +111,7 @@ pub fn run(channel: Channel) -> io::Result<()> {
                 content.focused = None;
                 content.input_values.clear();
                 content.checked.clear();
+                content.selected.clear();
                 content.doc = Some(doc);
                 // Report localStorage so the browser can persist it to disk.
                 if !content.storage.is_empty() {
@@ -163,10 +165,10 @@ pub fn run(channel: Channel) -> io::Result<()> {
                         &[],
                     )?;
                 } else {
-                    // Not navigation: a checkbox/radio toggles, then (any element)
-                    // dispatches a `click` and re-runs the page's scripts with the
-                    // full interaction history.
-                    content.toggle_checkable(x as f32, y as f32);
+                    // Not navigation: a form control (checkbox/radio/select) updates,
+                    // then (any element) dispatches a `click` and re-runs the page's
+                    // scripts with the full interaction history.
+                    content.toggle_form_control(x as f32, y as f32);
                     content.dispatch_click(x as f32, y as f32);
                     content.apply_input_values();
                     content.set_focus(x as f32, y as f32);
@@ -222,6 +224,9 @@ struct Content {
     /// User-toggled checkbox/radio state by input id, re-applied like
     /// `input_values` so a checked box survives re-renders and feeds submission.
     checked: std::collections::HashMap<String, bool>,
+    /// User-chosen `<select>` option index by select id (clicking a select cycles
+    /// to the next option). Re-applied as the option's `selected` attribute.
+    selected: std::collections::HashMap<String, usize>,
     /// Clickable link regions from the last render (in screen coords), for input.
     links: Vec<argus_layout::LinkBox>,
     /// `method=post` submit-button regions from the last render (screen coords) —
@@ -462,11 +467,40 @@ impl Content {
         out
     }
 
-    /// If `(x, y)` hits an id'd checkbox or radio, toggle its checked state (a radio
-    /// also clears the rest of its name-group). Returns whether one was toggled.
-    /// The change persists via the `checked` map (re-applied each render) and feeds
-    /// both the visible mark and form submission.
-    fn toggle_checkable(&mut self, x: f32, y: f32) -> bool {
+    /// The `<option>` node ids of the id'd `<select>`, in document order.
+    fn select_options(&self, select_id: &str) -> Vec<argus_dom::NodeId> {
+        let Some(doc) = &self.doc else { return Vec::new() };
+        let Some(sel) = find_element_by_id(doc, select_id) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        collect_options(doc, sel, &mut out);
+        out
+    }
+
+    /// The currently-selected option index of a `<select>`: the user's choice if
+    /// any, else the first option carrying `selected`, else 0.
+    fn current_selected_index(&self, select_id: &str) -> usize {
+        if let Some(&i) = self.selected.get(select_id) {
+            return i;
+        }
+        let Some(doc) = &self.doc else { return 0 };
+        self.select_options(select_id)
+            .iter()
+            .position(|&o| {
+                doc.node(o)
+                    .as_element()
+                    .is_some_and(|e| e.attr("selected").is_some())
+            })
+            .unwrap_or(0)
+    }
+
+    /// If `(x, y)` hits an id'd form control, mutate it: a checkbox flips, a radio
+    /// selects within its name-group, a `<select>` advances to its next option
+    /// (wrapping). Returns whether one was handled. The change persists via the
+    /// `checked`/`selected` maps (re-applied each render) and feeds both the visible
+    /// state and form submission.
+    fn toggle_form_control(&mut self, x: f32, y: f32) -> bool {
         let Some(id) = self.hit_id(x, y) else {
             return false;
         };
@@ -474,6 +508,15 @@ impl Content {
         let Some(el) = find_element_by_id(doc, &id).and_then(|n| doc.node(n).as_element()) else {
             return false;
         };
+        if el.name.is_html("select") {
+            let n = self.select_options(&id).len();
+            if n == 0 {
+                return false;
+            }
+            let next = (self.current_selected_index(&id) + 1) % n;
+            self.selected.insert(id, next);
+            return true;
+        }
         if !el.name.is_html("input") {
             return false;
         }
@@ -622,10 +665,39 @@ impl Content {
                 }
             }
         }
+        // Re-apply user `<select>` choices: put `selected` on the chosen option and
+        // strip it from the rest (layout + submission read `selected`).
+        for (id, &idx) in &self.selected {
+            let Some(sel) = find_element_by_id(doc, id) else {
+                continue;
+            };
+            let mut opts = Vec::new();
+            collect_options(doc, sel, &mut opts);
+            for (i, &opt) in opts.iter().enumerate() {
+                if let argus_dom::NodeData::Element(e) = doc.data_mut(opt) {
+                    let has = e.attrs.iter().any(|a| &*a.name == "selected");
+                    if i == idx && !has {
+                        e.attrs.push(argus_dom::Attribute::new("selected", ""));
+                    } else if i != idx && has {
+                        e.attrs.retain(|a| &*a.name != "selected");
+                    }
+                }
+            }
+        }
     }
 }
 
 /// The first element with `id` in document order.
+/// Collect the `<option>` descendant node ids of `node`, in document order.
+fn collect_options(doc: &argus_dom::Document, node: argus_dom::NodeId, out: &mut Vec<argus_dom::NodeId>) {
+    for c in doc.children(node) {
+        if doc.node(c).as_element().is_some_and(|e| e.name.is_html("option")) {
+            out.push(c);
+        }
+        collect_options(doc, c, out);
+    }
+}
+
 fn find_element_by_id(doc: &argus_dom::Document, id: &str) -> Option<argus_dom::NodeId> {
     fn walk(
         doc: &argus_dom::Document,
@@ -770,6 +842,7 @@ mod tests {
             focused: None,
             input_values: std::collections::HashMap::new(),
             checked: std::collections::HashMap::new(),
+            selected: std::collections::HashMap::new(),
             links: Vec::new(),
             submits: Vec::new(),
             bounds,
@@ -806,19 +879,19 @@ mod tests {
             vec![box_at("a", 10.0, 10.0), box_at("b", 40.0, 10.0)],
         );
         // Unchecked 'a' → checked after a click, and the DOM attr is applied.
-        assert!(c.toggle_checkable(12.0, 12.0));
+        assert!(c.toggle_form_control(12.0, 12.0));
         c.apply_input_values();
         assert!(dom_checked(&c, "a"), "checkbox a now checked");
         // Click 'a' again → unchecked.
-        assert!(c.toggle_checkable(12.0, 12.0));
+        assert!(c.toggle_form_control(12.0, 12.0));
         c.apply_input_values();
         assert!(!dom_checked(&c, "a"), "checkbox a toggled back off");
         // Pre-checked 'b' → clicking unchecks it (the attr is removed).
-        assert!(c.toggle_checkable(42.0, 12.0));
+        assert!(c.toggle_form_control(42.0, 12.0));
         c.apply_input_values();
         assert!(!dom_checked(&c, "b"), "pre-checked b unchecked");
         // A click that hits nothing toggles nothing.
-        assert!(!c.toggle_checkable(500.0, 500.0));
+        assert!(!c.toggle_form_control(500.0, 500.0));
     }
 
     #[test]
@@ -834,11 +907,46 @@ mod tests {
             ],
         );
         // Select 'y' → 'x' clears (same group 'g'), 'z' (other group) untouched.
-        assert!(c.toggle_checkable(42.0, 12.0));
+        assert!(c.toggle_form_control(42.0, 12.0));
         c.apply_input_values();
         assert!(dom_checked(&c, "y"), "y selected");
         assert!(!dom_checked(&c, "x"), "x cleared in group g");
         assert!(!dom_checked(&c, "z"), "z is a different group, stays off");
+    }
+
+    #[test]
+    fn clicking_a_select_cycles_through_its_options() {
+        // The selected option index (which carries the `selected` attr).
+        fn selected_idx(c: &Content) -> Option<usize> {
+            let doc = c.doc.as_ref().unwrap();
+            let sel = find_element_by_id(doc, "s").unwrap();
+            let mut opts = Vec::new();
+            super::collect_options(doc, sel, &mut opts);
+            opts.iter().position(|&o| {
+                doc.node(o)
+                    .as_element()
+                    .is_some_and(|e| e.attr("selected").is_some())
+            })
+        }
+
+        let mut c = headless(
+            "<select id=\"s\" name=\"k\">\
+               <option value=\"a\">A</option>\
+               <option value=\"b\" selected>B</option>\
+               <option value=\"c\">C</option>\
+             </select>",
+            vec![box_at("s", 10.0, 10.0)],
+        );
+        // Starts on B (index 1). Each click advances, wrapping 2 -> 0.
+        assert_eq!(selected_idx(&c), Some(1), "initial selected option");
+        assert!(c.toggle_form_control(12.0, 12.0));
+        c.apply_input_values();
+        assert_eq!(selected_idx(&c), Some(2), "advanced to C");
+        assert!(c.toggle_form_control(12.0, 12.0));
+        c.apply_input_values();
+        assert_eq!(selected_idx(&c), Some(0), "wrapped to A");
+        // The `selected` attr now sits on option A, so form submission (which reads
+        // it, tested in argus-layout) serializes `k=a`.
     }
 
     #[test]
