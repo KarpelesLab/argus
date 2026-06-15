@@ -4,10 +4,10 @@
 //! codecs: PNG (`oxideav-png`), GIF (`oxideav-gif`), **JPEG** (`oxideav-mjpeg` via
 //! the `oxideav-core` registry, YUV→RGBA through `oxideav-pixfmt`), **WebP**
 //! (`oxideav-webp`, lossless), **QOI** (`oxideav-qoi`), and **ICO/CUR favicons**
-//! (`oxideav-ico`, largest sub-image) — plus uncompressed 24/32-bit BMP and
-//! **TGA** (Truevision, uncompressed + RLE true-color, both built in) and `data:`
-//! URLs. AVIF, TIFF, and lossy-WebP (VP8) decode here once that glue lands. See
-//! `docs/subsystems/media.md`.
+//! (`oxideav-ico`, largest sub-image) — plus uncompressed 24/32-bit BMP, **TGA**
+//! (Truevision true-color + grayscale, uncompressed + RLE), **Netpbm** (PPM/PGM,
+//! ASCII + binary), all built in, and `data:` URLs. AVIF, TIFF, and lossy-WebP
+//! (VP8) decode here once that glue lands. See `docs/subsystems/media.md`.
 
 /// A decoded image: `width * height * 4` straight-alpha RGBA bytes.
 #[derive(Clone, Debug)]
@@ -55,6 +55,10 @@ pub fn decode(bytes: &[u8]) -> Option<DecodedImage> {
     // ICO: reserved=0, type=1 (CUR is type 2, which we also accept — same layout).
     if bytes.starts_with(&[0x00, 0x00, 0x01, 0x00]) {
         return decode_ico(bytes);
+    }
+    // Netpbm: `P2`/`P3`/`P5`/`P6` magic.
+    if bytes.len() > 1 && bytes[0] == b'P' && matches!(bytes[1], b'2' | b'3' | b'5' | b'6') {
+        return decode_netpbm(bytes);
     }
     // TGA has no leading signature; try it last (it validates structurally).
     decode_tga(bytes)
@@ -359,6 +363,103 @@ fn decode_tga(bytes: &[u8]) -> Option<DecodedImage> {
     })
 }
 
+/// Decode a Netpbm image: `P2`/`P5` (grayscale) and `P3`/`P6` (RGB), in ASCII
+/// (`P2`/`P3`) or binary (`P5`/`P6`) form, with 8-bit samples (`maxval ≤ 255`).
+/// Samples are scaled to 0–255; the result is opaque RGBA.
+fn decode_netpbm(bytes: &[u8]) -> Option<DecodedImage> {
+    if bytes.len() < 2 || bytes[0] != b'P' {
+        return None;
+    }
+    let kind = bytes[1];
+    if !matches!(kind, b'2' | b'3' | b'5' | b'6') {
+        return None;
+    }
+    // Read one whitespace-separated header token, skipping `#` comments.
+    let token = |pos: &mut usize| -> Option<&[u8]> {
+        loop {
+            while *pos < bytes.len() && bytes[*pos].is_ascii_whitespace() {
+                *pos += 1;
+            }
+            if *pos < bytes.len() && bytes[*pos] == b'#' {
+                while *pos < bytes.len() && bytes[*pos] != b'\n' {
+                    *pos += 1;
+                }
+            } else {
+                break;
+            }
+        }
+        let start = *pos;
+        while *pos < bytes.len() && !bytes[*pos].is_ascii_whitespace() {
+            *pos += 1;
+        }
+        (*pos > start).then(|| &bytes[start..*pos])
+    };
+    let num = |t: &[u8]| -> Option<usize> { std::str::from_utf8(t).ok()?.parse().ok() };
+
+    let mut pos = 2;
+    let width = num(token(&mut pos)?)?;
+    let height = num(token(&mut pos)?)?;
+    let maxval = num(token(&mut pos)?)?;
+    if maxval == 0 || maxval > 255 || width == 0 || height == 0 {
+        return None;
+    }
+    if (width as u64) * (height as u64) > 64_000_000 {
+        return None;
+    }
+    let npx = width * height;
+    let channels = if matches!(kind, b'3' | b'6') { 3 } else { 1 };
+    let scale = |v: usize| (v * 255 / maxval).min(255) as u8;
+    let mut rgba = vec![0u8; npx * 4];
+
+    if matches!(kind, b'5' | b'6') {
+        // Binary: exactly one whitespace follows maxval, then raw samples.
+        pos += 1;
+        if bytes.len() < pos + npx * channels {
+            return None;
+        }
+        for i in 0..npx {
+            let p = pos + i * channels;
+            let (r, g, b) = if channels == 3 {
+                (
+                    scale(bytes[p] as usize),
+                    scale(bytes[p + 1] as usize),
+                    scale(bytes[p + 2] as usize),
+                )
+            } else {
+                let v = scale(bytes[p] as usize);
+                (v, v, v)
+            };
+            rgba[i * 4] = r;
+            rgba[i * 4 + 1] = g;
+            rgba[i * 4 + 2] = b;
+            rgba[i * 4 + 3] = 0xFF;
+        }
+    } else {
+        // ASCII: read width×height×channels decimal samples.
+        for i in 0..npx {
+            let (r, g, b) = if channels == 3 {
+                (
+                    scale(num(token(&mut pos)?)?),
+                    scale(num(token(&mut pos)?)?),
+                    scale(num(token(&mut pos)?)?),
+                )
+            } else {
+                let v = scale(num(token(&mut pos)?)?);
+                (v, v, v)
+            };
+            rgba[i * 4] = r;
+            rgba[i * 4 + 1] = g;
+            rgba[i * 4 + 2] = b;
+            rgba[i * 4 + 3] = 0xFF;
+        }
+    }
+    Some(DecodedImage {
+        width: width as u32,
+        height: height as u32,
+        rgba,
+    })
+}
+
 /// Decode a `data:` URL (`data:[<mime>][;base64],<payload>`).
 pub fn decode_data_url(url: &str) -> Option<DecodedImage> {
     let rest = url.strip_prefix("data:")?;
@@ -464,6 +565,27 @@ mod tests {
         assert_eq!(&img.rgba[4..8], &[255, 255, 255, 255], "(1,0) white");
         assert_eq!(&img.rgba[8..12], &[255, 0, 0, 255], "(0,1) red");
         assert_eq!(&img.rgba[12..16], &[0, 255, 0, 255], "(1,1) green");
+    }
+
+    #[test]
+    fn decodes_binary_ppm_p6() {
+        // 2x1 binary RGB PPM: red, green.
+        let mut b = b"P6\n2 1\n255\n".to_vec();
+        b.extend_from_slice(&[255, 0, 0, 0, 255, 0]);
+        let img = decode(&b).expect("decode P6");
+        assert_eq!((img.width, img.height), (2, 1));
+        assert_eq!(&img.rgba[0..4], &[255, 0, 0, 255], "red");
+        assert_eq!(&img.rgba[4..8], &[0, 255, 0, 255], "green");
+    }
+
+    #[test]
+    fn decodes_ascii_pgm_p2_with_comment_and_scaling() {
+        // 2x1 ASCII grayscale with a comment and maxval 100 → samples scaled to 255.
+        let b = b"P2\n# a comment\n2 1\n100\n0 100\n".to_vec();
+        let img = decode(&b).expect("decode P2");
+        assert_eq!((img.width, img.height), (2, 1));
+        assert_eq!(&img.rgba[0..4], &[0, 0, 0, 255], "black");
+        assert_eq!(&img.rgba[4..8], &[255, 255, 255, 255], "white (100/100→255)");
     }
 
     #[test]
