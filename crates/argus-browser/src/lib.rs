@@ -503,6 +503,41 @@ fn a11y_tree(doc: &argus_dom::Document) -> String {
         }
     }
 
+    /// The accessible name a `<label>` gives a form control: a `<label for=id>`
+    /// elsewhere in the document, or an ancestor `<label>` wrapping the control.
+    fn label_name(doc: &Document, control: NodeId) -> Option<String> {
+        fn find_label_for(doc: &Document, id: NodeId, target: &str) -> Option<NodeId> {
+            if let NodeData::Element(e) = &doc.node(id).data {
+                if e.name.is_html("label") && e.attr("for") == Some(target) {
+                    return Some(id);
+                }
+            }
+            doc.children(id).find_map(|c| find_label_for(doc, c, target))
+        }
+        if let Some(cid) = doc.node(control).as_element().and_then(|e| e.attr("id")) {
+            if let Some(lbl) = find_label_for(doc, doc.root(), cid) {
+                let mut s = String::new();
+                text_of(doc, lbl, &mut s);
+                let s = clean(&s);
+                if !s.is_empty() {
+                    return Some(s);
+                }
+            }
+        }
+        // Wrapping <label> ancestor.
+        let mut p = doc.node(control).parent();
+        while let Some(pid) = p {
+            if matches!(&doc.node(pid).data, NodeData::Element(e) if e.name.is_html("label")) {
+                let mut s = String::new();
+                text_of(doc, pid, &mut s);
+                let s = clean(&s);
+                return (!s.is_empty()).then_some(s);
+            }
+            p = doc.node(pid).parent();
+        }
+        None
+    }
+
     fn walk(doc: &Document, id: NodeId, depth: usize, out: &mut String) {
         if let NodeData::Element(e) = &doc.node(id).data {
             // `aria-hidden="true"` removes the element and its subtree from the tree.
@@ -538,6 +573,9 @@ fn a11y_tree(doc: &argus_dom::Document) -> String {
                         clean(label)
                     } else if tag == "img" {
                         clean(e.attr("alt").unwrap_or(""))
+                    } else if matches!(tag, "input" | "select" | "textarea") {
+                        // Form controls take their name from an associated <label>.
+                        label_name(doc, id).unwrap_or_default()
                     } else {
                         let mut s = String::new();
                         text_of(doc, id, &mut s);
@@ -1847,6 +1885,14 @@ mod tests {
         ));
         assert!(t2.contains("rowheader"), "th scope=row → rowheader:\n{t2}");
         assert!(t2.contains("columnheader"), "plain th → columnheader:\n{t2}");
+
+        // A control's <label> (for= or wrapping) gives its accessible name.
+        let t3 = super::a11y_tree(&argus_html::parse(
+            "<label for=\"e\">Email</label><input id=\"e\" type=\"text\">\
+             <label>Phone <input type=\"tel\"></label>",
+        ));
+        assert!(t3.contains("textbox \"Email\""), "label[for] names the input:\n{t3}");
+        assert!(t3.contains("textbox \"Phone\""), "wrapping label names the input:\n{t3}");
         assert!(tree.contains("spinbutton \"Qty\""), "number→spinbutton:\n{tree}");
         assert!(tree.contains("textbox \"Email\""), "email→textbox:\n{tree}");
     }
