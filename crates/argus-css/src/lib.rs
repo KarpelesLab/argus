@@ -178,6 +178,7 @@ fn parse_rules_into(tokens: &[Token], media: Option<&str>, rules: &mut Vec<Rule>
 
         if let Token::AtKeyword(name) = &tokens[i] {
             let is_media = name.eq_ignore_ascii_case("media");
+            let is_supports = name.eq_ignore_ascii_case("supports");
             i += 1;
             // Capture the prelude (the media query) up to '{' or ';'.
             let prelude_start = i;
@@ -194,6 +195,11 @@ fn parse_rules_into(tokens: &[Token], media: Option<&str>, rules: &mut Vec<Rule>
                     if is_media {
                         // Nested media combines conservatively to the inner query.
                         parse_rules_into(block, Some(&query), rules);
+                    } else if is_supports {
+                        // Include the block only if we support the feature query.
+                        if supports_condition(&query) {
+                            parse_rules_into(block, media, rules);
+                        }
                     }
                 }
                 _ => {}
@@ -240,6 +246,80 @@ fn parse_rules_into(tokens: &[Token], media: Option<&str>, rules: &mut Vec<Rule>
             media: media.map(|m| m.to_string()),
         });
     }
+}
+
+/// Whether an `@supports` condition is satisfied. Handles `(prop: value)` feature
+/// tests (supported when the property is one the cascade applies), `not`, and
+/// top-level `and`/`or` chains. Conservatively treats a known property as supported
+/// regardless of the value (we don't fully validate values).
+pub fn supports_condition(cond: &str) -> bool {
+    let c = cond.trim();
+    if let Some(rest) = c.strip_prefix("not ") {
+        return !supports_condition(rest.trim());
+    }
+    // Top-level `or`/`and` (we don't handle deeply nested groups).
+    if c.to_ascii_lowercase().contains(" or ") {
+        return c.split(" or ").any(supports_feature_group);
+    }
+    if c.to_ascii_lowercase().contains(" and ") {
+        return c.split(" and ").all(supports_feature_group);
+    }
+    supports_feature_group(c)
+}
+
+/// Evaluate a single parenthesized `(prop: value)` feature.
+fn supports_feature_group(s: &str) -> bool {
+    let s = s.trim().trim_start_matches('(').trim_end_matches(')');
+    match s.split_once(':') {
+        Some((prop, _val)) => supports_property(prop.trim()),
+        None => false,
+    }
+}
+
+/// Whether the cascade applies the named property (so a feature test for it is
+/// reported as supported).
+fn supports_property(prop: &str) -> bool {
+    const KNOWN: &[&str] = &[
+        "display",
+        "color",
+        "background-color",
+        "background",
+        "margin",
+        "padding",
+        "border",
+        "border-color",
+        "border-radius",
+        "width",
+        "min-width",
+        "max-width",
+        "height",
+        "min-height",
+        "aspect-ratio",
+        "font-size",
+        "font-weight",
+        "font",
+        "text-align",
+        "text-decoration",
+        "text-transform",
+        "line-height",
+        "list-style-type",
+        "box-sizing",
+        "opacity",
+        "white-space",
+        "vertical-align",
+        "gap",
+        "visibility",
+        "outline",
+        "position",
+        "top",
+        "right",
+        "bottom",
+        "left",
+        "inset",
+        "flex-direction",
+        "grid-template-columns",
+    ];
+    KNOWN.contains(&prop.to_ascii_lowercase().as_str())
 }
 
 /// Whether a `@media` query matches a viewport `viewport_width` px wide. Supports
@@ -447,6 +527,22 @@ mod tests {
         assert_eq!(p.declarations[0].value, "red");
         let h1 = sheet.rules.iter().find(|r| r.media.is_none()).unwrap();
         assert_eq!(h1.declarations[0].value, "blue");
+    }
+
+    #[test]
+    fn supports_rule_is_gated_on_the_condition() {
+        // Supported feature (display is applied) → the block's rule is kept.
+        let s1 = parse_stylesheet("@supports (display: grid) { .x { color: red } }");
+        assert_eq!(s1.rules.len(), 1);
+        assert_eq!(s1.rules[0].declarations[0].value, "red");
+        // Unknown property → the block is dropped.
+        let s2 = parse_stylesheet("@supports (rotate: 5deg) { .x { color: red } }");
+        assert_eq!(s2.rules.len(), 0);
+        // `not (unknown)` is supported; `and`/`or` combine.
+        assert!(supports_condition("not (rotate: 5deg)"));
+        assert!(supports_condition("(display: grid) and (gap: 1px)"));
+        assert!(!supports_condition("(display: grid) and (rotate: 1deg)"));
+        assert!(supports_condition("(rotate: 1deg) or (color: red)"));
     }
 
     #[test]
