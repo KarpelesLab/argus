@@ -921,7 +921,8 @@ pub fn uses_counters(author: &Stylesheet) -> bool {
     ua_stylesheet().rules.iter().chain(author.rules.iter()).any(|r| {
         r.declarations.iter().any(|d| {
             matches!(d.name.as_str(), "counter-reset" | "counter-increment")
-                || (d.name == "content" && d.value.contains("counter("))
+                || (d.name == "content"
+                    && (d.value.contains("counter(") || d.value.contains("counters(")))
         })
     })
 }
@@ -986,15 +987,23 @@ fn resolve_content(
                 continue;
             }
         }
-        // `counter(<name>[, <style>])` outputs the named counter's current value
-        // (the optional list-style is ignored; default 0 if the counter is unset).
-        if let Some(after) = rest.strip_prefix("counter(") {
-            if let Some(end) = after.find(')') {
-                let name = after[..end].split(',').next().unwrap_or("").trim();
-                out.push_str(&counters.get(name).copied().unwrap_or(0).to_string());
-                rest = after[end + 1..].trim_start();
-                continue;
+        // `counter(<name>[, <style>])` / `counters(<name>, <sep>[, <style>])` output
+        // the named counter's current value (list-style ignored; default 0). With
+        // the flat counter model there's a single value, so the separator is unused.
+        let mut consumed_counter = false;
+        for prefix in ["counter(", "counters("] {
+            if let Some(after) = rest.strip_prefix(prefix) {
+                if let Some(end) = after.find(')') {
+                    let name = after[..end].split(',').next().unwrap_or("").trim();
+                    out.push_str(&counters.get(name).copied().unwrap_or(0).to_string());
+                    rest = after[end + 1..].trim_start();
+                    consumed_counter = true;
+                    break;
+                }
             }
+        }
+        if consumed_counter {
+            continue;
         }
         // Otherwise the leading token is a (possibly quoted) string or a quote
         // keyword (`open-quote`/`close-quote` render curly quotes).

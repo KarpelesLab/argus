@@ -4530,6 +4530,17 @@ mod tests {
         assert!(texts.contains(&"1."), "first heading numbered 1: {texts:?}");
         assert!(texts.contains(&"2."), "second heading numbered 2: {texts:?}");
         assert!(texts.contains(&"3."), "third heading numbered 3: {texts:?}");
+
+        // The `counters()` form also resolves to the counter value.
+        let doc2 = parse(
+            "<style>body{counter-reset:n} li{counter-increment:n} \
+               li::before{content:counters(n, '.') ') '}</style>\
+             <ol><li>a</li><li>b</li></ol>",
+        );
+        let l2 = layout(&doc2, &font, 400.0, &ImageSizes::new());
+        let t2: Vec<&str> = l2.runs.iter().map(|r| r.text.as_str()).collect();
+        assert!(t2.contains(&"1)"), "counters() value 1: {t2:?}");
+        assert!(t2.contains(&"2)"), "counters() value 2: {t2:?}");
     }
 
     #[test]
