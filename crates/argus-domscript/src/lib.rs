@@ -568,6 +568,14 @@ function __argus_el(tgt) {
         var tn = __byIdx[__idxOf(tgt)];
         return tn ? ("" + tn.t).toUpperCase() : "";
       }
+      if (k === "nodeType") { return 1; }  // ELEMENT_NODE
+      if (k === "hasChildNodes") {
+        return function() {
+          var pix = __idxOf(tgt);
+          for (var di = 0; di < __tree.length; di++) { if (__tree[di].p === pix) return true; }
+          return false;
+        };
+      }
       if (k === "childElementCount") {
         var pix = __idxOf(tgt), cnt = 0;
         for (var di = 0; di < __tree.length; di++) { if (__tree[di].p === pix) cnt++; }
@@ -635,6 +643,8 @@ document.compatMode = "CSS1Compat";
 document.visibilityState = "visible";
 document.hidden = false;
 document.body = __argus_el({kind: "sel", val: "body"});
+document.documentElement = __argus_el({kind: "sel", val: "html"});
+document.head = __argus_el({kind: "sel", val: "head"});
 document.documentElement = __argus_el({kind: "sel", val: "html"});
 var window = document.window = document;
 
@@ -2664,6 +2674,25 @@ mod tests {
             attr_of(&doc, "o", "data-c").as_deref(),
             Some("rgb(255, 0, 0)|block|16px")
         );
+    }
+
+    #[test]
+    fn node_type_document_element_and_head() {
+        let mut doc = argus_html::parse(
+            "<div id=\"o\"><span>x</span></div>\
+             <script>\
+               var o = document.getElementById('o');\
+               o.setAttribute('data-nt', '' + o.nodeType);\
+               o.setAttribute('data-kids', '' + o.hasChildNodes());\
+               o.setAttribute('data-de', document.documentElement.tagName);\
+               o.setAttribute('data-hd', document.head.nodeName);\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        assert_eq!(attr_of(&doc, "o", "data-nt").as_deref(), Some("1")); // ELEMENT_NODE
+        assert_eq!(attr_of(&doc, "o", "data-kids").as_deref(), Some("true"));
+        assert_eq!(attr_of(&doc, "o", "data-de").as_deref(), Some("HTML"));
+        assert_eq!(attr_of(&doc, "o", "data-hd").as_deref(), Some("HEAD"));
     }
 
     #[test]
