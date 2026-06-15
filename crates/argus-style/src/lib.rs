@@ -61,6 +61,18 @@ pub enum ListStyle {
     None,
 }
 
+/// `text-decoration-style` — how underline/line-through/overline lines are drawn.
+/// `Wavy` has no curve primitive available, so it renders like `Solid`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DecorationStyle {
+    #[default]
+    Solid,
+    Double,
+    Dotted,
+    Dashed,
+    Wavy,
+}
+
 /// `text-transform` — case mapping applied to rendered text.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TextTransform {
@@ -291,6 +303,8 @@ pub struct ComputedStyle {
     pub overline: bool,
     /// `text-decoration-color` — color of the decoration lines (`None` = text color).
     pub decoration_color: Option<Color>,
+    /// `text-decoration-style` — how the decoration lines are drawn.
+    pub decoration_style: DecorationStyle,
     /// `accent-color` — tint for form controls (checkbox/radio/progress); inherited.
     pub accent_color: Option<Color>,
     /// `text-shadow` as `(offset-x, offset-y, color)` in px (blur ignored); inherited.
@@ -453,6 +467,7 @@ impl ComputedStyle {
             strike: false,
             overline: false,
             decoration_color: None,
+            decoration_style: DecorationStyle::Solid,
             accent_color: None,
             text_shadow: None,
             box_shadow: None,
@@ -919,6 +934,7 @@ pub fn computed_style(
         strike: parent.strike,
         overline: parent.overline,
         decoration_color: parent.decoration_color,
+        decoration_style: parent.decoration_style,
         text_transform: parent.text_transform,   // text-transform inherits
         line_height: parent.line_height,         // line-height inherits
         text_indent: parent.text_indent,         // text-indent inherits
@@ -1269,12 +1285,21 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         cs.underline = v.split_whitespace().any(|t| t == "underline");
         cs.strike = v.split_whitespace().any(|t| t == "line-through");
         cs.overline = v.split_whitespace().any(|t| t == "overline");
+        // A style keyword in the shorthand sets how the lines are drawn.
+        for tok in v.split_whitespace() {
+            if let Some(s) = decoration_style_of(tok) {
+                cs.decoration_style = s;
+            }
+        }
         // A color token in the `text-decoration` shorthand also sets the line color.
         for tok in v.split_whitespace() {
             if let Some(c) = resolve_color(tok, cs.color, parent.color) {
                 cs.decoration_color = Some(c);
             }
         }
+    }
+    if let Some(s) = map.get("text-decoration-style").and_then(|v| decoration_style_of(v.trim())) {
+        cs.decoration_style = s;
     }
     if let Some(c) = map
         .get("text-decoration-color")
@@ -1982,6 +2007,18 @@ fn parse_linear_gradient(v: &str) -> Option<Gradient> {
         stops,
         n_stops,
     })
+}
+
+/// Map a `text-decoration-style` keyword to its enum, or `None` if not one.
+fn decoration_style_of(tok: &str) -> Option<DecorationStyle> {
+    match tok {
+        "solid" => Some(DecorationStyle::Solid),
+        "double" => Some(DecorationStyle::Double),
+        "dotted" => Some(DecorationStyle::Dotted),
+        "dashed" => Some(DecorationStyle::Dashed),
+        "wavy" => Some(DecorationStyle::Wavy),
+        _ => None,
+    }
 }
 
 /// Split on commas that sit at paren depth zero, keeping color functions

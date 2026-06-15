@@ -173,6 +173,34 @@ fn list_marker(style: ListStyle, index: u32) -> Option<Marker> {
     })
 }
 
+/// Push a text-decoration line at `(x, y)` of width `w` and thickness `h`,
+/// rendered per the word's `text-decoration-style`:
+/// - `Solid`/`Wavy`: one continuous rect (no curve primitive for wavy).
+/// - `Double`: two thin rects with a gap of `h` between them.
+/// - `Dotted`/`Dashed`: a run of short segments with gaps.
+fn push_decoration(rects: &mut Vec<RectFill>, x: f32, y: f32, w: f32, h: f32, word: &InlineWord) {
+    use argus_style::DecorationStyle::*;
+    let c = word.decoration_color;
+    match word.decoration_style {
+        Solid | Wavy => rects.push(rect(x, y, w, h, c)),
+        Double => {
+            rects.push(rect(x, y, w, h, c));
+            rects.push(rect(x, y + 2.0 * h, w, h, c));
+        }
+        Dotted | Dashed => {
+            // Dots are ~square; dashes ~3× the thickness. Gap matches the segment.
+            let seg = if matches!(word.decoration_style, Dotted) { h } else { h * 3.0 };
+            let step = seg * 2.0;
+            let mut sx = x;
+            while sx < x + w {
+                let seg_w = seg.min(x + w - sx);
+                rects.push(rect(sx, y, seg_w, h, c));
+                sx += step;
+            }
+        }
+    }
+}
+
 /// Lowercase Greek list marker for `n` (1→α … 24→ω, skipping final sigma);
 /// outside 1..=24 it falls back to the decimal number.
 fn greek_marker(n: u32) -> String {
@@ -355,6 +383,8 @@ struct InlineWord {
     shadow: Option<(f32, f32, argus_geometry::Color)>,
     /// Color of the decoration lines (`text-decoration-color`, else the text color).
     decoration_color: argus_geometry::Color,
+    /// How the decoration lines are drawn (`text-decoration-style`).
+    decoration_style: argus_style::DecorationStyle,
     /// The hyperlink target, if this word is inside an `<a href>`.
     href: Option<Rc<str>>,
     /// Force a line break before this word (an `<br>` element).
@@ -773,6 +803,7 @@ impl Ctx<'_> {
                             italic: style.italic,
                             shadow: style.text_shadow,
                             decoration_color: style.fade(style.color),
+                            decoration_style: style.decoration_style,
                             href: None,
                             hard_break: false,
                             baseline_shift: 0.0,
@@ -835,6 +866,7 @@ impl Ctx<'_> {
                         italic: false,
                         shadow: None,
                         decoration_color: argus_geometry::Color::TRANSPARENT,
+                        decoration_style: argus_style::DecorationStyle::Solid,
                         href: None,
                         hard_break: false,
                         baseline_shift: 0.0,
@@ -1015,6 +1047,7 @@ impl Ctx<'_> {
                                     italic: false,
                                     shadow: None,
                                     decoration_color: argus_geometry::Color::TRANSPARENT,
+                                    decoration_style: argus_style::DecorationStyle::Solid,
                                     href: None,
                                     hard_break: false,
                                     baseline_shift: 0.0,
@@ -1682,6 +1715,7 @@ impl Ctx<'_> {
                 italic: false,
                 shadow: None,
                 decoration_color: argus_geometry::Color::TRANSPARENT,
+                decoration_style: argus_style::DecorationStyle::Solid,
                 href: None,
                 hard_break: false,
                 baseline_shift: 0.0,
@@ -3208,6 +3242,7 @@ impl Ctx<'_> {
                 italic: style.italic,
                 shadow: style.text_shadow,
                 decoration_color: style.fade(style.decoration_color.unwrap_or(style.color)),
+                decoration_style: style.decoration_style,
                 href: None,
                 hard_break: false,
                 baseline_shift: 0.0,
@@ -3278,6 +3313,7 @@ impl Ctx<'_> {
                             shadow: style.text_shadow,
                             decoration_color: style
                                 .fade(style.decoration_color.unwrap_or(style.color)),
+                            decoration_style: style.decoration_style,
                             href: if style.hidden { None } else { link.clone() },
                             hard_break: false,
                             baseline_shift: shift,
@@ -3312,6 +3348,7 @@ impl Ctx<'_> {
                         italic: false,
                         shadow: None,
                         decoration_color: argus_geometry::Color::TRANSPARENT,
+                        decoration_style: argus_style::DecorationStyle::Solid,
                         href: link.clone(),
                         hard_break: true,
                         baseline_shift: 0.0,
@@ -3579,21 +3616,19 @@ impl Ctx<'_> {
                     shadow: w.shadow,
                     letter_spacing: ls,
                 });
+                let dh = (w.font_size / 16.0).max(1.0);
                 if w.underline {
                     let uy = wb + (w.font_size * 0.08).max(1.0);
-                    let uh = (w.font_size / 16.0).max(1.0);
-                    self.rects.push(rect(pen_x, uy, word_w, uh, w.decoration_color));
+                    push_decoration(&mut self.rects, pen_x, uy, word_w, dh, w);
                 }
                 if w.strike {
                     let sy = wb - self.font.ascent_px(w.font_size) * 0.32;
-                    let sh = (w.font_size / 16.0).max(1.0);
-                    self.rects.push(rect(pen_x, sy, word_w, sh, w.decoration_color));
+                    push_decoration(&mut self.rects, pen_x, sy, word_w, dh, w);
                 }
                 if w.overline {
                     // A line at the top of the glyph box (just above the ascent).
                     let oy = wb - self.font.ascent_px(w.font_size);
-                    let oh = (w.font_size / 16.0).max(1.0);
-                    self.rects.push(rect(pen_x, oy, word_w, oh, w.decoration_color));
+                    push_decoration(&mut self.rects, pen_x, oy, word_w, dh, w);
                 }
                 if let Some(href) = &w.href {
                     self.links.push(LinkBox {
@@ -3721,6 +3756,29 @@ mod tests {
         assert!(
             up < base,
             "superscript {up} should sit above baseline {base}"
+        );
+    }
+
+    #[test]
+    fn decoration_style_double_and_dotted_emit_extra_segments() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let count = |css: &str| {
+            let doc = parse(&format!(
+                "<p style=\"text-decoration: underline; {css}\">word</p>"
+            ));
+            layout(&doc, &font, 400.0, &ImageSizes::new()).rects.len()
+        };
+        let solid = count("text-decoration-style: solid");
+        let double = count("text-decoration-style: double");
+        let dotted = count("text-decoration-style: dotted");
+        // `double` draws a second parallel line; `dotted` breaks into several dots.
+        assert_eq!(double, solid + 1, "double underline adds one rect");
+        assert!(
+            dotted > solid,
+            "dotted underline ({dotted}) emits more segments than solid ({solid})"
         );
     }
 
