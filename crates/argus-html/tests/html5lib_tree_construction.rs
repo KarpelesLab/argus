@@ -614,4 +614,24 @@ hi</textarea>
 |       <b>
 |         <i>
 |           "deep"
+
+#data
+</p>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <p>
+
+#data
+a</br>b
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     "a"
+|     <br>
+|     "b"
 "####;

@@ -541,7 +541,15 @@ impl TreeBuilder {
             "body" | "html" => {
                 self.mode = Mode::AfterBody;
             }
+            // `</br>` is a parse error treated as a `<br>` start tag.
+            "br" => {
+                self.insert_element("br", &[]);
+            }
             "p" => {
+                // With no open paragraph, the spec implies an empty `<p>` first.
+                if !self.has_in_scope("p", true) {
+                    self.insert_and_push("p", &[]);
+                }
                 self.close_p();
             }
             n if HEADINGS.contains(&n) => {
