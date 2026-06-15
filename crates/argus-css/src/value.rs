@@ -220,7 +220,56 @@ pub fn parse_color(s: &str) -> Option<Color> {
     if let Some(inner) = s.strip_prefix("hsla(").and_then(|s| s.strip_suffix(')')) {
         return parse_hsl(inner);
     }
+    let sb = s.as_bytes();
+    if sb.len() > 10 && sb[..10].eq_ignore_ascii_case(b"color-mix(") && s.ends_with(')') {
+        return parse_color_mix(&s[10..s.len() - 1]);
+    }
     named_color(&s.to_ascii_lowercase())
+}
+
+/// Parse `color-mix(in <space>, <c1> [<p1>%], <c2> [<p2>%])` — a weighted blend of
+/// two colors (mixed component-wise in sRGB; the color space is accepted but
+/// always treated as sRGB). Omitted percentages default so the two sum to 100%.
+fn parse_color_mix(body: &str) -> Option<Color> {
+    let args = split_top_commas(body);
+    if args.len() != 3 || !args[0].trim().to_ascii_lowercase().starts_with("in ") {
+        return None;
+    }
+    // Each color arg is `<color> [<pct>%]` (percentage optional).
+    let parse_arg = |a: &str| -> Option<(Color, Option<f32>)> {
+        let a = a.trim();
+        if let Some(idx) = a.rfind('%') {
+            // The token before `%` is the percentage; the rest is the color.
+            let (head, _) = a.split_at(idx);
+            if let Some(sp) = head.rfind(char::is_whitespace) {
+                let pct: f32 = head[sp..].trim().parse().ok()?;
+                let col = parse_color(head[..sp].trim())?;
+                return Some((col, Some(pct)));
+            }
+        }
+        Some((parse_color(a)?, None))
+    };
+    let (c1, p1) = parse_arg(args[1])?;
+    let (c2, p2) = parse_arg(args[2])?;
+    // Resolve weights: if one is missing it's `100 - other`; if both missing, 50/50.
+    let (w1, w2) = match (p1, p2) {
+        (Some(a), Some(b)) => (a, b),
+        (Some(a), None) => (a, 100.0 - a),
+        (None, Some(b)) => (100.0 - b, b),
+        (None, None) => (50.0, 50.0),
+    };
+    let total = w1 + w2;
+    if total <= 0.0 {
+        return None;
+    }
+    let (f1, f2) = (w1 / total, w2 / total);
+    let mix = |a: u8, b: u8| (a as f32 * f1 + b as f32 * f2).round().clamp(0.0, 255.0) as u8;
+    Some(Color::rgba(
+        mix(c1.r, c2.r),
+        mix(c1.g, c2.g),
+        mix(c1.b, c2.b),
+        mix(c1.a, c2.a),
+    ))
 }
 
 /// Parse `hsl()`/`hsla()` body — `H[deg], S%, L%[, A]` (comma- or space/slash-
@@ -572,6 +621,28 @@ mod tests {
         // Angle units for hue: 0.5turn and 200grad are both 180° (cyan).
         assert_eq!(parse_color("hsl(0.5turn, 100%, 50%)"), Some(Color::rgb(0, 255, 255)));
         assert_eq!(parse_color("hsl(200grad, 100%, 50%)"), Some(Color::rgb(0, 255, 255)));
+    }
+
+    #[test]
+    fn color_mix() {
+        // 50/50 red+blue → purple (128, 0, 128).
+        assert_eq!(parse_color("color-mix(in srgb, red, blue)"), Some(Color::rgb(128, 0, 128)));
+        // Weighted: 25% red, 75% blue.
+        assert_eq!(
+            parse_color("color-mix(in srgb, red 25%, blue 75%)"),
+            Some(Color::rgb(64, 0, 191))
+        );
+        // One percentage given → the other is 100 - it.
+        assert_eq!(
+            parse_color("color-mix(in srgb, white 100%, black)"),
+            Some(Color::rgb(255, 255, 255))
+        );
+        // Mixing two named/hex colors.
+        assert_eq!(
+            parse_color("color-mix(in srgb, #000000, #ffffff)"),
+            Some(Color::rgb(128, 128, 128))
+        );
+        assert_eq!(parse_color("color-mix(in srgb, red)"), None); // needs two colors
     }
 
     #[test]
