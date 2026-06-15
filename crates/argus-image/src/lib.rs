@@ -454,6 +454,40 @@ mod tests {
     }
 
     #[test]
+    fn decoders_never_panic_on_malformed_input() {
+        // Image bytes come from the network — every decoder must fail closed (return
+        // None) on truncated/hostile input, never panic. Fuzz each format by prefixing
+        // its magic onto pseudo-random bodies, plus the magic alone (truncated header).
+        let magics: &[&[u8]] = &[
+            &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A], // PNG
+            b"GIF89a",
+            b"GIF87a",
+            b"BM",
+            &[0xFF, 0xD8, 0xFF],         // JPEG
+            b"RIFF\0\0\0\0WEBPVP8L",     // WebP
+            b"qoif",                     // QOI
+            &[0x00, 0x00, 0x01, 0x00],   // ICO
+        ];
+        let mut seed = 0x9E3779B97F4A7C15u64;
+        let mut byte = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed & 0xff) as u8
+        };
+        for magic in magics {
+            // Magic alone (header truncated to nothing).
+            let _ = decode(magic);
+            for _ in 0..120 {
+                let len = byte() as usize * 2;
+                let mut buf = magic.to_vec();
+                buf.extend((0..len).map(|_| byte()));
+                let _ = decode(&buf); // must not panic
+            }
+        }
+    }
+
+    #[test]
     fn decodes_a_tiny_png_data_url() {
         // 1x1 red PNG.
         let url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
