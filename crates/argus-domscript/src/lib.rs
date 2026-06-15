@@ -29,7 +29,7 @@
 //! `classList`, scoped `querySelector`/`querySelectorAll`, `matches`/`closest`,
 //! tree traversal (`parentNode`/`parentElement`, `children`, `childElementCount`,
 //! `first`/`lastElementChild`, `next`/`previousElementSibling`), `tagName`/
-//! `nodeName`, and `appendChild`/`append`/`remove`.
+//! `nodeName`, and `appendChild`/`append`/`insertBefore`/`insertAdjacentHTML`/`remove`.
 
 use argus_dom::{Attribute, Document, NodeData, NodeId, QualName};
 
@@ -288,6 +288,12 @@ function __argus_el(tgt) {
       }
       if (k === "remove") {
         return function() { __argus_ops.push({op: "remove", tgt: tgt}); };
+      }
+      if (k === "insertAdjacentHTML") {
+        return function(pos, html) {
+          __argus_ops.push({op: "insertAdjacentHTML", tgt: tgt,
+            key: ("" + pos).toLowerCase(), value: "" + html});
+        };
       }
       if (k === "querySelector") {
         return function(sel) { return __argus_el({kind: "scoped", parent: tgt, val: "" + sel}); };
@@ -851,6 +857,7 @@ fn apply_ops(
             "removeattr" => remove_attribute(doc, node, &key),
             "class" => apply_class_list(doc, node, &key, &value),
             "remove" => doc.detach(node),
+            "insertAdjacentHTML" => insert_adjacent_html(doc, node, &key, &value),
             "append" => {
                 if let Some(child) = resolve_target(doc, &created, &snapshot, get("child")) {
                     doc.append(node, child);
@@ -1016,6 +1023,13 @@ fn find_body(doc: &Document) -> Option<NodeId> {
 
 /// Deep-copy `src_node` from `src` into `dst` as a new child of `dst_parent`.
 fn import_subtree(src: &Document, src_node: NodeId, dst: &mut Document, dst_parent: NodeId) {
+    if let Some(new) = import_detached(src, src_node, dst) {
+        dst.append(dst_parent, new);
+    }
+}
+
+/// Deep-copy `src_node` into `dst` as a new **detached** node (caller attaches it).
+fn import_detached(src: &Document, src_node: NodeId, dst: &mut Document) -> Option<NodeId> {
     let new = match &src.node(src_node).data {
         NodeData::Element(e) => dst.create_element(
             QualName::html(e.name.local.clone()),
@@ -1026,12 +1040,66 @@ fn import_subtree(src: &Document, src_node: NodeId, dst: &mut Document, dst_pare
         ),
         NodeData::Text(t) => dst.create_text(t.clone()),
         NodeData::Comment(t) => dst.create_comment(t.clone()),
-        _ => return,
+        _ => return None,
     };
-    dst.append(dst_parent, new);
     let kids: Vec<NodeId> = src.children(src_node).collect();
     for c in kids {
-        import_subtree(src, c, dst, new);
+        if let Some(cn) = import_detached(src, c, dst) {
+            dst.append(new, cn);
+        }
+    }
+    Some(new)
+}
+
+/// Implement `element.insertAdjacentHTML(position, html)`: parse `html` and insert
+/// the resulting nodes relative to `node` per `position`.
+fn insert_adjacent_html(doc: &mut Document, node: NodeId, pos: &str, html: &str) {
+    let frag = argus_html::parse(html);
+    let Some(body) = find_body(&frag) else { return };
+    let kids: Vec<NodeId> = frag.children(body).collect();
+    // Import each top-level node detached, then place it per `position`.
+    let imported: Vec<NodeId> = kids
+        .iter()
+        .filter_map(|&c| import_detached(&frag, c, doc))
+        .collect();
+    match pos {
+        "beforeend" => {
+            for n in imported {
+                doc.append(node, n);
+            }
+        }
+        "afterbegin" => match doc.node(node).first_child() {
+            Some(first) => {
+                for n in imported {
+                    doc.insert_before(first, n);
+                }
+            }
+            None => {
+                for n in imported {
+                    doc.append(node, n);
+                }
+            }
+        },
+        "beforebegin" => {
+            for n in imported {
+                doc.insert_before(node, n);
+            }
+        }
+        "afterend" => match doc.node(node).next_sibling() {
+            Some(next) => {
+                for n in imported {
+                    doc.insert_before(next, n);
+                }
+            }
+            None => {
+                if let Some(parent) = doc.node(node).parent() {
+                    for n in imported {
+                        doc.append(parent, n);
+                    }
+                }
+            }
+        },
+        _ => {}
     }
 }
 
@@ -1848,6 +1916,42 @@ mod tests {
         apply_scripts(&mut doc);
         assert!(attr_of(&doc, "d", "open").is_some(), "details opened");
         assert!(attr_of(&doc, "b", "disabled").is_none(), "button enabled");
+    }
+
+    #[test]
+    fn insert_adjacent_html_positions() {
+        let mut doc = argus_html::parse(
+            "<div id=\"wrap\"><p id=\"t\">mid</p></div>\
+             <script>\
+               var t = document.getElementById('t');\
+               t.insertAdjacentHTML('beforebegin', '<b id=\"bb\">BB</b>');\
+               t.insertAdjacentHTML('afterbegin', '<i id=\"ab\">AB</i>');\
+               t.insertAdjacentHTML('beforeend', '<u id=\"be\">BE</u>');\
+               t.insertAdjacentHTML('afterend', '<s id=\"ae\">AE</s>');\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        // beforebegin/afterend become siblings of #t inside #wrap; afterbegin/
+        // beforeend become first/last children of #t.
+        let wrap = find_by_id(&doc, "wrap").unwrap();
+        let order: Vec<String> = doc
+            .children(wrap)
+            .filter_map(|c| {
+                doc.node(c)
+                    .as_element()
+                    .and_then(|e| e.attr("id"))
+                    .map(String::from)
+            })
+            .collect();
+        assert_eq!(order, vec!["bb", "t", "ae"], "sibling order");
+        // #t's children: <i id=ab> first, then text "mid", then <u id=be>.
+        let t = find_by_id(&doc, "t").unwrap();
+        let kids: Vec<String> = doc
+            .children(t)
+            .filter_map(|c| doc.node(c).as_element().and_then(|e| e.attr("id")).map(String::from))
+            .collect();
+        assert_eq!(kids, vec!["ab", "be"], "afterbegin first, beforeend last");
+        assert_eq!(text_of(&doc, "t"), "ABmidBE");
     }
 
     #[test]
