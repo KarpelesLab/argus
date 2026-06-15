@@ -11,10 +11,11 @@
 //! `min/max-width`, `height`, and `line-height`), `position: relative` offsets,
 //! lists (`list-style-type`), form controls (`<input>`/`<textarea>`/`<button>`/
 //! `<select>`), `<br>`, `<hr>`, tables, and basic flex/grid (with `gap`).
-//! Still a subset of `docs/subsystems/layout.md`: no floats, no absolute/fixed
-//! positioning, no margin collapsing, no `flex-grow`/`justify`/`align` or grid
-//! spans, no inline-level boxes with their own geometry (inline runs adopt their
-//! block's font size/color).
+//! Inline runs keep their own font size, color, and background (so spans, `<mark>`,
+//! emphasis, and links style correctly). Still a subset of
+//! `docs/subsystems/layout.md`: no floats, no absolute/fixed positioning, no margin
+//! collapsing, no `flex-grow`/`justify`/`align` or grid spans, and no inline-block
+//! geometry (inline padding/borders/width don't reserve space).
 
 use argus_dom::{Document, ElementData, NodeData, NodeId};
 use argus_gfx::{Font, RectFill, TextRun};
