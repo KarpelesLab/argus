@@ -582,6 +582,35 @@ impl Layout {
 /// Intrinsic `(width, height)` of each image by source URL, for sizing boxes.
 pub type ImageSizes = HashMap<String, (u32, u32)>;
 
+/// Append the concatenated text-node content of `id`'s subtree to `out`.
+fn collect_text(doc: &Document, id: NodeId, out: &mut String) {
+    match &doc.node(id).data {
+        NodeData::Text(t) => out.push_str(t),
+        _ => {
+            for c in doc.children(id) {
+                collect_text(doc, c, out);
+            }
+        }
+    }
+}
+
+/// Percent-encode `s` as `application/x-www-form-urlencoded`: spaces become `+`,
+/// the unreserved set (`A-Za-z0-9-_.*`) passes through, and every other byte is
+/// `%XX` (UTF-8 bytes, uppercase hex). Used to build GET form-submission queries.
+fn form_urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'*' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// Lay `doc` out into a display list for a viewport `viewport_width` pixels wide,
 /// given the intrinsic sizes of any images.
 pub fn layout(doc: &Document, font: &Font, viewport_width: f32, images: &ImageSizes) -> Layout {
@@ -1516,6 +1545,22 @@ impl Ctx<'_> {
                 computed: computed_css_props(&style),
             });
         }
+        // A submit button navigates to its form's GET submission URL when clicked:
+        // serialize the enclosing form's controls and emit a link region over the
+        // button (reusing the link/click→navigate path). GET only; POST forms and
+        // non-submit controls yield `None`. Pushed before any inline-block shift so
+        // the region tracks the button's final position.
+        if !style.hidden {
+            if let Some(href) = self.form_get_url(id) {
+                self.links.push(LinkBox {
+                    x: border_box_left,
+                    y: border_box_top,
+                    w: border_box_w,
+                    h: self.cursor_y - border_box_top,
+                    href,
+                });
+            }
+        }
 
         // Restore the parent's containing block now that the subtree is laid out.
         self.cb_x = saved_cb.0;
@@ -2443,6 +2488,130 @@ impl Ctx<'_> {
             collect(self.doc, opt, &mut text);
         }
         text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// The submitted value of a `<select>`: the chosen option's `value` attribute,
+    /// or its visible text when it has none. Mirrors `selected_option_text`'s
+    /// "selected, else first option" choice.
+    fn selected_option_value(&self, select: NodeId) -> String {
+        let mut first: Option<NodeId> = None;
+        fn walk(doc: &Document, id: NodeId, first: &mut Option<NodeId>) -> Option<NodeId> {
+            for c in doc.children(id) {
+                if let NodeData::Element(e) = &doc.node(c).data {
+                    if e.name.is_html("option") {
+                        if first.is_none() {
+                            *first = Some(c);
+                        }
+                        if e.attr("selected").is_some() {
+                            return Some(c);
+                        }
+                    }
+                }
+                if let Some(found) = walk(doc, c, first) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        let Some(opt) = walk(self.doc, select, &mut first).or(first) else {
+            return String::new();
+        };
+        if let Some(v) = self.doc.node(opt).as_element().and_then(|e| e.attr("value")) {
+            return v.to_string();
+        }
+        let mut text = String::new();
+        collect_text(self.doc, opt, &mut text);
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// If `id` is a submit control inside a `method=get` `<form>`, build the
+    /// `action?query` URL by serializing the form's successful controls as
+    /// `application/x-www-form-urlencoded` (the activated submit's own
+    /// `name=value` included). Returns `None` for non-submit elements, `POST`
+    /// forms (no request-body channel yet), or controls outside any form — so the
+    /// caller only treats real GET submit buttons as navigation.
+    fn form_get_url(&self, id: NodeId) -> Option<String> {
+        let btn = self.doc.node(id).as_element()?;
+        let is_submit = if btn.name.is_html("button") {
+            // A `<button>`'s default type is `submit`.
+            !matches!(btn.attr("type"), Some("button") | Some("reset"))
+        } else if btn.name.is_html("input") {
+            matches!(btn.attr("type"), Some("submit") | Some("image"))
+        } else {
+            false
+        };
+        if !is_submit {
+            return None;
+        }
+        // Walk up to the enclosing <form>.
+        let mut cur = self.doc.node(id).parent();
+        let form = loop {
+            let f = cur?;
+            if self.doc.node(f).as_element().is_some_and(|e| e.name.is_html("form")) {
+                break f;
+            }
+            cur = self.doc.node(f).parent();
+        };
+        let fe = self.doc.node(form).as_element()?;
+        if fe.attr("method").is_some_and(|m| m.eq_ignore_ascii_case("post")) {
+            return None; // POST needs a request body — left to a later slice.
+        }
+        let action = fe.attr("action").unwrap_or("");
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        self.collect_form_fields(form, id, &mut pairs);
+        let query = pairs
+            .iter()
+            .map(|(k, v)| format!("{}={}", form_urlencode(k), form_urlencode(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+        if query.is_empty() {
+            return Some(action.to_string());
+        }
+        // `action` may already carry a query string (`search?lang=en`).
+        let sep = if action.contains('?') { '&' } else { '?' };
+        Some(format!("{action}{sep}{query}"))
+    }
+
+    /// Append each successful form control's `name=value` pair (document order),
+    /// recursing through the form subtree. `submit_id` is the activated submit so
+    /// only it (not other submit buttons) contributes its own pair.
+    fn collect_form_fields(&self, node: NodeId, submit_id: NodeId, out: &mut Vec<(String, String)>) {
+        for c in self.doc.children(node) {
+            if let Some(e) = self.doc.node(c).as_element() {
+                let named = e.attr("name").filter(|n| !n.is_empty());
+                if let Some(name) = named.filter(|_| e.attr("disabled").is_none()) {
+                    if e.name.is_html("input") {
+                        match e.attr("type").unwrap_or("text") {
+                            "checkbox" | "radio" => {
+                                if e.attr("checked").is_some() {
+                                    out.push((name.to_string(), e.attr("value").unwrap_or("on").to_string()));
+                                }
+                            }
+                            "submit" | "image" => {
+                                if c == submit_id {
+                                    out.push((name.to_string(), e.attr("value").unwrap_or("").to_string()));
+                                }
+                            }
+                            // Buttons/reset/file controls are never submitted by value.
+                            "button" | "reset" | "file" => {}
+                            _ => out.push((name.to_string(), e.attr("value").unwrap_or("").to_string())),
+                        }
+                    } else if e.name.is_html("select") {
+                        out.push((name.to_string(), self.selected_option_value(c)));
+                    } else if e.name.is_html("textarea") {
+                        let mut s = String::new();
+                        collect_text(self.doc, c, &mut s);
+                        out.push((name.to_string(), s));
+                    } else if e.name.is_html("button")
+                        && c == submit_id
+                        && !matches!(e.attr("type"), Some("button") | Some("reset"))
+                    {
+                        out.push((name.to_string(), e.attr("value").unwrap_or("").to_string()));
+                    }
+                }
+            }
+            self.collect_form_fields(c, submit_id, out);
+        }
     }
 
     /// Lay out a `display: flex` container. In the default `row` direction the
@@ -4447,6 +4616,57 @@ mod tests {
         assert!(texts.contains(&"Submit"), "unvalued submit shows 'Submit': {texts:?}");
         assert!(texts.contains(&"Reset"), "unvalued reset shows 'Reset': {texts:?}");
         assert!(texts.contains(&"Go"), "explicit value still wins: {texts:?}");
+    }
+
+    #[test]
+    fn get_form_submit_button_becomes_a_link_with_serialized_fields() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A GET form: text input, a checked + an unchecked checkbox, a select, and
+        // a named submit. Clicking submit serializes the successful controls.
+        let html = "<form action=\"/search\">\
+            <input name=\"q\" value=\"hello world\">\
+            <input type=\"checkbox\" name=\"a\" checked>\
+            <input type=\"checkbox\" name=\"b\">\
+            <select name=\"sort\"><option value=\"new\">New</option>\
+              <option value=\"old\" selected>Old</option></select>\
+            <input type=\"submit\" name=\"go\" value=\"Search\">\
+            </form>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 600.0, &ImageSizes::new());
+        let link = l
+            .links
+            .iter()
+            .find(|l| l.href.starts_with("/search?"))
+            .expect("submit button emits a GET-submission link");
+        // Spaces → '+', checked-only checkbox, selected option value, submit's own
+        // name=value, all in document order.
+        assert_eq!(
+            link.href,
+            "/search?q=hello+world&a=on&sort=old&go=Search",
+            "serialized query"
+        );
+
+        // A POST form does NOT become a navigable link (no request-body channel).
+        let post = parse("<form method=\"post\" action=\"/x\"><input name=\"q\" value=\"1\"><input type=\"submit\"></form>");
+        let lp = layout(&post, &font, 400.0, &ImageSizes::new());
+        assert!(
+            lp.links.iter().all(|l| !l.href.contains("/x")),
+            "POST form submit is not a GET link"
+        );
+
+        // A bare submit (no form) is not a link either.
+        let bare = parse("<input type=\"submit\">");
+        let lb = layout(&bare, &font, 400.0, &ImageSizes::new());
+        assert!(lb.links.is_empty(), "submit outside a form → no link");
+
+        // Reserved characters in values are percent-encoded.
+        let amp = parse("<form action=\"/s\"><input name=\"k\" value=\"a&b=c\"><input type=\"submit\"></form>");
+        let la = layout(&amp, &font, 400.0, &ImageSizes::new());
+        let href = &la.links.iter().find(|l| l.href.starts_with("/s")).unwrap().href;
+        assert_eq!(href, "/s?k=a%26b%3Dc", "ampersand/equals encoded");
     }
 
     #[test]
