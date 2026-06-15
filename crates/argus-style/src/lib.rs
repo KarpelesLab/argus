@@ -439,6 +439,8 @@ h6 { font-size: 0.67em; font-weight: bold; margin: 2.33em 0 }
 p { margin: 1em 0 }
 b, strong { font-weight: bold }
 i, em, cite, var, dfn, address { font-style: italic }
+q::before { content: \"\\201C\" }
+q::after { content: \"\\201D\" }
 a { color: #0645ad; text-decoration: underline }
 u, ins { text-decoration: underline }
 s, del, strike { text-decoration: line-through }
@@ -619,7 +621,9 @@ pub fn pseudo_content(
 ) -> Option<String> {
     let mut best: Option<(Specificity, usize, String)> = None;
     let mut order = 0usize;
-    for rule in &author.rules {
+    // Scan the UA stylesheet first (lowest priority), then author rules — later
+    // rules (higher `order`) win ties, so author content overrides UA defaults.
+    for rule in ua_stylesheet().rules.iter().chain(author.rules.iter()) {
         let spec = rule
             .selectors
             .iter()
@@ -657,12 +661,42 @@ fn unquote_content(v: &str) -> String {
         && (bytes[0] == b'"' || bytes[0] == b'\'')
         && bytes[bytes.len() - 1] == bytes[0]
     {
-        v[1..v.len() - 1].replace("\\A", "\n").replace("\\\"", "\"")
+        decode_css_escapes(&v[1..v.len() - 1])
     } else if v.contains('(') {
         String::new() // an unsupported content function
     } else {
-        v.replace("\\A", "\n")
+        decode_css_escapes(v)
     }
+}
+
+/// Decode CSS string escapes: `\<1-6 hex>` (with an optional trailing space) is a
+/// Unicode code point; any other `\<char>` is that literal char.
+fn decode_css_escapes(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek() {
+            Some(h) if h.is_ascii_hexdigit() => {
+                let mut hex = String::new();
+                while hex.len() < 6 && chars.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
+                    hex.push(chars.next().unwrap());
+                }
+                if chars.peek() == Some(&' ') {
+                    chars.next(); // a single whitespace terminator is consumed
+                }
+                if let Some(cp) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    out.push(cp);
+                }
+            }
+            Some(_) => out.push(chars.next().unwrap()),
+            None => {}
+        }
+    }
+    out
 }
 
 fn collect(

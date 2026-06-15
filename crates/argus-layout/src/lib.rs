@@ -2374,8 +2374,20 @@ impl Ctx<'_> {
                 } else {
                     link
                 };
+                // `::before`/`::after` generated content for inline elements (e.g.
+                // the UA quotes on `<q>`).
+                if let Some(t) =
+                    argus_style::pseudo_content(self.doc, id, self.author, PseudoElement::Before)
+                {
+                    self.gather_generated(&t, &cstyle, words, pending_space);
+                }
                 for child in self.doc.children(id) {
                     self.gather_inline(child, &cstyle, child_link.clone(), words, pending_space);
+                }
+                if let Some(t) =
+                    argus_style::pseudo_content(self.doc, id, self.author, PseudoElement::After)
+                {
+                    self.gather_generated(&t, &cstyle, words, pending_space);
                 }
             }
             _ => {}
@@ -4071,6 +4083,23 @@ borderdisplay0123floatleftrightclearbothfrgrowshrinkwrapspanabsolutefixedrelativ
         let post = texts.iter().position(|t| *t == "POST");
         assert!(pre.is_some() && mid.is_some() && post.is_some(), "runs: {texts:?}");
         assert!(pre < mid && mid < post, "order PRE<mid<POST: {texts:?}");
+    }
+
+    #[test]
+    fn q_element_gets_curly_quotes_via_css_escapes() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // The UA stylesheet adds “ ” around <q> via content: "\201C"/"\201D";
+        // decode_css_escapes must turn the hex escape into the curly-quote chars.
+        let doc = parse("<p><q>hi</q></p>");
+        let lay = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let joined: String = lay.runs.iter().map(|r| r.text.as_str()).collect();
+        assert!(joined.contains('\u{201C}'), "opening curly quote present: {joined:?}");
+        assert!(joined.contains('\u{201D}'), "closing curly quote present: {joined:?}");
+        // The raw escape text must NOT leak through.
+        assert!(!joined.contains("201C"), "escape not decoded: {joined:?}");
     }
 
     #[test]

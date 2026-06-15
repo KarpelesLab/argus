@@ -196,8 +196,24 @@ impl Lexer {
                 break;
             }
             if c == '\\' {
-                if let Some(n) = self.bump() {
-                    s.push(n);
+                // CSS escape: `\<1-6 hex>` (optional trailing space) is a code point;
+                // any other `\<char>` is that literal character.
+                match self.peek() {
+                    Some(h) if h.is_ascii_hexdigit() => {
+                        let mut hex = String::new();
+                        while hex.len() < 6 && self.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
+                            hex.push(self.bump().unwrap());
+                        }
+                        if self.peek() == Some(' ') {
+                            self.bump();
+                        }
+                        if let Some(cp) = u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)
+                        {
+                            s.push(cp);
+                        }
+                    }
+                    Some(_) => s.push(self.bump().unwrap()),
+                    None => {}
                 }
             } else {
                 s.push(c);
