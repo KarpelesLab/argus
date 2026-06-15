@@ -1027,6 +1027,25 @@ impl Ctx<'_> {
     /// approximating a two-stop linear gradient across the box.
     #[allow(clippy::too_many_arguments)]
     fn fill_gradient_strips(&mut self, start: usize, g: &Gradient, x: f32, y: f32, w: f32, h: f32) {
+        if g.radial {
+            // Concentric centered rects from the edge color (full box) inward to the
+            // center color; rounded toward circles.
+            let n = GRAD_STEPS as f32;
+            for k in 0..GRAD_STEPS {
+                let f = k as f32 / (n - 1.0); // 0 = full box (edge), 1 = center
+                let iw = w * (1.0 - f);
+                let ih = h * (1.0 - f);
+                self.rects[start + k] = RectFill {
+                    x: x + (w - iw) / 2.0,
+                    y: y + (h - ih) / 2.0,
+                    w: iw,
+                    h: ih,
+                    color: lerp_color(g.to, g.from, f),
+                    radius: iw.min(ih) / 2.0,
+                };
+            }
+            return;
+        }
         let horizontal = matches!(g.dir, GradientDir::ToRight | GradientDir::ToLeft);
         let reversed = matches!(g.dir, GradientDir::ToLeft | GradientDir::ToTop);
         let n = GRAD_STEPS as f32;
@@ -3136,6 +3155,23 @@ mod tests {
         let bot = strips.last().unwrap();
         assert!(top.color.r > 180 && top.color.b < 80, "top strip red, got {:?}", top.color);
         assert!(bot.color.b > 180 && bot.color.r < 80, "bottom strip blue, got {:?}", bot.color);
+    }
+
+    #[test]
+    fn radial_gradient_paints_concentric_rects() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // radial red(center) -> blue(edge): the full-box rect is blue, a tiny
+        // centered rect is red.
+        let html = "<div style=\"width:60px; height:60px; background: radial-gradient(#ff0000, #0000ff)\">x</div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let outer = l.rects.iter().find(|r| r.w > 55.0 && r.color.b > 180 && r.color.r < 80);
+        let inner = l.rects.iter().find(|r| r.w < 12.0 && r.color.r > 180 && r.color.b < 80);
+        assert!(outer.is_some(), "outer ring is blue");
+        assert!(inner.is_some(), "inner ring is red");
     }
 
     #[test]

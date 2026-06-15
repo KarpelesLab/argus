@@ -105,12 +105,14 @@ pub enum GradientDir {
     ToTop,
 }
 
-/// A two-stop axis-aligned `linear-gradient` background.
+/// A two-stop gradient background — axis-aligned `linear-gradient` (using `dir`),
+/// or a `radial-gradient` (`radial = true`; `from` is the center, `to` the edge).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Gradient {
     pub dir: GradientDir,
     pub from: Color,
     pub to: Color,
+    pub radial: bool,
 }
 
 /// `float` — take a box out of flow to the left/right, with content flowing past.
@@ -765,6 +767,8 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     {
         if v.contains("linear-gradient(") {
             cs.background_gradient = parse_linear_gradient(v);
+        } else if v.contains("radial-gradient(") {
+            cs.background_gradient = parse_radial_gradient(v);
         }
     }
     if let Some(v) = map.get("text-align") {
@@ -1412,7 +1416,34 @@ fn parse_linear_gradient(v: &str) -> Option<Gradient> {
     };
     let from = color_of(color_parts.first()?)?;
     let to = color_of(color_parts.last()?)?;
-    Some(Gradient { dir, from, to })
+    Some(Gradient {
+        dir,
+        from,
+        to,
+        radial: false,
+    })
+}
+
+/// Parse a two-stop `radial-gradient(...)` — the first color is the center, the
+/// last the edge. Any shape/position prefix is ignored.
+fn parse_radial_gradient(v: &str) -> Option<Gradient> {
+    let start = v.find("radial-gradient(")? + "radial-gradient(".len();
+    let rest = &v[start..];
+    let inner = &rest[..rest.find(')').unwrap_or(rest.len())];
+    let colors: Vec<Color> = inner
+        .split(',')
+        .filter_map(|p| p.split_whitespace().find_map(parse_color))
+        .collect();
+    if colors.len() >= 2 {
+        Some(Gradient {
+            dir: GradientDir::ToBottom,
+            from: colors[0],
+            to: *colors.last().unwrap(),
+            radial: true,
+        })
+    } else {
+        None
+    }
 }
 
 /// Parse a (single, outer) `box-shadow` into `(offset-x, offset-y, spread, color)`
