@@ -1937,6 +1937,11 @@ fn parse_grid_span(v: &str) -> u32 {
             return n.trim().parse::<u32>().unwrap_or(1).max(1);
         }
         if let (Ok(a), Ok(b)) = (start.parse::<i32>(), end.parse::<i32>()) {
+            // A negative end line (e.g. `1 / -1`) means "to the last line"; signal
+            // that with the 0 sentinel, resolved against the track count in layout.
+            if b < 0 {
+                return 0;
+            }
             return (b - a).max(1) as u32;
         }
         return 1;

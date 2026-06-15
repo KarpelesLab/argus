@@ -2581,7 +2581,17 @@ impl Ctx<'_> {
         let mut cursor = (0usize, 0usize); // (row, col) search start
         for &item in &items {
             let istyle = computed_style(self.doc, item, &style, self.author);
-            let cspan = (istyle.grid_column_span.max(1) as usize).min(cols);
+            // 0 is the "span to the last line" sentinel (e.g. `grid-column: 1 / -1`):
+            // span from the explicit start column (or 0) through the last column.
+            let start_col = istyle
+                .grid_column_start
+                .map(|l| (l.saturating_sub(1) as usize).min(cols.saturating_sub(1)))
+                .unwrap_or(0);
+            let cspan = if istyle.grid_column_span == 0 {
+                cols.saturating_sub(start_col).max(1)
+            } else {
+                (istyle.grid_column_span as usize).min(cols)
+            };
             let rspan = istyle.grid_row_span.max(1) as usize;
             // Explicit `grid-column`/`grid-row` lines pin an item's column/row; a
             // pinned-only axis scans the other for the first fit. Otherwise the item
@@ -6109,6 +6119,26 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         let ay = l.runs.iter().find(|r| r.text == "a").unwrap().baseline;
         let by = l.runs.iter().find(|r| r.text == "b").unwrap().baseline;
         assert!(ay > by + 10.0, "row-2 item 'a' sits below row-1 'b': {by} vs {ay}");
+    }
+
+    #[test]
+    fn grid_column_span_to_last_line() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A 3-column grid; "full" spans `1 / -1` (all three columns), so the next
+        // item "x" wraps to row 2 (full occupies the whole first row).
+        let html = "<div style=\"display:grid; width:300px; grid-template-columns: repeat(3, 1fr)\">\
+                      <div style=\"grid-column: 1 / -1\">full</div>\
+                      <div>x</div>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 600.0, &ImageSizes::new());
+        let fy = l.runs.iter().find(|r| r.text == "full").unwrap();
+        let xy = l.runs.iter().find(|r| r.text == "x").unwrap();
+        assert!((fy.x - PAGE_MARGIN).abs() < 2.0, "full starts at column 0");
+        assert!(xy.baseline > fy.baseline + 10.0, "x wraps below the full-width item");
     }
 
     #[test]
