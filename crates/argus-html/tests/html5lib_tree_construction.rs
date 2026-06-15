@@ -917,4 +917,65 @@ a</br>b
 |         <tr>
 |           <td>
 |             "2"
+
+#data
+<a href="https://x">link</a>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <a>
+|       href="https://x"
+|       "link"
+
+#data
+<!DOCTYPE html><p>x</p>
+#errors
+#document
+| <!DOCTYPE html>
+| <html>
+|   <head>
+|   <body>
+|     <p>
+|       "x"
+
+#data
+<div><p>1<p>2</div>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <div>
+|       <p>
+|         "1"
+|       <p>
+|         "2"
+
+#data
+<b>1<i>2</i>3</b>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <b>
+|       "1"
+|       <i>
+|         "2"
+|       "3"
+
+#data
+<select><option>a<option>b</select>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <select>
+|       <option>
+|         "a"
+|       <option>
+|         "b"
 "####;
