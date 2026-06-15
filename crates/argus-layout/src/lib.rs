@@ -2365,10 +2365,17 @@ impl Ctx<'_> {
             let istyle = computed_style(self.doc, item, &style, self.author);
             let cspan = (istyle.grid_column_span.max(1) as usize).min(cols);
             let rspan = istyle.grid_row_span.max(1) as usize;
-            // Find the next free slot at or after the cursor.
-            let (mut r, mut c) = cursor;
+            // Explicit column line (`grid-column: 2 / …`) pins the column and scans
+            // rows top-down for the first fit; otherwise auto-flow from the cursor.
+            let explicit_col = istyle.grid_column_start.map(|line| {
+                (line.saturating_sub(1) as usize).min(cols.saturating_sub(cspan))
+            });
+            let (mut r, mut c) = match explicit_col {
+                Some(col) => (0usize, col),
+                None => cursor,
+            };
             loop {
-                if c + cspan > cols {
+                if explicit_col.is_none() && c + cspan > cols {
                     r += 1;
                     c = 0;
                     continue;
@@ -2376,7 +2383,11 @@ impl Ctx<'_> {
                 if free_at(&occ, r, c, cspan) {
                     break;
                 }
-                c += 1;
+                if explicit_col.is_some() {
+                    r += 1;
+                } else {
+                    c += 1;
+                }
             }
             // Mark the span's cells occupied (growing the occupancy grid as needed).
             while occ.len() < r + rspan {
@@ -2396,7 +2407,10 @@ impl Ctx<'_> {
                 rspan,
                 width,
             });
-            cursor = (r, c + cspan);
+            // Only auto-placed items advance the auto-placement cursor.
+            if explicit_col.is_none() {
+                cursor = (r, c + cspan);
+            }
         }
         let nrows = occ.len();
 
@@ -5318,6 +5332,33 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         assert!((bx - 208.0).abs() < 6.0, "b in the third column, got {bx}");
         // "c" wraps to the next row, back under "a".
         assert!(cy > ay + 10.0 && (cx - ax).abs() < 2.0, "c under a on row 2");
+    }
+
+    #[test]
+    fn grid_line_based_column_placement() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Three equal 100px columns. "a" is pinned to line 2 (column index 1) even
+        // though it comes first in source; "b" pins to line 3 (column 2). Both land
+        // on row 0 at their explicit columns, skipping column 0.
+        let html = "<div style=\"display:grid; width:300px; grid-template-columns: repeat(3, 1fr)\">\
+                      <div style=\"grid-column: 2\">a</div>\
+                      <div style=\"grid-column: 3 / 4\">b</div>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 600.0, &ImageSizes::new());
+        let at = |t: &str| {
+            let r = l.runs.iter().find(|r| r.text == t).unwrap();
+            (r.x, r.baseline)
+        };
+        let (ax, ay) = at("a");
+        let (bx, by) = at("b");
+        assert!((ay - by).abs() < 1.0, "a and b share row 0");
+        // Column 1 ≈ origin + 100, column 2 ≈ origin + 200.
+        assert!((bx - ax - 100.0).abs() < 6.0, "b one column right of a: {ax} -> {bx}");
+        assert!(ax > 100.0, "a is not in column 0, got {ax}");
     }
 
     #[test]

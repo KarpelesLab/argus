@@ -255,6 +255,9 @@ pub struct ComputedStyle {
     pub grid_tracks: [GridTrack; GRID_MAX_TRACKS],
     /// Number of columns a grid *item* spans (`grid-column: span N`); 1 by default.
     pub grid_column_span: u32,
+    /// Explicit 1-based starting column line for a grid item (`grid-column: 2 / 4`
+    /// or `grid-column-start: 2`); `None` = auto-placed.
+    pub grid_column_start: Option<u32>,
     /// Number of rows a grid *item* spans (`grid-row: span N`); 1 by default.
     pub grid_row_span: u32,
     /// `float` (not inherited) — out-of-flow left/right with content flowing past.
@@ -381,6 +384,7 @@ impl ComputedStyle {
             grid_columns: 1,
             grid_tracks: [GridTrack::Auto; GRID_MAX_TRACKS],
             grid_column_span: 1,
+            grid_column_start: None,
             grid_row_span: 1,
             float: Float::None,
             clear: Clear::None,
@@ -1228,10 +1232,15 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         cs.grid_columns = cols;
         cs.grid_tracks = tracks;
     }
-    // `grid-column` / `grid-column-end` span for a grid item. We model the span
-    // count only: `span N`, or an `a / b` line range whose width is `b - a`.
+    // `grid-column` / `grid-column-end` span for a grid item: `span N`, or an
+    // `a / b` line range whose width is `b - a`. The explicit start line (when
+    // present) drives line-based placement.
     if let Some(v) = map.get("grid-column").or_else(|| map.get("grid-column-end")) {
         cs.grid_column_span = parse_grid_span(v);
+        cs.grid_column_start = parse_grid_line_start(v);
+    }
+    if let Some(v) = map.get("grid-column-start") {
+        cs.grid_column_start = parse_grid_line_start(v);
     }
     if let Some(v) = map.get("grid-row").or_else(|| map.get("grid-row-end")) {
         cs.grid_row_span = parse_grid_span(v);
@@ -1642,6 +1651,20 @@ fn parse_grid_span(v: &str) -> u32 {
         return n.trim().parse::<u32>().unwrap_or(1).max(1);
     }
     1
+}
+
+/// Parse the explicit starting column line from a `grid-column`/`-start` value:
+/// the `a` in `a / b`, or a bare positive line number. Returns `None` for `span …`,
+/// `auto`, or negative (end-relative) lines, which fall back to auto-placement.
+fn parse_grid_line_start(v: &str) -> Option<u32> {
+    let head = v.trim().split_once('/').map(|(a, _)| a).unwrap_or(v).trim();
+    if head.is_empty() || head.starts_with("span") || head == "auto" {
+        return None;
+    }
+    match head.parse::<i32>() {
+        Ok(n) if n >= 1 => Some(n as u32),
+        _ => None,
+    }
 }
 
 /// Parse a single fixed-length grid track token (falling back to `Auto`).
