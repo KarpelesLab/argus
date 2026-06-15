@@ -647,7 +647,52 @@ pub fn pseudo_content(
     if v.eq_ignore_ascii_case("none") || v.eq_ignore_ascii_case("normal") {
         return None;
     }
-    Some(unquote_content(v))
+    Some(resolve_content(doc, node, v))
+}
+
+/// Resolve a `content` value into its rendered string: a sequence of quoted
+/// strings and `attr(<name>)` references, concatenated (other functions →
+/// empty). `attr()` reads the element's attribute (empty if absent, per spec).
+fn resolve_content(doc: &Document, node: NodeId, v: &str) -> String {
+    let mut out = String::new();
+    let mut rest = v.trim();
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix("attr(") {
+            if let Some(end) = after.find(')') {
+                let name = after[..end].trim().trim_matches(['"', '\'']);
+                if let Some(val) = doc.node(node).as_element().and_then(|e| e.attr(name)) {
+                    out.push_str(val);
+                }
+                rest = after[end + 1..].trim_start();
+                continue;
+            }
+        }
+        // Otherwise treat the (possibly quoted) leading run up to the next token.
+        let (head, tail) = split_content_token(rest);
+        out.push_str(&unquote_content(head));
+        rest = tail.trim_start();
+        if head.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
+/// Split off the first whitespace-delimited token, but keep a quoted string (which
+/// may contain spaces) whole. Returns `(token, remainder)`.
+fn split_content_token(s: &str) -> (&str, &str) {
+    let bytes = s.as_bytes();
+    if bytes[0] == b'"' || bytes[0] == b'\'' {
+        let q = bytes[0];
+        if let Some(i) = s[1..].find(q as char) {
+            let end = 1 + i + 1;
+            return (&s[..end], &s[end..]);
+        }
+    }
+    match s.find(char::is_whitespace) {
+        Some(i) => (&s[..i], &s[i..]),
+        None => (s, ""),
+    }
 }
 
 /// Normalize a `content` string value. The CSS value parser already strips quotes,

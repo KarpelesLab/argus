@@ -4086,6 +4086,26 @@ borderdisplay0123floatleftrightclearbothfrgrowshrinkwrapspanabsolutefixedrelativ
     }
 
     #[test]
+    fn generated_content_attr_function() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // content: attr(data-label) reads the element's attribute; concatenation
+        // with a literal string works too.
+        let html = "<style>.x::before{content:attr(data-label) \": \"}</style>\
+                    <p class=\"x\" data-label=\"Note\">body</p>";
+        let doc = parse(html);
+        let lay = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let texts: Vec<&str> = lay.runs.iter().map(|r| r.text.as_str()).collect();
+        // "Note" (attr) + ":" (literal) collapse to one token "Note:" before "body".
+        let label = texts.iter().position(|t| t.contains("Note"));
+        let body = texts.iter().position(|t| *t == "body");
+        assert!(label.is_some(), "attr value rendered: {texts:?}");
+        assert!(label < body, "generated content before body: {texts:?}");
+    }
+
+    #[test]
     fn q_element_gets_curly_quotes_via_css_escapes() {
         let Some(font) = system_font() else {
             eprintln!("no system font; skipping");
