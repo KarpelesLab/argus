@@ -95,6 +95,23 @@ pub enum FlexDirection {
     Column,
 }
 
+/// `float` — take a box out of flow to the left/right, with content flowing past.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Float {
+    None,
+    Left,
+    Right,
+}
+
+/// `clear` — push a block below preceding floats on the given side(s).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Clear {
+    None,
+    Left,
+    Right,
+    Both,
+}
+
 /// The most grid columns we track per container (keeps [`ComputedStyle`] `Copy`).
 pub const GRID_MAX_TRACKS: usize = 16;
 
@@ -189,6 +206,10 @@ pub struct ComputedStyle {
     pub grid_tracks: [GridTrack; GRID_MAX_TRACKS],
     /// Number of columns a grid *item* spans (`grid-column: span N`); 1 by default.
     pub grid_column_span: u32,
+    /// `float` (not inherited) — out-of-flow left/right with content flowing past.
+    pub float: Float,
+    /// `clear` (not inherited) — push below preceding floats on the given side(s).
+    pub clear: Clear,
     /// `flex-direction` for a `display: flex` container (not inherited).
     pub flex_direction: FlexDirection,
     /// `justify-content` — main-axis free-space distribution (flex container).
@@ -265,6 +286,8 @@ impl ComputedStyle {
             grid_columns: 1,
             grid_tracks: [GridTrack::Auto; GRID_MAX_TRACKS],
             grid_column_span: 1,
+            float: Float::None,
+            clear: Clear::None,
             flex_direction: FlexDirection::Row,
             justify_content: JustifyContent::FlexStart,
             align_items: AlignItems::Stretch,
@@ -892,6 +915,21 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     // count only: `span N`, or an `a / b` line range whose width is `b - a`.
     if let Some(v) = map.get("grid-column").or_else(|| map.get("grid-column-end")) {
         cs.grid_column_span = parse_grid_span(v);
+    }
+    if let Some(v) = map.get("float") {
+        cs.float = match v.trim() {
+            "left" => Float::Left,
+            "right" => Float::Right,
+            _ => Float::None,
+        };
+    }
+    if let Some(v) = map.get("clear") {
+        cs.clear = match v.trim() {
+            "left" => Clear::Left,
+            "right" => Clear::Right,
+            "both" => Clear::Both,
+            _ => Clear::None,
+        };
     }
     if let Some(v) = map
         .get("flex-direction")

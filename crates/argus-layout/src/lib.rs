@@ -20,9 +20,9 @@
 use argus_dom::{Document, ElementData, NodeData, NodeId};
 use argus_gfx::{Font, RectFill, TextRun};
 use argus_style::{
-    author_stylesheet, computed_style, AlignItems, AuthorStylesheet, BoxSizing, ComputedStyle,
-    Display, FlexDirection, GridTrack, JustifyContent, Length, ListStyle, Position, PseudoElement,
-    TextAlign, TextTransform, VerticalAlign,
+    author_stylesheet, computed_style, AlignItems, AuthorStylesheet, BoxSizing, Clear,
+    ComputedStyle, Display, FlexDirection, Float, GridTrack, JustifyContent, Length, ListStyle,
+    Position, PseudoElement, TextAlign, TextTransform, VerticalAlign,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -134,6 +134,17 @@ fn clamp_content_width(style: &ComputedStyle, width: f32, avail: f32) -> f32 {
 /// A snapshot of the display-list lengths (rects, runs, images, links, bounds),
 /// used to shift everything appended after the mark by a delta.
 type DisplayListMark = (usize, usize, usize, usize, usize);
+
+/// A placed float: the vertical band it occupies and the inner edge that inline
+/// content flows up to (a left float's right edge; a right float's left edge).
+#[derive(Clone, Copy)]
+struct FloatBox {
+    top: f32,
+    bottom: f32,
+    /// Inner edge x: content stays right of a left float / left of a right float.
+    edge: f32,
+    side: Float,
+}
 
 /// Convert a specified `width` into a content-box width, honoring `box-sizing`.
 /// For `border-box`, the horizontal padding and border are subtracted.
@@ -258,6 +269,7 @@ pub fn layout(doc: &Document, font: &Font, viewport_width: f32, images: &ImageSi
         links: Vec::new(),
         bounds: Vec::new(),
         cursor_y: PAGE_MARGIN,
+        floats: Vec::new(),
         cb_x: 0.0,
         cb_y: 0.0,
         cb_w: viewport_width,
@@ -308,6 +320,8 @@ struct Ctx<'a> {
     links: Vec<LinkBox>,
     bounds: Vec<ElementBound>,
     cursor_y: f32,
+    /// Active floats (absolute coords) narrowing the inline region of later lines.
+    floats: Vec<FloatBox>,
     /// Containing block for absolutely-positioned descendants: the padding box of
     /// the nearest positioned ancestor (origin x/y, width; height if definite).
     /// Defaults to the initial containing block (the viewport).
@@ -497,6 +511,10 @@ impl Ctx<'_> {
             // style); block-level children flush the line box and lay out separately.
             let mut words: Vec<InlineWord> = Vec::new();
             let mut pending_space = false;
+            // Floats introduced while laying out this block's content are contained
+            // by it: at the end we extend the cursor past them and drop them so they
+            // don't leak to siblings.
+            let float_base = self.floats.len();
             // `::before` generated content is the element's first inline content.
             if let Some(text) =
                 argus_style::pseudo_content(self.doc, id, self.author, PseudoElement::Before)
@@ -555,6 +573,21 @@ impl Ctx<'_> {
                 {
                     continue;
                 }
+                // A floated child is taken out of flow and placed at the side; the
+                // text gathered before it is flushed above, and following inline
+                // content flows around it.
+                if matches!(&self.doc.node(child).data, NodeData::Element(_)) {
+                    let cf = computed_style(self.doc, child, &style, self.author);
+                    if cf.float != Float::None
+                        && cf.position == Position::Static
+                        && cf.display != Display::None
+                    {
+                        self.flush_words(&mut words, &style, content_left, content_w);
+                        pending_space = false;
+                        self.place_float(child, cf, content_left, content_w);
+                        continue;
+                    }
+                }
                 match &self.doc.node(child).data {
                     NodeData::Text(_) => {
                         self.gather_inline(child, &style, None, &mut words, &mut pending_space);
@@ -603,6 +636,13 @@ impl Ctx<'_> {
                             Display::Block => {
                                 self.flush_words(&mut words, &style, content_left, content_w);
                                 pending_space = false;
+                                // `clear` drops this block below the relevant floats.
+                                if cstyle.clear != Clear::None {
+                                    let cb = self.clear_bottom(cstyle.clear);
+                                    if cb > self.cursor_y {
+                                        self.cursor_y = cb;
+                                    }
+                                }
                                 let child_marker = if self.is_li(child) {
                                     item_index += 1;
                                     list_marker(cstyle.list_style, item_index)
@@ -645,6 +685,15 @@ impl Ctx<'_> {
                 self.gather_generated(&text, &style, &mut words, &mut pending_space);
             }
             self.flush_words(&mut words, &style, content_left, content_w);
+            // Contain this block's floats: grow to enclose them, then drop them.
+            if self.floats.len() > float_base {
+                let max_bottom = self.floats[float_base..]
+                    .iter()
+                    .map(|f| f.bottom)
+                    .fold(self.cursor_y, f32::max);
+                self.cursor_y = max_bottom;
+                self.floats.truncate(float_base);
+            }
         } // end !white_space_pre
 
         // Honor a specified `height` / `min-height`: extend the content box down to
@@ -866,6 +915,83 @@ impl Ctx<'_> {
 
     fn is_li(&self, id: NodeId) -> bool {
         matches!(&self.doc.node(id).data, NodeData::Element(e) if e.name.is_html("li"))
+    }
+
+    /// The inline region `[lx, rx]` left after subtracting any floats overlapping
+    /// the vertical band `[top, bottom)` from the content box `[x, right]`.
+    fn float_band(&self, x: f32, right: f32, top: f32, bottom: f32) -> (f32, f32) {
+        let mut lx = x;
+        let mut rx = right;
+        for f in &self.floats {
+            if f.bottom > top && f.top < bottom {
+                match f.side {
+                    Float::Left => lx = lx.max(f.edge),
+                    Float::Right => rx = rx.min(f.edge),
+                    Float::None => {}
+                }
+            }
+        }
+        (lx, rx.max(lx))
+    }
+
+    /// The lowest bottom edge among active floats on the given side(s) — used by
+    /// `clear` to drop a block below them.
+    fn clear_bottom(&self, clear: Clear) -> f32 {
+        let mut y = f32::MIN;
+        for f in &self.floats {
+            let matches = match clear {
+                Clear::Both => true,
+                Clear::Left => f.side == Float::Left,
+                Clear::Right => f.side == Float::Right,
+                Clear::None => false,
+            };
+            if matches {
+                y = y.max(f.bottom);
+            }
+        }
+        y
+    }
+
+    /// Place a floated child at the current cursor: lay its box out at the left or
+    /// right edge of the content box (past any existing floats on that side), then
+    /// register the occupied band so later inline content flows around it. Does not
+    /// advance the block's cursor (floats are out of normal vertical flow).
+    fn place_float(&mut self, id: NodeId, fstyle: ComputedStyle, x: f32, avail: f32) {
+        let content_right = x + avail;
+        // Float width: explicit, else shrink-to-content; capped to the content box.
+        let fw = fstyle
+            .width
+            .map(|len| {
+                border_box_to_content(&fstyle, len.to_px(fstyle.font_size, avail))
+                    + fstyle.padding.left
+                    + fstyle.padding.right
+                    + fstyle.border.left
+                    + fstyle.border.right
+            })
+            .unwrap_or_else(|| self.intrinsic_border_width(id, &fstyle))
+            .min(avail);
+        let top = self.cursor_y + fstyle.margin.top;
+        // Anchor to the side, past floats already occupying this band.
+        let (lx, rx) = self.float_band(x, content_right, top, top + 1.0);
+        let left = match fstyle.float {
+            Float::Right => (rx - fw).max(lx),
+            _ => lx,
+        };
+        // Lay the float's own box out at the chosen origin (in normal block mode).
+        let saved_y = self.cursor_y;
+        self.cursor_y = top;
+        self.layout_block(id, fstyle, left - fstyle.margin.left, fw + fstyle.margin.left, None);
+        let bottom = self.cursor_y + fstyle.margin.bottom;
+        self.cursor_y = saved_y; // floats don't push the block's cursor down
+        self.floats.push(FloatBox {
+            top,
+            bottom,
+            edge: match fstyle.float {
+                Float::Right => left - fstyle.margin.left,
+                _ => left + fw + fstyle.margin.right,
+            },
+            side: fstyle.float,
+        });
     }
 
     /// Approximate the max-content border-box width of an element: the widest line
@@ -1707,43 +1833,50 @@ impl Ctx<'_> {
             return;
         }
         let taken = std::mem::take(words);
+        let content_right = x + width;
 
-        // Greedily assign words to lines, recording each line's word range.
-        let mut lines: Vec<std::ops::Range<usize>> = Vec::new();
-        let mut line_start = 0usize;
-        let mut pen = 0.0f32;
-        for (i, w) in taken.iter().enumerate() {
-            // A <br> forces a line break before it (without itself being placed).
-            if w.hard_break && i > line_start {
-                lines.push(line_start..i);
-                line_start = i;
-                pen = 0.0;
-                continue;
-            }
-            let space = if i > line_start && w.space_before {
-                self.font.measure(" ", w.font_size) + block.word_spacing
-            } else {
-                0.0
-            };
-            let ww = self.font.measure(&w.text, w.font_size);
+        // Greedily assign words to lines. Each line's inline region is narrowed by
+        // any floats overlapping its vertical band, so the available width (and the
+        // left edge) can change line to line. Records `(range, left x, region width)`.
+        let mut lines: Vec<(std::ops::Range<usize>, f32, f32)> = Vec::new();
+        let mut y = self.cursor_y;
+        let mut i = 0usize;
+        while i < taken.len() {
+            let line_start = i;
+            let first_size = taken[line_start].font_size;
+            let probe_h = (first_size * block.line_height).max(1.0);
+            let (lx, rx) = self.float_band(x, content_right, y, y + probe_h);
+            let region_w = (rx - lx).max(0.0);
             // The first line has less room when `text-indent` is set.
-            let line_width = if line_start == 0 {
-                (width - block.text_indent).max(0.0)
-            } else {
-                width
-            };
-            if !block.nowrap && i > line_start && pen + space + ww > line_width {
-                lines.push(line_start..i);
-                line_start = i;
-                pen = ww;
-            } else {
+            let indent = if line_start == 0 { block.text_indent } else { 0.0 };
+            let avail = (region_w - indent).max(0.0);
+            let mut pen = 0.0f32;
+            let mut line_max = 0.0f32;
+            while i < taken.len() {
+                let w = &taken[i];
+                // A <br> forces a break before it (it begins the next line).
+                if w.hard_break && i > line_start {
+                    break;
+                }
+                let space = if i > line_start && w.space_before {
+                    self.font.measure(" ", w.font_size) + block.word_spacing
+                } else {
+                    0.0
+                };
+                let ww = self.font.measure(&w.text, w.font_size);
+                if !block.nowrap && i > line_start && pen + space + ww > avail {
+                    break;
+                }
                 pen += space + ww;
+                line_max = line_max.max(w.font_size);
+                i += 1;
             }
+            lines.push((line_start..i, lx, region_w));
+            y += line_max.max(first_size) * block.line_height;
         }
-        lines.push(line_start..taken.len());
 
         let line_count = lines.len();
-        for (line_idx, range) in lines.into_iter().enumerate() {
+        for (line_idx, (range, lx, region_w)) in lines.into_iter().enumerate() {
             let line = &taken[range.clone()];
             // Line width, gap count, and tallest font for baseline/height.
             let mut line_w = 0.0f32;
@@ -1767,13 +1900,13 @@ impl Ctx<'_> {
             let is_last =
                 line_idx + 1 == line_count || taken.get(range.end).is_some_and(|w| w.hard_break);
             let justify_extra = if block.text_align == TextAlign::Justify && !is_last && gaps > 0 {
-                ((width - line_w) / gaps as f32).max(0.0)
+                ((region_w - line_w) / gaps as f32).max(0.0)
             } else {
                 0.0
             };
             let offset = match block.text_align {
-                TextAlign::Center => ((width - line_w) / 2.0).max(0.0),
-                TextAlign::Right => (width - line_w).max(0.0),
+                TextAlign::Center => ((region_w - line_w) / 2.0).max(0.0),
+                TextAlign::Right => (region_w - line_w).max(0.0),
                 _ => 0.0,
             };
             let baseline = self.cursor_y + self.font.ascent_px(max_size);
@@ -1786,7 +1919,7 @@ impl Ctx<'_> {
             };
             let line_top = self.cursor_y;
             let line_h = max_size * block.line_height;
-            let mut pen_x = x + offset + indent;
+            let mut pen_x = lx + offset + indent;
             for (j, w) in line.iter().enumerate() {
                 // The <br> sentinel only contributes line height, no glyphs.
                 if w.text.is_empty() {
@@ -3058,6 +3191,62 @@ mod tests {
         assert!((ax - 8.0).abs() < 3.0, "col0 at origin, got {ax}");
         assert!((bx - 108.0).abs() < 4.0, "col1 after 100px fixed, got {bx}");
         assert!((cx - 208.0).abs() < 4.0, "col2 after 1fr(=100), got {cx}");
+    }
+
+    #[test]
+    fn float_left_wraps_following_text_to_its_right() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A 100px-wide left float; the paragraph text after it should start to the
+        // right of the float (x ≥ float width), not at the page margin.
+        let html = "<div style=\"width:400px\">\
+                      <div style=\"float:left; width:100px; height:50px\">F</div>\
+                      <span>wrapping text beside the float here</span>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 600.0, &ImageSizes::new());
+        let word = l.runs.iter().find(|r| r.text == "wrapping").unwrap();
+        // Page margin ~8 + float width 100 → text starts near x≈108.
+        assert!(word.x > 100.0, "text should flow right of the float, got {}", word.x);
+    }
+
+    #[test]
+    fn float_right_keeps_text_to_its_left() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A right float: text stays on the left (small x), not pushed right.
+        let html = "<div style=\"width:400px\">\
+                      <div style=\"float:right; width:100px; height:50px\">F</div>\
+                      <span>left side text</span>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 600.0, &ImageSizes::new());
+        let word = l.runs.iter().find(|r| r.text == "left").unwrap();
+        assert!(word.x < 30.0, "text should stay left of the right float, got {}", word.x);
+    }
+
+    #[test]
+    fn clear_drops_below_the_float() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A `clear:left` block must sit below a tall left float, not beside it.
+        let html = "<div style=\"width:400px\">\
+                      <div style=\"float:left; width:100px; height:80px\">F</div>\
+                      <div style=\"clear:left\">below</div>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 600.0, &ImageSizes::new());
+        let word = l.runs.iter().find(|r| r.text == "below").unwrap();
+        // The float starts at ~8 and is 80px tall → cleared block baseline > 80.
+        assert!(word.baseline > 85.0, "cleared block should sit below float, got {}", word.baseline);
+        // And it returns to the left edge (not indented by the float).
+        assert!(word.x < 30.0, "cleared block back at left edge, got {}", word.x);
     }
 
     #[test]
