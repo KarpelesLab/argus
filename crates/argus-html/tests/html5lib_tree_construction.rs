@@ -1305,4 +1305,51 @@ hi</pre>
 |       <i>
 |         "both"
 |       " still"
+
+#data
+<ul><li>a<ul><li>b</ul></ul>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <ul>
+|       <li>
+|         "a"
+|         <ul>
+|           <li>
+|             "b"
+
+#data
+<select><option selected>x</select>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <select>
+|       <option>
+|         selected=""
+|         "x"
+
+#data
+<blockquote><p>q</blockquote>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <blockquote>
+|       <p>
+|         "q"
+
+#data
+<button>click</button>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <button>
+|       "click"
 "####;
