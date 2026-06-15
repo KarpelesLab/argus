@@ -667,10 +667,55 @@ impl Ctx<'_> {
                         self.gather_inline(child, &style, None, &mut words, &mut pending_space);
                     }
                     NodeData::Element(e) if e.name.is_html("img") => {
-                        self.flush_words(&mut words, &style, content_left, content_w);
-                        pending_space = false;
                         let istyle = computed_style(self.doc, child, &style, self.author);
-                        self.place_image(e, &istyle, content_left, content_w);
+                        let (bw, bh) = self.image_box_size(e, content_w);
+                        if bw > 0.0 && bh > 0.0 {
+                            // A sized image is an atomic inline box: lay it out at the
+                            // origin and push it as a "word" placed by flush_words.
+                            let start = (
+                                self.rects.len(),
+                                self.runs.len(),
+                                self.images.len(),
+                                self.links.len(),
+                                self.bounds.len(),
+                            );
+                            let saved_y = self.cursor_y;
+                            self.cursor_y = 0.0;
+                            self.place_image(e, &istyle, 0.0, content_w);
+                            self.cursor_y = saved_y;
+                            let end = (
+                                self.rects.len(),
+                                self.runs.len(),
+                                self.images.len(),
+                                self.links.len(),
+                                self.bounds.len(),
+                            );
+                            let space_before = pending_space;
+                            pending_space = false;
+                            words.push(InlineWord {
+                                text: String::new(),
+                                font_size: istyle.font_size,
+                                color: argus_geometry::Color::TRANSPARENT,
+                                background: argus_geometry::Color::TRANSPARENT,
+                                space_before,
+                                underline: false,
+                                strike: false,
+                                overline: false,
+                                bold: false,
+                                italic: false,
+                                shadow: None,
+                                decoration_color: argus_geometry::Color::TRANSPARENT,
+                                href: None,
+                                hard_break: false,
+                                baseline_shift: 0.0,
+                                atomic: Some((start, end, bw, bh, istyle.vertical_align)),
+                            });
+                        } else {
+                            // Unresolved/broken image: block placement (alt text).
+                            self.flush_words(&mut words, &style, content_left, content_w);
+                            pending_space = false;
+                            self.place_image(e, &istyle, content_left, content_w);
+                        }
                     }
                     NodeData::Element(e)
                         if e.name.is_html("progress") || e.name.is_html("meter") =>
@@ -1289,6 +1334,28 @@ impl Ctx<'_> {
     }
 
     /// Place an `<img>` as a block-level replaced box on its own line. A broken or
+    /// The `(width, height)` an `<img>` would occupy (border box), or `(0, 0)` if
+    /// unresolved (no usable size — then `alt`/placeholder handling applies).
+    fn image_box_size(&self, e: &ElementData, avail: f32) -> (f32, f32) {
+        let Some(src) = e.attr("src") else {
+            return (0.0, 0.0);
+        };
+        let (iw, ih) = self.image_sizes.get(src).copied().unwrap_or((0, 0));
+        let attr_w = e.attr("width").and_then(|v| v.parse::<f32>().ok());
+        let attr_h = e.attr("height").and_then(|v| v.parse::<f32>().ok());
+        let w = attr_w.unwrap_or(iw as f32).min(avail);
+        let h = match (attr_w, attr_h) {
+            (_, Some(h)) => h,
+            (Some(_), None) if iw > 0 => w * ih as f32 / iw as f32,
+            _ => ih as f32,
+        };
+        if w > 0.0 && h > 0.0 {
+            (w, h)
+        } else {
+            (0.0, 0.0)
+        }
+    }
+
     /// unresolved image with non-empty `alt` text renders that text instead.
     fn place_image(&mut self, e: &ElementData, istyle: &ComputedStyle, x: f32, avail: f32) {
         let hidden = istyle.hidden;
@@ -2788,8 +2855,9 @@ impl Ctx<'_> {
                         VerticalAlign::Top | VerticalAlign::Sub => line_top,
                         VerticalAlign::Bottom => line_top + line_h - bh,
                         VerticalAlign::Middle => line_top + (line_h - bh) / 2.0,
-                        // baseline (default)/super: box bottom sits on the text baseline.
-                        _ => baseline - bh,
+                        // baseline (default)/super: box bottom on the text baseline,
+                        // but never above the line top (a tall box top-aligns).
+                        _ => (baseline - bh).max(line_top),
                     };
                     self.shift_display_list_range(start, end, pen_x, dy);
                     pen_x += bw;
@@ -4232,6 +4300,28 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         let (cw, ch, cy) = render("object-fit: contain");
         assert!((cw - 100.0).abs() < 1.0 && (ch - 50.0).abs() < 1.0, "contained {cw}x{ch}");
         assert!(cy > 10.0, "letterboxed (centered vertically), y={cy}");
+    }
+
+    #[test]
+    fn sized_image_flows_inline_with_text() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Text, a 40px-wide image, then more text — all on the same line, the second
+        // text past the image.
+        let mut sizes = ImageSizes::new();
+        sizes.insert("i.png".to_string(), (40, 20));
+        let html = "<p>before <img src=\"i.png\" width=\"40\" height=\"20\"> after</p>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &sizes);
+        let before = l.runs.iter().find(|r| r.text == "before").unwrap();
+        let after = l.runs.iter().find(|r| r.text == "after").unwrap();
+        let img = &l.images[0];
+        // Same line (≈ same baseline) and "after" is past the image's right edge.
+        assert!((before.baseline - after.baseline).abs() < 3.0, "one line");
+        assert!(img.x > before.x, "image after 'before' text");
+        assert!(after.x > img.x + 38.0, "'after' past the 40px image: img={} after={}", img.x, after.x);
     }
 
     #[test]
