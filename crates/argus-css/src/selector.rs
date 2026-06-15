@@ -8,7 +8,8 @@
 //! `:first/last/only-of-type`, `:nth-of-type`, `:nth-last-of-type`, `:not(...)`,
 //! `:is(...)`/`:where(...)` (match any argument; `:is()` takes its most specific
 //! argument's weight, `:where()` contributes zero), `:root`, `:empty`, and the
-//! form-state `:checked`/`:disabled`/`:enabled`. Other pseudo-classes/elements are
+//! form-state `:checked`/`:disabled`/`:enabled`/`:required`/`:read-only`. Other
+//! pseudo-classes/elements are
 //! parsed-and-ignored so they don't break matching.
 
 use crate::tokenizer::Token;
@@ -70,6 +71,9 @@ pub enum PseudoClass {
     Checked,
     Disabled,
     Enabled,
+    /// `:required` / `:read-only` — backed by attribute presence.
+    Required,
+    ReadOnly,
     /// `:root` — the document's root element (`<html>`).
     Root,
     /// `:empty` — no element or (non-whitespace) text children.
@@ -286,6 +290,8 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                                 "checked" => c.pseudos.push(PseudoClass::Checked),
                                 "disabled" => c.pseudos.push(PseudoClass::Disabled),
                                 "enabled" => c.pseudos.push(PseudoClass::Enabled),
+                                "required" => c.pseudos.push(PseudoClass::Required),
+                                "read-only" => c.pseudos.push(PseudoClass::ReadOnly),
                                 "root" => c.pseudos.push(PseudoClass::Root),
                                 "empty" => c.pseudos.push(PseudoClass::Empty),
                                 "first-of-type" => c.pseudos.push(PseudoClass::FirstOfType),
@@ -603,6 +609,8 @@ fn pseudo_matches(doc: &Document, node: NodeId, p: PseudoClass) -> bool {
         PseudoClass::Checked => element_has_attr(doc, node, "checked"),
         PseudoClass::Disabled => element_has_attr(doc, node, "disabled"),
         PseudoClass::Enabled => !element_has_attr(doc, node, "disabled"),
+        PseudoClass::Required => element_has_attr(doc, node, "required"),
+        PseudoClass::ReadOnly => element_has_attr(doc, node, "readonly"),
         // `:root` — an element whose parent is the document node.
         PseudoClass::Root => doc
             .node(node)
@@ -821,6 +829,22 @@ mod tests {
         assert!(matches(&doc, disabled, &sel(":disabled")));
         assert!(matches(&doc, plain, &sel("input:enabled")));
         assert!(!matches(&doc, disabled, &sel(":enabled")));
+
+        // :required and :read-only (attribute-backed).
+        let required = doc.create_element(
+            QualName::html("input"),
+            vec![Attribute::new("required", "")],
+        );
+        doc.append(root, required);
+        let readonly = doc.create_element(
+            QualName::html("input"),
+            vec![Attribute::new("readonly", "")],
+        );
+        doc.append(root, readonly);
+        assert!(matches(&doc, required, &sel("input:required")));
+        assert!(!matches(&doc, plain, &sel(":required")));
+        assert!(matches(&doc, readonly, &sel(":read-only")));
+        assert!(!matches(&doc, plain, &sel("input:read-only")));
     }
 
     #[test]
