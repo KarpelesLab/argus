@@ -277,6 +277,9 @@ pub struct ComputedStyle {
     pub justify_content: JustifyContent,
     /// `align-items` — cross-axis item placement (flex container).
     pub align_items: AlignItems,
+    /// `align-self` — a flex item's own cross-axis alignment, overriding the
+    /// container's `align-items` (`None` = `auto`, i.e. use the container's).
+    pub align_self: Option<AlignItems>,
     /// `flex-grow` factor for a flex item (0 = does not grow).
     pub flex_grow: f32,
     /// `flex-shrink` factor for a flex item (default 1; 0 = does not shrink).
@@ -412,6 +415,7 @@ impl ComputedStyle {
             flex_direction: FlexDirection::Row,
             justify_content: JustifyContent::FlexStart,
             align_items: AlignItems::Stretch,
+            align_self: None,
             flex_grow: 0.0,
             flex_shrink: 1.0,
             flex_basis: None,
@@ -1565,13 +1569,17 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             _ => JustifyContent::FlexStart,
         };
     }
+    let parse_align = |v: &str| match v.trim() {
+        "flex-start" | "start" => AlignItems::FlexStart,
+        "flex-end" | "end" => AlignItems::FlexEnd,
+        "center" => AlignItems::Center,
+        _ => AlignItems::Stretch,
+    };
     if let Some(v) = map.get("align-items") {
-        cs.align_items = match v.trim() {
-            "flex-start" | "start" => AlignItems::FlexStart,
-            "flex-end" | "end" => AlignItems::FlexEnd,
-            "center" => AlignItems::Center,
-            _ => AlignItems::Stretch,
-        };
+        cs.align_items = parse_align(v);
+    }
+    if let Some(v) = map.get("align-self") {
+        cs.align_self = (v.trim() != "auto").then(|| parse_align(v));
     }
     // The `flex` shorthand first: it sets grow + shrink together. Keywords:
     // `none` → 0 0 auto, `auto` → 1 1 auto, `initial` → 0 1 auto. Numeric forms

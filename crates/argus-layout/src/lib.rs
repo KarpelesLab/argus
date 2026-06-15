@@ -2166,7 +2166,7 @@ impl Ctx<'_> {
                         + istyle.border.right
                         + istyle.margin.left
                         + istyle.margin.right;
-                    let dx = match style.align_items {
+                    let dx = match istyle.align_self.unwrap_or(style.align_items) {
                         AlignItems::FlexStart | AlignItems::Stretch => 0.0,
                         AlignItems::Center => ((content_w - outer) / 2.0).max(0.0),
                         AlignItems::FlexEnd => (content_w - outer).max(0.0),
@@ -2438,8 +2438,8 @@ impl Ctx<'_> {
 
             let mut cx = content_left + lead;
             let mut max_h = 0.0f32;
-            // Per-item display-list snapshot + height, for the cross-axis shift.
-            let mut snaps: Vec<(DisplayListMark, f32)> = Vec::new();
+            // Per-item display-list snapshot + height + align-self, for cross-axis.
+            let mut snaps: Vec<(DisplayListMark, f32, Option<AlignItems>)> = Vec::new();
             for (i, &item) in items.iter().enumerate() {
                 self.cursor_y = row_top;
                 let ds = (
@@ -2452,12 +2452,12 @@ impl Ctx<'_> {
                 self.layout_block(item, istyles[i], cx, sizes[i], None);
                 let h = self.cursor_y - row_top;
                 max_h = max_h.max(h);
-                snaps.push((ds, h));
+                snaps.push((ds, h, istyles[i].align_self));
                 cx += sizes[i] + style.gap + between_extra;
             }
-            // align-items: offset each item vertically within the line box.
-            for (ds, h) in &snaps {
-                let dy = match style.align_items {
+            // align-items / per-item align-self: offset each vertically in the line.
+            for (ds, h, align_self) in &snaps {
+                let dy = match align_self.unwrap_or(style.align_items) {
                     AlignItems::FlexStart | AlignItems::Stretch => 0.0,
                     AlignItems::Center => (max_h - h) / 2.0,
                     AlignItems::FlexEnd => max_h - h,
@@ -5475,6 +5475,31 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         // b and c come before a horizontally.
         assert!(bx < ax && cx < ax, "a (order:2) moves last: a={ax} b={bx} c={cx}");
         assert!(bx < cx, "b before c (equal order keeps source order)");
+    }
+
+    #[test]
+    fn flex_align_self_overrides_align_items() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A row where the container top-aligns items, but the short item has
+        // align-self:flex-end. The tall item sets the line height; the short item's
+        // baseline drops toward the bottom (below where top-alignment would put it).
+        let line = |css: &str| -> f32 {
+            let html = format!(
+                "<div style=\"display:flex; align-items:flex-start; height:100px\">\
+                   <div style=\"height:100px\">tall</div>\
+                   <div style=\"{css}\">x</div>\
+                 </div>"
+            );
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+            l.runs.iter().find(|r| r.text == "x").unwrap().baseline
+        };
+        let top = line("");
+        let bottom = line("align-self: flex-end");
+        assert!(bottom > top + 40.0, "align-self:flex-end drops the item: {top} -> {bottom}");
     }
 
     #[test]
