@@ -33,6 +33,16 @@ pub enum Event {
     Back,
     /// Navigate forward (Cmd+`]`).
     Forward,
+    /// Open a new tab (Cmd+T).
+    NewTab,
+    /// Close the active tab (Cmd+W).
+    CloseTab,
+    /// Activate the next tab (Cmd+Shift+`]`).
+    NextTab,
+    /// Activate the previous tab (Cmd+Shift+`[`).
+    PrevTab,
+    /// Activate the tab at this 0-based index (Cmd+1…9; 9 = last tab).
+    SwitchTab { index: usize },
     /// The user asked to close the window.
     CloseRequested,
 }
@@ -217,9 +227,17 @@ impl Window {
             .contains(NSEventModifierFlags::Command);
         if cmd {
             return match ch {
-                0x5B => Some(Event::Back),    // '['
-                0x5D => Some(Event::Forward), // ']'
-                _ => None,                    // other Cmd shortcuts aren't ours
+                0x5B => Some(Event::Back),     // Cmd+'['
+                0x5D => Some(Event::Forward),  // Cmd+']'
+                0x74 | 0x54 => Some(Event::NewTab),   // Cmd+T
+                0x77 | 0x57 => Some(Event::CloseTab), // Cmd+W
+                0x7D => Some(Event::NextTab),  // Cmd+Shift+']' → '}'
+                0x7B => Some(Event::PrevTab),  // Cmd+Shift+'[' → '{'
+                // Cmd+1..9 jump to a tab (9 = the last tab, per browser convention).
+                0x31..=0x39 => Some(Event::SwitchTab {
+                    index: (ch - 0x31) as usize,
+                }),
+                _ => None,                     // other Cmd shortcuts aren't ours
             };
         }
         // macOS sends DEL (0x7F) for the backspace key; normalize to BS (0x08).

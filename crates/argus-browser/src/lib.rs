@@ -63,6 +63,100 @@ impl History {
             None
         }
     }
+
+    /// The URL of the current entry.
+    fn current(&self) -> &str {
+        &self.stack[self.index]
+    }
+}
+
+/// One browser tab: its own navigation history and scroll offset. Tabs are
+/// independent — back/forward and scrolling in one never affect another.
+struct Tab {
+    history: History,
+    scroll_y: u32,
+}
+
+impl Tab {
+    fn new(url: String) -> Tab {
+        Tab {
+            history: History::new(url),
+            scroll_y: 0,
+        }
+    }
+
+    /// The URL currently shown in this tab.
+    fn url(&self) -> &str {
+        self.history.current()
+    }
+}
+
+/// The set of open tabs with exactly one active. Always non-empty: closing the
+/// last tab is refused (the caller decides whether that means "quit").
+struct Tabs {
+    tabs: Vec<Tab>,
+    active: usize,
+}
+
+impl Tabs {
+    fn new(url: String) -> Tabs {
+        Tabs {
+            tabs: vec![Tab::new(url)],
+            active: 0,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.tabs.len()
+    }
+
+    fn active_index(&self) -> usize {
+        self.active
+    }
+
+    fn active(&self) -> &Tab {
+        &self.tabs[self.active]
+    }
+
+    fn active_mut(&mut self) -> &mut Tab {
+        &mut self.tabs[self.active]
+    }
+
+    /// Open a new tab at `url` and make it active; returns its index.
+    fn open(&mut self, url: String) -> usize {
+        self.tabs.push(Tab::new(url));
+        self.active = self.tabs.len() - 1;
+        self.active
+    }
+
+    /// Close the tab at `i`, adjusting the active index so it still points at a
+    /// valid tab. Returns `false` (and changes nothing) when only one tab is left.
+    fn close(&mut self, i: usize) -> bool {
+        if self.tabs.len() <= 1 || i >= self.tabs.len() {
+            return false;
+        }
+        self.tabs.remove(i);
+        if self.active > i || self.active >= self.tabs.len() {
+            self.active -= 1;
+        }
+        true
+    }
+
+    /// Activate the tab at `i` (no-op if out of range).
+    fn switch_to(&mut self, i: usize) {
+        if i < self.tabs.len() {
+            self.active = i;
+        }
+    }
+
+    /// Activate the next/previous tab, wrapping around.
+    fn next(&mut self) {
+        self.active = (self.active + 1) % self.tabs.len();
+    }
+
+    fn prev(&mut self) {
+        self.active = (self.active + self.tabs.len() - 1) % self.tabs.len();
+    }
 }
 
 /// The built-in sample document rendered by the windowed shell and page dumper.
@@ -1914,20 +2008,26 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
     let mut net = spawn_child(Role::NetService)?;
     proto::parent_handshake(content.channel(), viewport)?;
     proto::parent_handshake(net.channel(), viewport)?;
-    let mut current_url = url.clone();
-    let mut history = History::new(current_url.clone().unwrap_or_default());
-    let html = resolve_html(&net, current_url.as_deref());
+    // Per-tab navigation state. The single content process renders whichever tab
+    // is active; switching re-navigates it to the active tab's URL.
+    let mut tabs = Tabs::new(url.clone().unwrap_or_default());
+    // A URL Option for the active tab (empty string = the built-in home page).
+    let active_target = |tabs: &Tabs| -> Option<String> {
+        let u = tabs.active().url();
+        (!u.is_empty()).then(|| u.to_string())
+    };
+
+    let html = resolve_html(&net, active_target(&tabs).as_deref());
     provide_page(&content, &html)?;
     log!("children handshook; page sent; opening window");
 
     // Present the first frame.
-    let (frame, mut content_height) = request_frame(&content, &net, current_url.as_deref())?;
+    let (frame, mut content_height) = request_frame(&content, &net, active_target(&tabs).as_deref())?;
     let title = page_title(&html);
     let window = Window::open(if title.is_empty() { "Argus" } else { &title }, viewport);
     window.present(frame.pixels(), frame.size());
-    log!("window open — click links to navigate, scroll the wheel, close to quit");
+    log!("window open — click links, Cmd+T new tab, Cmd+W close, Cmd+Shift+[ ] switch");
 
-    let mut scroll_y: u32 = 0;
     loop {
         match window.next_event() {
             Event::MouseDown { x, y } => {
@@ -1935,17 +2035,17 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
                 // Content replies with the click result; navigate if a link was hit.
                 if let Msg::ClickResult { url } = proto::recv(content.channel())?.0 {
                     if !url.is_empty() {
-                        let target = resolve_url(current_url.as_deref(), &url);
+                        let target = resolve_url(active_target(&tabs).as_deref(), &url);
                         log!("navigating to {target}");
-                        history.push(target.clone());
-                        current_url = Some(target);
-                        scroll_y = 0;
+                        tabs.active_mut().history.push(target);
+                        tabs.active_mut().scroll_y = 0;
                         content_height =
-                            load_and_present(&content, &net, &window, current_url.as_deref())?;
+                            load_and_present(&content, &net, &window, active_target(&tabs).as_deref())?;
                     } else {
                         // Non-navigation click: the content process may have dispatched
                         // a DOM event handler that changed the page — re-render.
-                        let (frame, h) = request_frame(&content, &net, current_url.as_deref())?;
+                        let (frame, h) =
+                            request_frame(&content, &net, active_target(&tabs).as_deref())?;
                         content_height = h;
                         window.present(frame.pixels(), frame.size());
                     }
@@ -1953,11 +2053,13 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
             }
             Event::Scroll { dy } => {
                 let max_scroll = content_height.saturating_sub(viewport.height);
-                let next = (scroll_y as i64 - dy as i64).clamp(0, max_scroll as i64) as u32;
-                if next != scroll_y {
-                    scroll_y = next;
-                    proto::send(content.channel(), Msg::SetScroll { y: scroll_y }, &[])?;
-                    let (frame, h) = request_frame(&content, &net, current_url.as_deref())?;
+                let cur = tabs.active().scroll_y;
+                let next = (cur as i64 - dy as i64).clamp(0, max_scroll as i64) as u32;
+                if next != cur {
+                    tabs.active_mut().scroll_y = next;
+                    proto::send(content.channel(), Msg::SetScroll { y: next }, &[])?;
+                    let (frame, h) =
+                        request_frame(&content, &net, active_target(&tabs).as_deref())?;
                     content_height = h;
                     window.present(frame.pixels(), frame.size());
                 }
@@ -1965,26 +2067,58 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
             Event::KeyChar { ch } => {
                 // Forward the keystroke to the focused field, then re-render.
                 proto::send(content.channel(), Msg::InputKey { ch }, &[])?;
-                let (frame, h) = request_frame(&content, &net, current_url.as_deref())?;
+                let (frame, h) = request_frame(&content, &net, active_target(&tabs).as_deref())?;
                 content_height = h;
                 window.present(frame.pixels(), frame.size());
             }
             Event::Back => {
-                if let Some(prev) = history.back().map(str::to_string) {
+                if let Some(prev) = tabs.active_mut().history.back().map(str::to_string) {
                     log!("history back -> {prev:?}");
-                    current_url = (!prev.is_empty()).then_some(prev);
-                    scroll_y = 0;
+                    tabs.active_mut().scroll_y = 0;
                     content_height =
-                        load_and_present(&content, &net, &window, current_url.as_deref())?;
+                        load_and_present(&content, &net, &window, active_target(&tabs).as_deref())?;
                 }
             }
             Event::Forward => {
-                if let Some(next) = history.forward().map(str::to_string) {
+                if let Some(next) = tabs.active_mut().history.forward().map(str::to_string) {
                     log!("history forward -> {next:?}");
-                    current_url = (!next.is_empty()).then_some(next);
-                    scroll_y = 0;
+                    tabs.active_mut().scroll_y = 0;
                     content_height =
-                        load_and_present(&content, &net, &window, current_url.as_deref())?;
+                        load_and_present(&content, &net, &window, active_target(&tabs).as_deref())?;
+                }
+            }
+            Event::NewTab => {
+                tabs.open(String::new()); // a fresh home tab, made active
+                log!("opened tab {} of {}", tabs.active_index() + 1, tabs.len());
+                content_height =
+                    load_and_present(&content, &net, &window, active_target(&tabs).as_deref())?;
+            }
+            Event::CloseTab => {
+                if !tabs.close(tabs.active_index()) {
+                    log!("closing last tab; shutting down");
+                    break;
+                }
+                log!("closed tab; {} left, active {}", tabs.len(), tabs.active_index() + 1);
+                content_height =
+                    load_and_present(&content, &net, &window, active_target(&tabs).as_deref())?;
+            }
+            Event::NextTab => {
+                tabs.next();
+                content_height =
+                    load_and_present(&content, &net, &window, active_target(&tabs).as_deref())?;
+            }
+            Event::PrevTab => {
+                tabs.prev();
+                content_height =
+                    load_and_present(&content, &net, &window, active_target(&tabs).as_deref())?;
+            }
+            Event::SwitchTab { index } => {
+                // Cmd+9 jumps to the last tab (browser convention); others to index.
+                let target = if index == 8 { tabs.len() - 1 } else { index };
+                if target != tabs.active_index() && target < tabs.len() {
+                    tabs.switch_to(target);
+                    content_height =
+                        load_and_present(&content, &net, &window, active_target(&tabs).as_deref())?;
                 }
             }
             Event::CloseRequested => {
@@ -2034,7 +2168,7 @@ mod tests {
     use super::{
         decode_html, dom_node_json, effective_base, extract_forms, extract_images, extract_json,
         extract_jsonld, extract_links, extract_meta, extract_microdata, extract_tables,
-        page_title, render_text, resolve_url, srcset_best, History,
+        page_title, render_text, resolve_url, srcset_best, History, Tabs,
     };
 
     #[test]
@@ -2416,6 +2550,51 @@ mod tests {
         // Re-navigating to the current URL is a no-op.
         h.push("b".into());
         assert_eq!(h.forward(), Some("d"));
+    }
+
+    #[test]
+    fn tabs_open_switch_and_independent_history() {
+        let mut tabs = Tabs::new("a".into());
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs.active_index(), 0);
+        // Opening a tab makes it active.
+        assert_eq!(tabs.open("b".into()), 1);
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs.active().url(), "b");
+        // Each tab has its own history.
+        tabs.active_mut().history.push("b2".into());
+        assert_eq!(tabs.active().url(), "b2");
+        tabs.switch_to(0);
+        assert_eq!(tabs.active().url(), "a", "tab 0 history untouched");
+        // next/prev wrap around.
+        tabs.next();
+        assert_eq!(tabs.active_index(), 1);
+        tabs.next();
+        assert_eq!(tabs.active_index(), 0, "wraps to first");
+        tabs.prev();
+        assert_eq!(tabs.active_index(), 1, "wraps to last");
+        // Per-tab scroll is independent.
+        tabs.active_mut().scroll_y = 50;
+        tabs.switch_to(0);
+        assert_eq!(tabs.active().scroll_y, 0);
+    }
+
+    #[test]
+    fn tabs_close_adjusts_active_and_refuses_last() {
+        let mut tabs = Tabs::new("a".into());
+        tabs.open("b".into());
+        tabs.open("c".into()); // [a, b, c], active = 2
+        // Closing a tab before the active one shifts active down.
+        assert!(tabs.close(0)); // [b, c], active was 2 -> 1
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs.active().url(), "c");
+        // Closing the active (last-index) tab moves active to the new last.
+        assert_eq!(tabs.active_index(), 1);
+        assert!(tabs.close(1)); // [b], active -> 0
+        assert_eq!(tabs.active().url(), "b");
+        // The final tab can't be closed.
+        assert!(!tabs.close(0));
+        assert_eq!(tabs.len(), 1);
     }
 
     #[test]
