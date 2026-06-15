@@ -160,3 +160,40 @@ fn stray_lt_is_character_data() {
     // `<` not forming a valid tag is treated as a literal character.
     check("a < b", vec![chars("a < b")]);
 }
+
+#[test]
+fn astral_numeric_references() {
+    // Supplementary-plane code points (emoji) via hex and decimal numeric refs.
+    check("&#x1F600;", vec![chars("\u{1F600}")]);
+    check("&#128512;", vec![chars("\u{1F600}")]);
+}
+
+#[test]
+fn void_self_closing_slash() {
+    // A `/` before `>` records the self-closing flag.
+    check("<br/>", vec![start("br", &[], true)]);
+    check("<img src=x />", vec![start("img", &[("src", "x")], true)]);
+}
+
+#[test]
+fn entity_in_single_quoted_attribute() {
+    check(
+        "<a title='a&lt;b'>",
+        vec![start("a", &[("title", "a<b")], false)],
+    );
+}
+
+#[test]
+fn extra_whitespace_between_attributes() {
+    check(
+        "<div   a=1    b=2 >",
+        vec![start("div", &[("a", "1"), ("b", "2")], false)],
+    );
+}
+
+#[test]
+fn out_of_range_numeric_references_become_replacement_char() {
+    // A NULL reference and an out-of-Unicode-range reference both yield U+FFFD.
+    check("&#0;", vec![chars("\u{FFFD}")]);
+    check("&#x110000;", vec![chars("\u{FFFD}")]);
+}
