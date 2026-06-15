@@ -1204,4 +1204,55 @@ hi</pre>
 |       action="/post"
 |       <input>
 |         name="q"
+
+#data
+<table><caption>C</caption><tr><td>x</table>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <table>
+|       <caption>
+|         "C"
+|       <tbody>
+|         <tr>
+|           <td>
+|             "x"
+
+#data
+<table><colgroup><col></colgroup><tr><td>x</table>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <table>
+|       <colgroup>
+|         <col>
+|       <tbody>
+|         <tr>
+|           <td>
+|             "x"
+
+#data
+<div class="a&amp;b">x</div>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <div>
+|       class="a&b"
+|       "x"
+
+#data
+<script>var x = 1 < 2;</script>
+#errors
+#document
+| <html>
+|   <head>
+|     <script>
+|       "var x = 1 < 2;"
+|   <body>
 "####;
