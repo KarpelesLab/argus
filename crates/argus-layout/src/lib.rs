@@ -1432,16 +1432,21 @@ impl Ctx<'_> {
             first_row = false;
             let row_top = self.cursor_y;
             let mut max_h = 0.0f32;
-            for c in 0..cols {
-                if idx >= items.len() {
-                    break;
-                }
+            let mut c = 0usize;
+            while c < cols && idx < items.len() {
                 let item = items[idx];
+                let istyle = computed_style(self.doc, item, &style, self.author);
+                // An item may span multiple columns; clamp the span to what's left in
+                // the row (no wrapping mid-item). Its width covers those columns plus
+                // the gaps between them.
+                let span = (istyle.grid_column_span.max(1) as usize).min(cols - c);
+                let item_w =
+                    col_w[c..c + span].iter().sum::<f32>() + style.gap * (span - 1) as f32;
                 idx += 1;
                 self.cursor_y = row_top;
-                let istyle = computed_style(self.doc, item, &style, self.author);
-                self.layout_block(item, istyle, col_x[c], col_w[c], None);
+                self.layout_block(item, istyle, col_x[c], item_w, None);
                 max_h = max_h.max(self.cursor_y - row_top);
+                c += span;
             }
             self.cursor_y = row_top + max_h;
         }
@@ -3053,6 +3058,36 @@ mod tests {
         assert!((ax - 8.0).abs() < 3.0, "col0 at origin, got {ax}");
         assert!((bx - 108.0).abs() < 4.0, "col1 after 100px fixed, got {bx}");
         assert!((cx - 208.0).abs() < 4.0, "col2 after 1fr(=100), got {cx}");
+    }
+
+    #[test]
+    fn grid_column_span_occupies_multiple_columns() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Three equal columns. The first item spans 2, so it occupies columns 0-1;
+        // the next item ("b") lands in column 2 of the same row, and "c" wraps to
+        // row 2 column 0 (under "a").
+        let html = "<div style=\"display:grid; width:300px; grid-template-columns: repeat(3, 1fr)\">\
+                      <div style=\"grid-column: span 2\">a</div>\
+                      <div>b</div>\
+                      <div>c</div>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 600.0, &ImageSizes::new());
+        let at = |t: &str| {
+            let r = l.runs.iter().find(|r| r.text == t).unwrap();
+            (r.x, r.baseline)
+        };
+        let (ax, ay) = at("a");
+        let (bx, by) = at("b");
+        let (cx, cy) = at("c");
+        // "b" is in column 2 (≈ origin + 2×100 = 208) on the same row as "a".
+        assert!((ay - by).abs() < 1.0, "a and b share a row");
+        assert!((bx - 208.0).abs() < 6.0, "b in the third column, got {bx}");
+        // "c" wraps to the next row, back under "a".
+        assert!(cy > ay + 10.0 && (cx - ax).abs() < 2.0, "c under a on row 2");
     }
 
     #[test]

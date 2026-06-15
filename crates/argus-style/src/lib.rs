@@ -187,6 +187,8 @@ pub struct ComputedStyle {
     /// Per-column track sizes (parallel to `grid_columns`, capped at
     /// [`GRID_MAX_TRACKS`]). Unspecified tracks are [`GridTrack::Auto`].
     pub grid_tracks: [GridTrack; GRID_MAX_TRACKS],
+    /// Number of columns a grid *item* spans (`grid-column: span N`); 1 by default.
+    pub grid_column_span: u32,
     /// `flex-direction` for a `display: flex` container (not inherited).
     pub flex_direction: FlexDirection,
     /// `justify-content` — main-axis free-space distribution (flex container).
@@ -262,6 +264,7 @@ impl ComputedStyle {
             strike: false,
             grid_columns: 1,
             grid_tracks: [GridTrack::Auto; GRID_MAX_TRACKS],
+            grid_column_span: 1,
             flex_direction: FlexDirection::Row,
             justify_content: JustifyContent::FlexStart,
             align_items: AlignItems::Stretch,
@@ -885,6 +888,11 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         cs.grid_columns = cols;
         cs.grid_tracks = tracks;
     }
+    // `grid-column` / `grid-column-end` span for a grid item. We model the span
+    // count only: `span N`, or an `a / b` line range whose width is `b - a`.
+    if let Some(v) = map.get("grid-column").or_else(|| map.get("grid-column-end")) {
+        cs.grid_column_span = parse_grid_span(v);
+    }
     if let Some(v) = map
         .get("flex-direction")
         .or_else(|| map.get("flex-flow"))
@@ -1036,6 +1044,27 @@ fn parse_grid_tracks(v: &str) -> (u32, [GridTrack; GRID_MAX_TRACKS]) {
         push(parse_one(tok));
     }
     (count.max(1) as u32, tracks)
+}
+
+/// Parse a `grid-column` value into a span count (columns occupied). Handles
+/// `span N`, an `a / b` line range (width `b - a`), and a bare `span`/number.
+fn parse_grid_span(v: &str) -> u32 {
+    let v = v.trim();
+    if let Some((start, end)) = v.split_once('/') {
+        let start = start.trim();
+        let end = end.trim();
+        if let Some(n) = end.strip_prefix("span") {
+            return n.trim().parse::<u32>().unwrap_or(1).max(1);
+        }
+        if let (Ok(a), Ok(b)) = (start.parse::<i32>(), end.parse::<i32>()) {
+            return (b - a).max(1) as u32;
+        }
+        return 1;
+    }
+    if let Some(n) = v.strip_prefix("span") {
+        return n.trim().parse::<u32>().unwrap_or(1).max(1);
+    }
+    1
 }
 
 /// Parse a single fixed-length grid track token (falling back to `Auto`).
