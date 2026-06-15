@@ -103,12 +103,24 @@ fn parse_hsl(inner: &str) -> Option<Color> {
     let s = pct(parts[1])?.clamp(0.0, 1.0);
     let l = pct(parts[2])?.clamp(0.0, 1.0);
     let a = if parts.len() >= 4 {
-        (parts[3].trim().parse::<f32>().ok()?.clamp(0.0, 1.0) * 255.0).round() as u8
+        parse_alpha(parts[3])?
     } else {
         255
     };
     let (r, g, b) = hsl_to_rgb(h, s, l);
     Some(Color::rgba(r, g, b, a))
+}
+
+/// Parse a CSS alpha component to 0–255: either a `0..=1` number (`0.5`) or a
+/// percentage (`50%`), clamped to range.
+fn parse_alpha(s: &str) -> Option<u8> {
+    let s = s.trim();
+    let frac = if let Some(p) = s.strip_suffix('%') {
+        p.trim().parse::<f32>().ok()? / 100.0
+    } else {
+        s.parse::<f32>().ok()?
+    };
+    Some((frac.clamp(0.0, 1.0) * 255.0).round() as u8)
 }
 
 /// Convert HSL (`h` in degrees, `s`/`l` in `0..=1`) to 8-bit RGB.
@@ -190,9 +202,7 @@ fn parse_rgb(inner: &str, _alpha: bool) -> Option<Color> {
     let g = chan(parts[1])?;
     let b = chan(parts[2])?;
     let a = if parts.len() >= 4 {
-        let s = parts[3].trim();
-        let v: f32 = s.parse().ok()?;
-        (v.clamp(0.0, 1.0) * 255.0).round() as u8
+        parse_alpha(parts[3])?
     } else {
         255
     };
@@ -240,6 +250,15 @@ mod tests {
         );
         assert_eq!(parse_color("teal"), Some(Color::rgb(0, 128, 128)));
         assert_eq!(parse_color("bogus"), None);
+        // CSS Color 4: space-separated channels with a percentage alpha.
+        assert_eq!(
+            parse_color("rgb(255 0 0 / 50%)"),
+            Some(Color::rgba(255, 0, 0, 128))
+        );
+        assert_eq!(
+            parse_color("rgba(0, 0, 0, 25%)"),
+            Some(Color::rgba(0, 0, 0, 64))
+        );
     }
 
     #[test]
@@ -261,6 +280,11 @@ mod tests {
         assert_eq!(
             parse_color("hsl(120 100% 50% / 1)"),
             Some(Color::rgba(0, 255, 0, 255))
+        );
+        // Percentage alpha in the slash position.
+        assert_eq!(
+            parse_color("hsl(240 100% 50% / 50%)"),
+            Some(Color::rgba(0, 0, 255, 128))
         );
     }
 
