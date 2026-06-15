@@ -7,7 +7,7 @@
 //! (`oxideav-ico`, largest sub-image) — plus uncompressed 24/32-bit BMP, **TGA**
 //! (Truevision true-color + grayscale, uncompressed + RLE), **Netpbm** (PPM/PGM,
 //! ASCII + binary), **PCX** (RLE 24-bit + 8-bit palette), **TIFF** (baseline
-//! uncompressed + PackBits + LZW RGB/grayscale, both byte orders), all built in, and `data:` URLs.
+//! uncompressed + PackBits + LZW + Deflate RGB/grayscale, both byte orders), all built in, and `data:` URLs.
 //! AVIF and lossy-WebP
 //! (VP8) decode here once that glue lands. See `docs/subsystems/media.md`.
 
@@ -643,8 +643,9 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
             _ => {}
         }
     }
-    // Compression: 1 = none, 5 = LZW, 32773 = PackBits.
-    if !matches!(compression, 1 | 5 | 32773) || bits != 8 || width == 0 || height == 0 {
+    // Compression: 1 = none, 5 = LZW, 8/32946 = Deflate (zlib), 32773 = PackBits.
+    if !matches!(compression, 1 | 5 | 8 | 32773 | 32946) || bits != 8 || width == 0 || height == 0
+    {
         return None;
     }
     if !matches!((samples, photometric), (3, 2) | (1, 0) | (1, 1)) {
@@ -656,6 +657,9 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
     let (w, h) = (width as usize, height as usize);
     let spp = samples as usize;
     let white_is_zero = photometric == 0;
+    // Total decoded sample budget — also the per-strip Deflate output cap so a
+    // decompression bomb can never balloon past one image's worth of pixels.
+    let total = (w * h * spp) as u64;
     // Decompress every strip into one row-major sample buffer.
     let mut data: Vec<u8> = Vec::with_capacity(w * h * spp);
     for (so, &off) in strip_offsets.iter().enumerate() {
@@ -664,6 +668,7 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
         match compression {
             1 => data.extend_from_slice(strip),
             5 => lzw_decode_tiff(strip, &mut data),
+            8 | 32946 => deflate_decode_tiff(strip, &mut data, total)?,
             32773 => packbits_decode(strip, &mut data),
             _ => return None,
         }
@@ -692,6 +697,21 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
         height,
         rgba,
     })
+}
+
+/// TIFF Deflate (compression 8 "Adobe Deflate" / 32946 "Deflate") decode `src`
+/// into `out`. Both tags carry a zlib stream in practice; a few non-conformant
+/// encoders emit raw DEFLATE, so fall back to that. Output is capped at `cap`
+/// bytes (one image's worth of samples) so a decompression bomb fails closed.
+fn deflate_decode_tiff(src: &[u8], out: &mut Vec<u8>, cap: u64) -> Option<()> {
+    use compcol::deflate::Deflate;
+    use compcol::vec::decompress_to_vec_capped;
+    use compcol::zlib::Zlib;
+    let decoded = decompress_to_vec_capped::<Zlib>(src, cap)
+        .or_else(|_| decompress_to_vec_capped::<Deflate>(src, cap))
+        .ok()?;
+    out.extend_from_slice(&decoded);
+    Some(())
 }
 
 /// TIFF LZW (compression 5) decode `src` into `out`: variable-width (9–12 bit)
@@ -936,7 +956,7 @@ mod tests {
         let mut next = 258usize;
         let mut out = Vec::new();
         let (mut acc, mut nbits) = (0u32, 0u32);
-        let mut emit = |code: usize, acc: &mut u32, nbits: &mut u32, out: &mut Vec<u8>| {
+        let emit = |code: usize, acc: &mut u32, nbits: &mut u32, out: &mut Vec<u8>| {
             *acc = (*acc << 9) | code as u32;
             *nbits += 9;
             while *nbits >= 8 {
@@ -1048,6 +1068,42 @@ mod tests {
         assert_eq!(&img.rgba[0..4], &[100, 100, 100, 255]);
         assert_eq!(&img.rgba[8..12], &[100, 100, 100, 255]);
         assert_eq!(&img.rgba[12..16], &[200, 200, 200, 255]);
+    }
+
+    #[test]
+    fn decodes_deflate_grayscale_tiff() {
+        // 4x1 grayscale Deflate (compression 8) TIFF; strip is a zlib stream.
+        let strip = compcol::vec::compress_to_vec::<compcol::zlib::Zlib>(&[10u8, 20, 30, 40])
+            .expect("zlib compress");
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(b"II");
+        b.extend_from_slice(&42u16.to_le_bytes());
+        let ifd_off = 8 + strip.len() as u32;
+        b.extend_from_slice(&ifd_off.to_le_bytes());
+        b.extend_from_slice(&strip);
+        let entry = |b: &mut Vec<u8>, tag: u16, ty: u16, val: u32| {
+            b.extend_from_slice(&tag.to_le_bytes());
+            b.extend_from_slice(&ty.to_le_bytes());
+            b.extend_from_slice(&1u32.to_le_bytes());
+            b.extend_from_slice(&val.to_le_bytes());
+        };
+        b.extend_from_slice(&9u16.to_le_bytes());
+        entry(&mut b, 256, 3, 4);
+        entry(&mut b, 257, 3, 1);
+        entry(&mut b, 258, 3, 8);
+        entry(&mut b, 259, 3, 8); // Adobe Deflate
+        entry(&mut b, 262, 3, 1);
+        entry(&mut b, 273, 4, 8);
+        entry(&mut b, 277, 3, 1);
+        entry(&mut b, 278, 3, 1);
+        entry(&mut b, 279, 4, strip.len() as u32);
+        b.extend_from_slice(&0u32.to_le_bytes());
+        let img = decode(&b).expect("decode deflate tiff");
+        assert_eq!((img.width, img.height), (4, 1));
+        assert_eq!(img.rgba[0], 10);
+        assert_eq!(img.rgba[4], 20);
+        assert_eq!(img.rgba[8], 30);
+        assert_eq!(img.rgba[12], 40);
     }
 
     #[test]

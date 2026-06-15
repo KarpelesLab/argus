@@ -16,6 +16,7 @@ oxideav-qoi = "0.0"
 oxideav-ico = "0.0"
 oxideav-core = "0.1"
 oxideav-pixfmt = "0.1"
+compcol = "0.6"
 
 [lints]
 workspace = true

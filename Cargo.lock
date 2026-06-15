@@ -108,6 +108,7 @@ dependencies = [
 name = "argus-image"
 version = "0.0.0"
 dependencies = [
+ "compcol 0.6.2",
  "oxideav-core",
  "oxideav-gif",
  "oxideav-ico",
