@@ -3,9 +3,10 @@
 //! Supports type, universal, class, id, and attribute (`[a]`/`[a=v]`/`~=`/`^=`/
 //! `$=`/`*=`) selectors in compound selectors, joined by descendant (whitespace)
 //! and child (`>`) combinators. Evaluated pseudo-classes: `:first-child`,
-//! `:last-child`, `:nth-child(an+b)`, `:not(...)`, and the form-state
-//! `:checked`/`:disabled`/`:enabled`. Other pseudo-classes/elements are
-//! parsed-and-ignored so they don't break matching.
+//! `:last-child`, `:nth-child(an+b)`, `:not(...)`, `:is(...)`/`:where(...)` (match
+//! any argument; `:is()` takes its most specific argument's weight, `:where()`
+//! contributes zero), and the form-state `:checked`/`:disabled`/`:enabled`. Other
+//! pseudo-classes/elements are parsed-and-ignored so they don't break matching.
 
 use crate::tokenizer::Token;
 use argus_dom::{Document, NodeData, NodeId};
@@ -65,6 +66,11 @@ pub struct Compound {
     pub pseudos: Vec<PseudoClass>,
     /// `:not(...)` arguments — the compound matches only if none of these do.
     pub negations: Vec<Compound>,
+    /// `:is(...)` groups — each group is a list of alternatives; the group matches
+    /// if any alternative matches. Contributes the most specific argument's weight.
+    pub is_groups: Vec<Vec<Compound>>,
+    /// `:where(...)` groups — like `:is()`, but contribute **zero** specificity.
+    pub where_groups: Vec<Vec<Compound>>,
 }
 
 /// A complex selector: compounds left-to-right, with `combinators[k]` linking
@@ -93,26 +99,74 @@ impl Selector {
             }
             // `:not()` contributes the specificity of its argument.
             for n in &c.negations {
-                if n.id.is_some() {
-                    s.0 += 1;
-                }
-                s.1 += (n.classes.len() + n.attrs.len() + n.pseudos.len()) as u32;
-                if n.tag.is_some() {
-                    s.2 += 1;
+                s = s.add(compound_specificity(n));
+            }
+            // `:is()` contributes the specificity of its most specific argument.
+            for group in &c.is_groups {
+                if let Some(max) = group.iter().map(compound_specificity).max() {
+                    s = s.add(max);
                 }
             }
+            // `:where()` contributes nothing (zero specificity, by design).
         }
         s
     }
 }
 
+impl Specificity {
+    fn add(self, o: Specificity) -> Specificity {
+        Specificity(self.0 + o.0, self.1 + o.1, self.2 + o.2)
+    }
+}
+
+/// The specificity weight a single compound contributes (no combinators).
+fn compound_specificity(c: &Compound) -> Specificity {
+    let mut s = Specificity::default();
+    if c.id.is_some() {
+        s.0 += 1;
+    }
+    s.1 += (c.classes.len() + c.attrs.len() + c.pseudos.len()) as u32;
+    if c.tag.is_some() {
+        s.2 += 1;
+    }
+    for n in &c.negations {
+        s = s.add(compound_specificity(n));
+    }
+    for group in &c.is_groups {
+        if let Some(max) = group.iter().map(compound_specificity).max() {
+            s = s.add(max);
+        }
+    }
+    s
+}
+
 /// Parse a selector list (comma-separated complex selectors) from a token slice.
 /// Selectors that fail to parse are skipped.
 pub fn parse_selector_list(tokens: &[Token]) -> Vec<Selector> {
-    tokens
-        .split(|t| *t == Token::Comma)
-        .filter_map(parse_complex)
-        .collect()
+    // Split on commas at parenthesis depth 0 only, so commas inside a functional
+    // pseudo-class argument (`:is(a, b)`, `:where(...)`, `:not(...)`) don't split the
+    // list. The tokenizer folds the opening `(` into the `Function` token, so a
+    // `Function` opens a level just like `LParen`.
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    for (idx, t) in tokens.iter().enumerate() {
+        match t {
+            Token::Function(_) | Token::LParen => depth += 1,
+            Token::RParen => depth -= 1,
+            Token::Comma if depth == 0 => {
+                if let Some(s) = parse_complex(&tokens[start..idx]) {
+                    out.push(s);
+                }
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = parse_complex(&tokens[start..]) {
+        out.push(s);
+    }
+    out
 }
 
 fn parse_complex(tokens: &[Token]) -> Option<Selector> {
@@ -219,6 +273,8 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                     Some(Token::Function(fname)) => {
                         let is_nth = !double && fname.eq_ignore_ascii_case("nth-child");
                         let is_not = !double && fname.eq_ignore_ascii_case("not");
+                        let is_is = !double && fname.eq_ignore_ascii_case("is");
+                        let is_where = !double && fname.eq_ignore_ascii_case("where");
                         *i += 1;
                         // Capture the argument tokens up to the matching ')'.
                         let mut args = Vec::new();
@@ -247,6 +303,24 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                             let mut j = 0;
                             if let Some(inner) = parse_compound(&args, &mut j) {
                                 c.negations.push(inner);
+                            }
+                        } else if is_is || is_where {
+                            // `:is(...)` / `:where(...)` — a comma-separated list of
+                            // compound alternatives; the group matches if any does.
+                            let group: Vec<Compound> = args
+                                .split(|t| *t == Token::Comma)
+                                .filter_map(|alt| {
+                                    let mut j = 0;
+                                    skip_ws(alt, &mut j);
+                                    parse_compound(alt, &mut j)
+                                })
+                                .collect();
+                            if !group.is_empty() {
+                                if is_is {
+                                    c.is_groups.push(group);
+                                } else {
+                                    c.where_groups.push(group);
+                                }
                             }
                         }
                     }
@@ -408,6 +482,12 @@ fn matches_compound(doc: &Document, node: NodeId, compound: &Compound) -> bool {
     // `:not(...)` — the compound fails if any negated selector matches.
     for n in &compound.negations {
         if matches_compound(doc, node, n) {
+            return false;
+        }
+    }
+    // `:is(...)` / `:where(...)` — each group must have a matching alternative.
+    for group in compound.is_groups.iter().chain(&compound.where_groups) {
+        if !group.iter().any(|alt| matches_compound(doc, node, alt)) {
             return false;
         }
     }
@@ -669,5 +749,43 @@ mod tests {
         // n+3 (a=1,b=3) matches index >= 3 → li3,li4,li5
         assert!(matches(&doc, lis[3], &sel("li:nth-child(n+3)")));
         assert!(!matches(&doc, lis[1], &sel("li:nth-child(n+3)")));
+    }
+
+    #[test]
+    fn is_and_where_match_any_alternative() {
+        // <section><h1 id="a"></h1><h2 class="c"></h2><p></p></section>
+        let mut doc = Document::new();
+        let root = doc.root();
+        let sec = doc.create_element(QualName::html("section"), vec![]);
+        doc.append(root, sec);
+        let h1 = doc.create_element(QualName::html("h1"), vec![Attribute::new("id", "a")]);
+        doc.append(sec, h1);
+        let h2 = doc.create_element(QualName::html("h2"), vec![Attribute::new("class", "c")]);
+        doc.append(sec, h2);
+        let p = doc.create_element(QualName::html("p"), vec![]);
+        doc.append(sec, p);
+
+        // :is() matches if any alternative matches.
+        assert!(matches(&doc, h1, &sel(":is(h1, h2)")));
+        assert!(matches(&doc, h2, &sel(":is(h1, h2)")));
+        assert!(!matches(&doc, p, &sel(":is(h1, h2)")));
+        // Scoped + combined with a class / descendant combinator.
+        assert!(matches(&doc, h2, &sel("section :is(.c, .d)")));
+        assert!(!matches(&doc, h1, &sel("section :is(.c, .d)")));
+        // :where() matches identically...
+        assert!(matches(&doc, h1, &sel(":where(h1, h2)")));
+        assert!(!matches(&doc, p, &sel(":where(h1, h2)")));
+        // Two :is() groups must each match.
+        assert!(matches(&doc, h1, &sel(":is(h1, h2):is(#a)")));
+        assert!(!matches(&doc, h2, &sel(":is(h1, h2):is(#a)")));
+    }
+
+    #[test]
+    fn is_adds_specificity_but_where_does_not() {
+        // :is() takes the most specific argument's weight; :where() contributes zero.
+        assert_eq!(sel(":is(#a, .b)").specificity(), Specificity(1, 0, 0));
+        assert_eq!(sel(":where(#a, .b)").specificity(), Specificity(0, 0, 0));
+        // A type selector plus :is(.class) → (0,1,1).
+        assert_eq!(sel("div:is(.c)").specificity(), Specificity(0, 1, 1));
     }
 }
