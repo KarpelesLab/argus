@@ -536,6 +536,15 @@ impl TreeBuilder {
                 self.pop_until(item);
             }
         }
+        // A table-structure start tag closes an open <caption> (which holds only
+        // flow content, not rows/sections).
+        if matches!(
+            name,
+            "td" | "th" | "tr" | "tbody" | "thead" | "tfoot" | "col" | "colgroup" | "caption"
+        ) && self.open.iter().any(|&id| self.is_named(id, "caption"))
+        {
+            self.pop_until("caption");
+        }
         // A new cell or row first closes any open cell (cells are siblings); a new
         // row also closes the open row.
         if matches!(name, "td" | "th" | "tr") {

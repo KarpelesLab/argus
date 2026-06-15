@@ -694,4 +694,19 @@ a</br>b
 |         <tr>
 |           <td>
 |             "c"
+
+#data
+<table><caption>cap<tr><td>c</table>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <table>
+|       <caption>
+|         "cap"
+|       <tbody>
+|         <tr>
+|           <td>
+|             "c"
 "####;
