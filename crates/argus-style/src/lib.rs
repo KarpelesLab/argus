@@ -451,6 +451,7 @@ main, aside, figure, blockquote, ul, ol, li, dl, dt, dd, pre, table, form, hr, a
 details, summary \
 { display: block }
 summary { font-weight: bold }
+center { display: block; text-align: center }
 head, title, style, script, meta, link, base, noscript, template { display: none }
 dialog:not([open]) { display: none }
 datalist { display: none }
@@ -570,6 +571,68 @@ struct Cand {
 
 /// Compute the cascaded style of element `node`, inheriting from `parent`, given
 /// the page's `author` stylesheet.
+/// Map an element's legacy presentational HTML attributes to equivalent CSS
+/// declarations (HTML "presentational hints"). Covers the common ones:
+/// `align` (→ `text-align`, or `float` on `<img>`), `bgcolor`/`<body text>`
+/// (→ colors), and `width`/`height` on tables/cells/images.
+fn presentational_hints(doc: &Document, node: NodeId) -> Vec<(String, String)> {
+    let Some(e) = doc.node(node).as_element() else {
+        return Vec::new();
+    };
+    let tag: &str = &e.name.local;
+    let mut out: Vec<(String, String)> = Vec::new();
+
+    // A legacy color value: accept CSS colors and bare 3/6-hex digits (`ff0000`).
+    fn legacy_color(v: &str) -> Option<String> {
+        let v = v.trim();
+        if parse_color(v).is_some() {
+            Some(v.to_string())
+        } else if (v.len() == 3 || v.len() == 6) && v.bytes().all(|b| b.is_ascii_hexdigit()) {
+            Some(format!("#{v}"))
+        } else {
+            None
+        }
+    }
+
+    if let Some(a) = e.attr("align") {
+        let a = a.trim().to_ascii_lowercase();
+        if tag == "img" && matches!(a.as_str(), "left" | "right") {
+            // `<img align=left|right>` floats the image.
+            out.push(("float".into(), a));
+        } else if matches!(a.as_str(), "left" | "right" | "center" | "justify") {
+            out.push(("text-align".into(), a));
+        }
+    }
+    if let Some(bg) = e.attr("bgcolor").and_then(legacy_color) {
+        out.push(("background-color".into(), bg));
+    }
+    if tag == "body" {
+        if let Some(c) = e.attr("text").and_then(legacy_color) {
+            out.push(("color".into(), c));
+        }
+    }
+    if tag == "font" {
+        if let Some(c) = e.attr("color").and_then(legacy_color) {
+            out.push(("color".into(), c));
+        }
+    }
+    // `width`/`height` attributes on tables and cells map to CSS lengths (a bare
+    // number is px; a trailing `%` a percentage). Images are sized in layout.
+    if matches!(tag, "table" | "td" | "th" | "col" | "colgroup") {
+        for prop in ["width", "height"] {
+            if let Some(v) = e.attr(prop) {
+                let v = v.trim();
+                if v.ends_with('%') && v[..v.len() - 1].parse::<f32>().is_ok() {
+                    out.push((prop.into(), v.to_string()));
+                } else if v.parse::<f32>().is_ok() {
+                    out.push((prop.into(), format!("{v}px")));
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn computed_style(
     doc: &Document,
     node: NodeId,
@@ -586,6 +649,20 @@ pub fn computed_style(
         &mut cands,
         &mut order,
     );
+    // Legacy presentational attributes (`align`, `bgcolor`, …) map to CSS at the
+    // bottom of the cascade — UA rank, but ordered after UA rules — so any real
+    // author or inline rule still overrides them.
+    for (name, value) in presentational_hints(doc, node) {
+        cands.push(Cand {
+            rank: rank(Origin::Ua, false),
+            spec: Specificity::default(),
+            order,
+            name,
+            value,
+        });
+        order += 1;
+    }
+
     collect(author, Origin::Author, doc, node, &mut cands, &mut order);
 
     if let NodeData::Element(e) = &doc.node(node).data {
@@ -1912,6 +1989,34 @@ mod tests {
         assert!(cs.bold);
         assert_eq!(cs.font_size, 32.0);
         assert!(cs.margin.top > 0.0);
+    }
+
+    #[test]
+    fn presentational_attributes_map_to_css() {
+        let mut doc = Document::new();
+        // <td align=center bgcolor="ff0000"> → text-align + background-color.
+        let td = one(
+            &mut doc,
+            "td",
+            vec![
+                Attribute::new("align", "center"),
+                Attribute::new("bgcolor", "ff0000"),
+            ],
+        );
+        let cs = computed_style(&doc, td, &ComputedStyle::initial(), &Stylesheet::default());
+        assert_eq!(cs.text_align, TextAlign::Center);
+        assert_eq!(cs.background_color, Color::rgb(255, 0, 0));
+
+        // An author rule still overrides a presentational hint.
+        let td2 = one(&mut doc, "td", vec![Attribute::new("align", "center")]);
+        let author = parse_stylesheet("td { text-align: right }");
+        let cs2 = computed_style(&doc, td2, &ComputedStyle::initial(), &author);
+        assert_eq!(cs2.text_align, TextAlign::Right, "author rule beats the hint");
+
+        // <img align=right> floats the image.
+        let img = one(&mut doc, "img", vec![Attribute::new("align", "right")]);
+        let cs3 = computed_style(&doc, img, &ComputedStyle::initial(), &Stylesheet::default());
+        assert_eq!(cs3.float, Float::Right);
     }
 
     #[test]
