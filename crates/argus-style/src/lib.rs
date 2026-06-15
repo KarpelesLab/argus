@@ -662,6 +662,26 @@ fn presentational_hints(doc: &Document, node: NodeId) -> Vec<(String, String)> {
             }
         }
     }
+    // `<hr>` legacy attributes: `size` (rule thickness), `width` (px or %), and
+    // `color` (rule color → the top border that draws the line).
+    if tag == "hr" {
+        if let Some(s) = e.attr("size").and_then(|v| v.trim().parse::<f32>().ok()) {
+            if s > 0.0 {
+                out.push(("border-top-width".into(), format!("{s}px")));
+            }
+        }
+        if let Some(v) = e.attr("width") {
+            let v = v.trim();
+            if v.ends_with('%') && v[..v.len() - 1].parse::<f32>().is_ok() {
+                out.push(("width".into(), v.to_string()));
+            } else if v.parse::<f32>().is_ok() {
+                out.push(("width".into(), format!("{v}px")));
+            }
+        }
+        if let Some(c) = e.attr("color").and_then(legacy_color) {
+            out.push(("border-color".into(), c));
+        }
+    }
     out
 }
 

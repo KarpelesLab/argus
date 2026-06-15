@@ -855,13 +855,13 @@ impl Ctx<'_> {
                         let hr = computed_style(self.doc, child, &style, self.author);
                         self.cursor_y += hr.margin.top;
                         let h = hr.border.top.max(1.0);
-                        self.rects.push(rect(
-                            content_left,
-                            self.cursor_y,
-                            content_w,
-                            h,
-                            hr.border_color,
-                        ));
+                        // A narrowed `<hr width=…>` is centered in the content box.
+                        let hw = hr
+                            .width
+                            .map(|l| l.to_px(hr.font_size, content_w).clamp(0.0, content_w))
+                            .unwrap_or(content_w);
+                        let hx = content_left + (content_w - hw) / 2.0;
+                        self.rects.push(rect(hx, self.cursor_y, hw, h, hr.border_color));
                         self.cursor_y += h + hr.margin.bottom;
                     }
                     NodeData::Element(e) if e.name.is_html("table") => {
@@ -4572,6 +4572,26 @@ mod tests {
         // Three distinct column x-positions.
         let xs: std::collections::BTreeSet<i32> = cell_runs.iter().map(|r| r.x as i32).collect();
         assert_eq!(xs.len(), 3, "expected 3 columns, got {xs:?}");
+    }
+
+    #[test]
+    fn hr_width_and_size_attributes() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // <hr width="50%" size="4">: a 4px-thick rule, half the content width, centered.
+        let doc = parse("<hr width=\"50%\" size=\"4\">");
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        // The thickest rect is the hr line.
+        let hr = l.rects.iter().max_by(|a, b| a.h.partial_cmp(&b.h).unwrap()).unwrap();
+        let content_w = 400.0 - 2.0 * PAGE_MARGIN;
+        assert!((hr.h - 4.0).abs() < 0.5, "size=4 → 4px thick, got {}", hr.h);
+        assert!((hr.w - content_w / 2.0).abs() < 2.0, "width=50%, got {}", hr.w);
+        // Centered: left margin ≈ right margin.
+        let left_gap = hr.x - PAGE_MARGIN;
+        let right_gap = (PAGE_MARGIN + content_w) - (hr.x + hr.w);
+        assert!((left_gap - right_gap).abs() < 2.0, "centered: {left_gap} vs {right_gap}");
     }
 
     #[test]
