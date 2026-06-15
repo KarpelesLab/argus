@@ -1079,8 +1079,29 @@ impl Ctx<'_> {
                         line.push(i);
                         i += 1;
                     }
-                    // Lay out the line, left-packed, recording snapshots for align.
-                    let mut cx = content_left;
+                    // Distribute this line's leftover width per `justify-content`.
+                    let ln = line.len() as f32;
+                    let used: f32 = line.iter().map(|&idx| bases[idx]).sum::<f32>()
+                        + style.gap * (ln - 1.0);
+                    let free = (content_w - used).max(0.0);
+                    let (lead, between_extra) = match style.justify_content {
+                        JustifyContent::FlexStart => (0.0, 0.0),
+                        JustifyContent::FlexEnd => (free, 0.0),
+                        JustifyContent::Center => (free / 2.0, 0.0),
+                        JustifyContent::SpaceBetween => {
+                            (0.0, if ln > 1.0 { free / (ln - 1.0) } else { 0.0 })
+                        }
+                        JustifyContent::SpaceAround => {
+                            let unit = free / ln;
+                            (unit / 2.0, unit)
+                        }
+                        JustifyContent::SpaceEvenly => {
+                            let unit = free / (ln + 1.0);
+                            (unit, unit)
+                        }
+                    };
+                    // Lay out the line, recording snapshots for the align shift.
+                    let mut cx = content_left + lead;
                     let mut max_h = 0.0f32;
                     let mut snaps: Vec<(DisplayListMark, f32)> = Vec::new();
                     for &idx in &line {
@@ -1096,7 +1117,7 @@ impl Ctx<'_> {
                         let h = self.cursor_y - line_top;
                         max_h = max_h.max(h);
                         snaps.push((ds, h));
-                        cx += bases[idx] + style.gap;
+                        cx += bases[idx] + style.gap + between_extra;
                     }
                     for (ds, h) in &snaps {
                         let dy = match style.align_items {
@@ -2630,6 +2651,25 @@ mod tests {
         let grow = l.runs.iter().find(|r| r.text == "grow").unwrap();
         // The grower starts just after the fixed 50px slot (plus page margin ~8).
         assert!(grow.x > 50.0 && grow.x < 80.0, "grower starts after fixed slot, got {}", grow.x);
+    }
+
+    #[test]
+    fn flex_wrap_applies_justify_content_per_line() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A single 120px item on its own line in a 300px wrapping container. With
+        // justify-content:center the item is centered (free space ~180 → lead ~90),
+        // so its left edge sits well right of the content origin.
+        let html = "<div style=\"display:flex; flex-wrap:wrap; width:300px; justify-content:center\">\
+                      <div style=\"width:120px\">solo</div>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 600.0, &ImageSizes::new());
+        let solo = l.runs.iter().find(|r| r.text == "solo").unwrap();
+        // Centered: ~ page-margin(8) + lead(90) ≈ 98, far from the left edge.
+        assert!(solo.x > 70.0, "wrapped line item centered, got {}", solo.x);
     }
 
     #[test]
