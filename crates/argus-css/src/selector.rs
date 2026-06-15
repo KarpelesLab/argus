@@ -2,8 +2,9 @@
 //!
 //! Supports type, universal, class, id, and attribute (`[a]`/`[a=v]`/`~=`/`^=`/
 //! `$=`/`*=`/`|=`, plus the `[a=v i]` ASCII case-insensitive flag) selectors in
-//! compound selectors, joined by descendant (whitespace)
-//! and child (`>`) combinators. Evaluated pseudo-classes: `:first-child`,
+//! compound selectors, joined by descendant (whitespace), child (`>`),
+//! adjacent-sibling (`+`), and general-sibling (`~`) combinators. Evaluated
+//! pseudo-classes: `:first-child`,
 //! `:last-child`, `:only-child`, `:nth-child(an+b)`, `:nth-last-child`,
 //! `:first/last/only-of-type`, `:nth-of-type`, `:nth-last-of-type`, `:not(...)`,
 //! `:is(...)`/`:where(...)` (match any argument; `:is()` takes its most specific
@@ -20,6 +21,10 @@ use argus_dom::{Document, NodeData, NodeId};
 pub enum Combinator {
     Descendant,
     Child,
+    /// `A + B` — B's immediately preceding element sibling is `A`.
+    NextSibling,
+    /// `A ~ B` — some preceding element sibling of B is `A`.
+    SubsequentSibling,
 }
 
 /// How an attribute selector matches its value.
@@ -241,6 +246,16 @@ fn parse_complex(tokens: &[Token]) -> Option<Selector> {
             None => break,
             Some(Token::Delim('>')) => {
                 left = Combinator::Child;
+                i += 1;
+                skip_ws(tokens, &mut i);
+            }
+            Some(Token::Delim('+')) => {
+                left = Combinator::NextSibling;
+                i += 1;
+                skip_ws(tokens, &mut i);
+            }
+            Some(Token::Delim('~')) => {
+                left = Combinator::SubsequentSibling;
                 i += 1;
                 skip_ws(tokens, &mut i);
             }
@@ -530,10 +545,39 @@ pub fn matches(doc: &Document, node: NodeId, selector: &Selector) -> bool {
                     }
                 }
             }
+            Combinator::NextSibling => match prev_element_sibling(doc, current) {
+                Some(s) if matches_compound(doc, s, target) => current = s,
+                _ => return false,
+            },
+            Combinator::SubsequentSibling => {
+                let mut sib = prev_element_sibling(doc, current);
+                loop {
+                    match sib {
+                        Some(s) if matches_compound(doc, s, target) => {
+                            current = s;
+                            break;
+                        }
+                        Some(s) => sib = prev_element_sibling(doc, s),
+                        None => return false,
+                    }
+                }
+            }
         }
         idx -= 1;
     }
     true
+}
+
+/// The nearest preceding sibling that is an element (skipping text/comments).
+fn prev_element_sibling(doc: &Document, node: NodeId) -> Option<NodeId> {
+    let mut sib = doc.node(node).prev_sibling();
+    while let Some(id) = sib {
+        if matches!(&doc.node(id).data, NodeData::Element(_)) {
+            return Some(id);
+        }
+        sib = doc.node(id).prev_sibling();
+    }
+    None
 }
 
 fn matches_compound(doc: &Document, node: NodeId, compound: &Compound) -> bool {
@@ -790,6 +834,34 @@ mod tests {
         assert_eq!(s.compounds.len(), 3);
         assert_eq!(s.combinators[1], Combinator::Child);
         assert_eq!(s.combinators[2], Combinator::Descendant);
+    }
+
+    #[test]
+    fn sibling_combinators() {
+        // <div><h2/><p id=p1/><p id=p2/><span/></div>
+        let mut doc = Document::new();
+        let root = doc.root();
+        let div = doc.create_element(QualName::html("div"), vec![]);
+        doc.append(root, div);
+        let h2 = doc.create_element(QualName::html("h2"), vec![]);
+        doc.append(div, h2);
+        let p1 = doc.create_element(QualName::html("p"), vec![Attribute::new("id", "p1")]);
+        doc.append(div, p1);
+        let p2 = doc.create_element(QualName::html("p"), vec![Attribute::new("id", "p2")]);
+        doc.append(div, p2);
+        let span = doc.create_element(QualName::html("span"), vec![]);
+        doc.append(div, span);
+
+        // Adjacent sibling `+`: only the p immediately after the h2.
+        assert!(matches(&doc, p1, &sel("h2 + p")));
+        assert!(!matches(&doc, p2, &sel("h2 + p")), "p2 is not adjacent to h2");
+        // General sibling `~`: any p following the h2.
+        assert!(matches(&doc, p1, &sel("h2 ~ p")));
+        assert!(matches(&doc, p2, &sel("h2 ~ p")));
+        assert!(!matches(&doc, h2, &sel("p ~ h2")), "no p precedes the h2");
+        // Chained with another combinator.
+        assert!(matches(&doc, span, &sel("h2 ~ span")));
+        assert!(matches(&doc, p2, &sel("#p1 + p")));
     }
 
     #[test]
