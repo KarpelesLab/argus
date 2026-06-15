@@ -7,7 +7,7 @@
 //! (`oxideav-ico`, largest sub-image) — plus uncompressed 24/32-bit BMP, **TGA**
 //! (Truevision true-color + grayscale, uncompressed + RLE), **Netpbm** (PPM/PGM,
 //! ASCII + binary), **PCX** (RLE 24-bit + 8-bit palette), **TIFF** (baseline
-//! uncompressed RGB/grayscale, both byte orders), all built in, and `data:` URLs.
+//! uncompressed + PackBits RGB/grayscale, both byte orders), all built in, and `data:` URLs.
 //! AVIF and lossy-WebP
 //! (VP8) decode here once that glue lands. See `docs/subsystems/media.md`.
 
@@ -643,7 +643,8 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
             _ => {}
         }
     }
-    if compression != 1 || bits != 8 || width == 0 || height == 0 {
+    // Compression: 1 = none, 32773 = PackBits.
+    if !matches!(compression, 1 | 32773) || bits != 8 || width == 0 || height == 0 {
         return None;
     }
     if !matches!((samples, photometric), (3, 2) | (1, 0) | (1, 1)) {
@@ -655,37 +656,68 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
     let (w, h) = (width as usize, height as usize);
     let spp = samples as usize;
     let white_is_zero = photometric == 0;
-    let mut rgba = vec![0u8; w * h * 4];
-    let mut px = 0usize; // running pixel index across strips
+    // Decompress every strip into one row-major sample buffer.
+    let mut data: Vec<u8> = Vec::with_capacity(w * h * spp);
     for (so, &off) in strip_offsets.iter().enumerate() {
         let bc = *strip_counts.get(so).unwrap_or(&0) as usize;
-        let mut p = off as usize;
-        let endp = p + bc;
-        while p + spp <= endp && px < w * h {
-            let d = px * 4;
-            if spp == 3 {
-                rgba[d] = *bytes.get(p)?;
-                rgba[d + 1] = *bytes.get(p + 1)?;
-                rgba[d + 2] = *bytes.get(p + 2)?;
-            } else {
-                let mut g = *bytes.get(p)?;
-                if white_is_zero {
-                    g = 255 - g;
-                }
-                rgba[d] = g;
-                rgba[d + 1] = g;
-                rgba[d + 2] = g;
-            }
-            rgba[d + 3] = 0xFF;
-            p += spp;
-            px += 1;
+        let strip = bytes.get(off as usize..off as usize + bc)?;
+        match compression {
+            1 => data.extend_from_slice(strip),
+            32773 => packbits_decode(strip, &mut data),
+            _ => return None,
         }
+    }
+    let mut rgba = vec![0u8; w * h * 4];
+    for px in 0..w * h {
+        let p = px * spp;
+        if p + spp > data.len() {
+            break;
+        }
+        let d = px * 4;
+        if spp == 3 {
+            rgba[d] = data[p];
+            rgba[d + 1] = data[p + 1];
+            rgba[d + 2] = data[p + 2];
+        } else {
+            let g = if white_is_zero { 255 - data[p] } else { data[p] };
+            rgba[d] = g;
+            rgba[d + 1] = g;
+            rgba[d + 2] = g;
+        }
+        rgba[d + 3] = 0xFF;
     }
     Some(DecodedImage {
         width,
         height,
         rgba,
     })
+}
+
+/// PackBits (TIFF compression 32773 / Macintosh RLE) decode `src` into `out`: a
+/// header byte `n` (signed) means `n+1` literal bytes (0..127) or a byte repeated
+/// `1-n` times (-1..-127); -128 is a no-op.
+fn packbits_decode(src: &[u8], out: &mut Vec<u8>) {
+    let mut i = 0;
+    while i < src.len() {
+        let n = src[i] as i8;
+        i += 1;
+        if n >= 0 {
+            let count = n as usize + 1;
+            for _ in 0..count {
+                if i < src.len() {
+                    out.push(src[i]);
+                    i += 1;
+                }
+            }
+        } else if n != -128 {
+            let count = (1 - n as i32) as usize;
+            if i < src.len() {
+                let b = src[i];
+                i += 1;
+                out.extend(std::iter::repeat_n(b, count));
+            }
+        }
+    }
 }
 
 /// Decode a `data:` URL (`data:[<mime>][;base64],<payload>`).
@@ -825,6 +857,38 @@ mod tests {
         assert_eq!((img.width, img.height), (2, 1));
         assert_eq!(&img.rgba[0..4], &[255, 0, 0, 255], "red");
         assert_eq!(&img.rgba[4..8], &[0, 255, 0, 255], "green");
+    }
+
+    #[test]
+    fn decodes_packbits_grayscale_tiff() {
+        // 4x1 grayscale PackBits TIFF: a run of 3x100 then a literal 200.
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(b"II");
+        b.extend_from_slice(&42u16.to_le_bytes());
+        b.extend_from_slice(&12u32.to_le_bytes()); // IFD offset
+        b.extend_from_slice(&[0xFE, 100, 0x00, 200]); // PackBits at offset 8 (4 bytes)
+        let entry = |b: &mut Vec<u8>, tag: u16, ty: u16, val: u32| {
+            b.extend_from_slice(&tag.to_le_bytes());
+            b.extend_from_slice(&ty.to_le_bytes());
+            b.extend_from_slice(&1u32.to_le_bytes());
+            b.extend_from_slice(&val.to_le_bytes());
+        };
+        b.extend_from_slice(&9u16.to_le_bytes());
+        entry(&mut b, 256, 3, 4); // width
+        entry(&mut b, 257, 3, 1); // height
+        entry(&mut b, 258, 3, 8); // bits
+        entry(&mut b, 259, 3, 32773); // PackBits
+        entry(&mut b, 262, 3, 1); // BlackIsZero gray
+        entry(&mut b, 273, 4, 8); // strip offset
+        entry(&mut b, 277, 3, 1); // samples
+        entry(&mut b, 278, 3, 1); // rows/strip
+        entry(&mut b, 279, 4, 4); // strip byte count
+        b.extend_from_slice(&0u32.to_le_bytes());
+        let img = decode(&b).expect("decode packbits tiff");
+        assert_eq!((img.width, img.height), (4, 1));
+        assert_eq!(&img.rgba[0..4], &[100, 100, 100, 255]);
+        assert_eq!(&img.rgba[8..12], &[100, 100, 100, 255]);
+        assert_eq!(&img.rgba[12..16], &[200, 200, 200, 255]);
     }
 
     #[test]
