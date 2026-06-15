@@ -503,6 +503,16 @@ fn a11y_tree(doc: &argus_dom::Document) -> String {
         }
     }
 
+    /// The text content of the element with `id` (for `aria-labelledby`).
+    fn id_text(doc: &Document, node: NodeId, id: &str) -> Option<String> {
+        if doc.node(node).as_element().and_then(|e| e.attr("id")) == Some(id) {
+            let mut s = String::new();
+            text_of(doc, node, &mut s);
+            return Some(s);
+        }
+        doc.children(node).find_map(|c| id_text(doc, c, id))
+    }
+
     /// The accessible name a `<label>` gives a form control: a `<label for=id>`
     /// elsewhere in the document, or an ancestor `<label>` wrapping the control.
     fn label_name(doc: &Document, control: NodeId) -> Option<String> {
@@ -569,7 +579,16 @@ fn a11y_tree(doc: &argus_dom::Document) -> String {
                     });
                 if let Some(role) = role {
                     // Accessible name: `aria-label`, else `alt` for images, else text.
-                    let name = if let Some(label) = e.attr("aria-label") {
+                    let name = if let Some(ids) = e.attr("aria-labelledby") {
+                        // `aria-labelledby` wins: join the referenced elements' text.
+                        let mut parts = Vec::new();
+                        for rid in ids.split_whitespace() {
+                            if let Some(t) = id_text(doc, doc.root(), rid) {
+                                parts.push(t);
+                            }
+                        }
+                        clean(&parts.join(" "))
+                    } else if let Some(label) = e.attr("aria-label") {
                         clean(label)
                     } else if tag == "img" {
                         clean(e.attr("alt").unwrap_or(""))
@@ -1893,6 +1912,13 @@ mod tests {
         ));
         assert!(t3.contains("textbox \"Email\""), "label[for] names the input:\n{t3}");
         assert!(t3.contains("textbox \"Phone\""), "wrapping label names the input:\n{t3}");
+
+        // aria-labelledby wins and joins referenced elements' text.
+        let t4 = super::a11y_tree(&argus_html::parse(
+            "<span id=\"a\">Save</span><span id=\"b\">changes</span>\
+             <button aria-labelledby=\"a b\">x</button>",
+        ));
+        assert!(t4.contains("button \"Save changes\""), "labelledby joins refs:\n{t4}");
         assert!(tree.contains("spinbutton \"Qty\""), "number→spinbutton:\n{tree}");
         assert!(tree.contains("textbox \"Email\""), "email→textbox:\n{tree}");
     }
