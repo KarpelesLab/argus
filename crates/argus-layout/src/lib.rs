@@ -1153,7 +1153,7 @@ impl Ctx<'_> {
             let mut snaps: Vec<DisplayListMark> = Vec::new();
             for (i, &item) in items.iter().enumerate() {
                 if i > 0 {
-                    self.cursor_y += style.gap;
+                    self.cursor_y += style.row_gap; // column main-axis = vertical
                 }
                 let istyle = computed_style(self.doc, item, &style, self.author);
                 let ds = (
@@ -1339,7 +1339,7 @@ impl Ctx<'_> {
                     }
                     line_top += max_h;
                     if i < items.len() {
-                        line_top += style.gap;
+                        line_top += style.row_gap; // between wrapped flex lines
                     }
                 }
                 self.cursor_y = line_top + style.padding.bottom + style.border.bottom;
@@ -1573,7 +1573,7 @@ impl Ctx<'_> {
         let mut first_row = true;
         while idx < items.len() {
             if !first_row {
-                self.cursor_y += style.gap; // row gap
+                self.cursor_y += style.row_gap; // grid row gap
             }
             first_row = false;
             let row_top = self.cursor_y;
@@ -3305,6 +3305,30 @@ borderdisplay0123floatleftrightclearbothfrgrowshrinkwrapspanabsolutefixedrelativ
         assert!(word.baseline > 85.0, "cleared block should sit below float, got {}", word.baseline);
         // And it returns to the left edge (not indented by the float).
         assert!(word.x < 30.0, "cleared block back at left edge, got {}", word.x);
+    }
+
+    #[test]
+    fn separate_row_and_column_gaps() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // `gap: 80px 4px` → 80px between rows, 4px between columns. Two columns, four
+        // items → 2 rows. Row-2 item sits ~80px+ below row 1; columns are only 4px
+        // apart so column 2's x is close behind column 1 + its content.
+        let html = "<div style=\"display:grid; width:200px; grid-template-columns: repeat(2,1fr); gap: 80px 4px\">\
+                      <div>a</div><div>b</div><div>c</div><div>d</div>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let at = |t: &str| {
+            let r = l.runs.iter().find(|r| r.text == t).unwrap();
+            (r.x, r.baseline)
+        };
+        let (_, ay) = at("a");
+        let (_, cy) = at("c");
+        // c is the start of row 2: at least the 80px row gap below row 1.
+        assert!(cy > ay + 80.0, "row gap should push row 2 down ~80px, got {}", cy - ay);
     }
 
     #[test]

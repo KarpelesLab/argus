@@ -244,8 +244,10 @@ pub struct ComputedStyle {
     pub word_spacing: f32,
     /// `vertical-align` for inline content (not inherited).
     pub vertical_align: VerticalAlign,
-    /// `gap` between flex/grid items in pixels (not inherited).
+    /// Column `gap` between flex/grid items in pixels (not inherited).
     pub gap: f32,
+    /// Row `gap` between flex/grid rows (and wrapped flex lines) in pixels.
+    pub row_gap: f32,
     /// `visibility: hidden` — the box keeps its space but paints nothing
     /// (inherited; a descendant may set `visibility: visible` to reappear).
     pub hidden: bool,
@@ -306,6 +308,7 @@ impl ComputedStyle {
             word_spacing: 0.0,
             vertical_align: VerticalAlign::Baseline,
             gap: 0.0,
+            row_gap: 0.0,
             hidden: false,
             outline_width: 0.0,
             outline_color: Color::TRANSPARENT,
@@ -694,15 +697,37 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             _ => BoxSizing::ContentBox,
         };
     }
+    // `gap` shorthand: `<row-gap> [<column-gap>]` (column defaults to row).
+    if let Some(v) = map.get("gap").or_else(|| map.get("grid-gap")) {
+        let mut toks = v.split_whitespace();
+        if let Some(row) = toks.next().and_then(parse_length) {
+            let r = row.to_px(cs.font_size, 0.0).max(0.0);
+            cs.row_gap = r;
+            cs.gap = toks
+                .next()
+                .and_then(parse_length)
+                .map(|l| l.to_px(cs.font_size, 0.0).max(0.0))
+                .unwrap_or(r);
+        }
+    }
+    // Longhands override the shorthand.
     if let Some(px) = map
-        .get("gap")
-        .or_else(|| map.get("column-gap"))
-        .or_else(|| map.get("grid-gap"))
+        .get("column-gap")
+        .or_else(|| map.get("grid-column-gap"))
         .and_then(|v| v.split_whitespace().next())
         .and_then(parse_length)
         .map(|l| l.to_px(cs.font_size, 0.0))
     {
         cs.gap = px.max(0.0);
+    }
+    if let Some(px) = map
+        .get("row-gap")
+        .or_else(|| map.get("grid-row-gap"))
+        .and_then(|v| v.split_whitespace().next())
+        .and_then(parse_length)
+        .map(|l| l.to_px(cs.font_size, 0.0))
+    {
+        cs.row_gap = px.max(0.0);
     }
     if let Some(v) = map.get("vertical-align") {
         cs.vertical_align = match v.as_str() {
