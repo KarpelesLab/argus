@@ -3774,7 +3774,8 @@ mod tests {
         // (flex/grid/tables/lists, floats, positioning, fr tracks) are exercised,
         // not just text.
         const BIAS: &[u8] = b"<>/=\"' ;:{}().%#-\nstyledivpaulitbflexgridcolorwidthpaddingmargin\
-borderdisplay0123floatleftrightclearbothfrgrowshrinkwrapspanabsolutefixedrelativtopbottomgaprepeat";
+borderdisplay0123floatleftrightclearbothfrgrowshrinkwrapspanabsolutefixedrelativtopbottomgaprepeat\
+lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanprogressmeterinput";
         for _ in 0..2000 {
             let len = (byte() as usize) * 4;
             let bytes: Vec<u8> = (0..len)
