@@ -2442,7 +2442,6 @@ impl Ctx<'_> {
             None => (avail - style.margin.left - style.margin.right).max(0.0),
         };
         let table_w = clamp_content_width(&style, table_w, avail);
-        let col_w = table_w / num_cols as f32;
 
         // A `<caption>` renders as a block spanning the table width, above the rows
         // by default or below them for `caption-side: bottom`.
@@ -2508,6 +2507,33 @@ impl Ctx<'_> {
         }
         let nrows = occ.len();
 
+        // Content-based ("auto") column widths: each column's natural width is the
+        // widest max-content of its single-column cells; columns are then scaled
+        // proportionally to fill the table width.
+        let mut col_nat = vec![0.0f32; cols];
+        for p in &placed {
+            if p.cspan == 1 {
+                let cw = self.intrinsic_border_width(p.cell, &p.style)
+                    + p.style.padding.left
+                    + p.style.padding.right
+                    + 8.0; // a little breathing room
+                col_nat[p.col] = col_nat[p.col].max(cw);
+            }
+        }
+        let nat_total: f32 = col_nat.iter().sum();
+        let col_w: Vec<f32> = if nat_total > 1.0 {
+            col_nat.iter().map(|&n| n * table_w / nat_total).collect()
+        } else {
+            vec![table_w / cols.max(1) as f32; cols]
+        };
+        let mut col_x = vec![table_left; cols];
+        let mut acc = table_left;
+        for (c, w) in col_w.iter().enumerate() {
+            col_x[c] = acc;
+            acc += w;
+        }
+        let span_w = |c: usize, cspan: usize| -> f32 { col_w[c..c + cspan].iter().sum() };
+
         // Measure each cell's height (lay out at a throwaway origin, then truncate).
         let table_top = self.cursor_y;
         let mut heights = vec![0.0f32; placed.len()];
@@ -2520,8 +2546,7 @@ impl Ctx<'_> {
                 self.bounds.len(),
             );
             self.cursor_y = 0.0;
-            let w = p.cspan as f32 * col_w;
-            self.layout_block(p.cell, p.style, table_left + p.col as f32 * col_w, w, None);
+            self.layout_block(p.cell, p.style, col_x[p.col], span_w(p.col, p.cspan), None);
             heights[i] = self.cursor_y;
             self.rects.truncate(mark.0);
             self.runs.truncate(mark.1);
@@ -2553,8 +2578,7 @@ impl Ctx<'_> {
         // Real layout at each cell's (x, y).
         for p in &placed {
             self.cursor_y = row_y[p.row];
-            let w = p.cspan as f32 * col_w;
-            self.layout_block(p.cell, p.style, table_left + p.col as f32 * col_w, w, None);
+            self.layout_block(p.cell, p.style, col_x[p.col], span_w(p.col, p.cspan), None);
         }
         self.cursor_y = table_top + row_h.iter().sum::<f32>();
         if style.caption_side_bottom {
@@ -4167,6 +4191,27 @@ mod tests {
             cap_baseline("caption-side:bottom") > cell_baseline("caption-side:bottom"),
             "caption-side:bottom puts caption below the rows"
         );
+    }
+
+    #[test]
+    fn table_columns_size_to_content() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A narrow first column and a wide second column: the second column gets
+        // more width, so the right cell starts much further right than half.
+        let html = "<table style=\"width:300px\">\
+            <tr><td>x</td><td>a much wider cell with lots of text here</td></tr></table>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 600.0, &ImageSizes::new());
+        let x_short = l.runs.iter().find(|r| r.text == "x").unwrap().x;
+        // The 2nd column's content ("much"/"wider"...) starts after the narrow col 1.
+        let col2 = l.runs.iter().find(|r| r.text == "much").unwrap().x;
+        // Column 1 is narrow (sized to "x"), so column 2 starts well left of center
+        // (150) — content-based, not the equal-split 150px.
+        assert!(col2 - x_short < 140.0, "narrow first column: c1={x_short} c2={col2}");
+        assert!(col2 - x_short > 5.0, "columns still separated");
     }
 
     #[test]
