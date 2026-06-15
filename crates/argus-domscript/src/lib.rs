@@ -792,14 +792,25 @@ fn run_scripts(
     header_csp: &[String],
     url: Option<&str>,
 ) -> Option<String> {
-    // Content-Security-Policy (from <meta> and/or response headers) can forbid
-    // inline scripts; a resource must satisfy every policy.
-    if csp_blocks_inline_scripts(doc, header_csp) {
-        return Some("[CSP] blocked inline scripts\n".to_string());
-    }
-    let scripts = collect_scripts(doc);
-    if scripts.is_empty() {
+    let all_scripts = collect_scripts(doc);
+    if all_scripts.is_empty() {
         return None;
+    }
+    // Content-Security-Policy (from <meta> and/or response headers): keep only the
+    // inline scripts allowed by *every* policy (a nonce'd script passes a
+    // nonce-based policy). If all are dropped, report the block.
+    let policies = csp_policies(doc, header_csp);
+    let scripts: Vec<String> = all_scripts
+        .into_iter()
+        .filter(|(_, nonce)| {
+            policies
+                .iter()
+                .all(|p| policy_allows_script(p, nonce.as_deref()))
+        })
+        .map(|(s, _)| s)
+        .collect();
+    if scripts.is_empty() {
+        return Some("[CSP] blocked inline scripts\n".to_string());
     }
 
     let seed = seed_json(doc);
@@ -955,24 +966,41 @@ fn location_json(url: Option<&str>) -> String {
 /// Whether Content-Security-Policy forbids inline scripts. Considers every policy —
 /// each `<meta http-equiv>` plus each header-delivered string — and blocks if **any**
 /// of them does (a resource must satisfy all policies).
-fn csp_blocks_inline_scripts(doc: &Document, header_csp: &[String]) -> bool {
-    let meta_blocks = collect_meta_csp(doc)
-        .iter()
-        .any(|p| policy_blocks_inline_scripts(p));
-    let header_blocks = header_csp
-        .iter()
-        .any(|p| policy_blocks_inline_scripts(&p.to_ascii_lowercase()));
-    meta_blocks || header_blocks
+/// Every active CSP policy string (page `<meta>` policies plus response headers).
+fn csp_policies(doc: &Document, header_csp: &[String]) -> Vec<String> {
+    let mut v = collect_meta_csp(doc);
+    v.extend(header_csp.iter().cloned());
+    v
 }
 
-/// Whether one CSP policy forbids inline scripts: its effective directive
-/// (`script-src`, else `default-src`) is present and lacks `'unsafe-inline'`/`*`.
-fn policy_blocks_inline_scripts(policy: &str) -> bool {
-    match csp_directive(policy, "script-src").or_else(|| csp_directive(policy, "default-src")) {
-        None => false, // no script-src/default-src → scripts aren't restricted
-        Some(tokens) => !tokens
-            .split_whitespace()
-            .any(|t| t == "'unsafe-inline'" || t == "*"),
+/// Whether one CSP policy allows an inline `<script>` carrying the given `nonce`.
+/// The effective directive is `script-src`, else `default-src`. If it lists any
+/// `'nonce-…'` source, the script must carry a matching (case-sensitive) nonce and
+/// `'unsafe-inline'` is ignored (per CSP3); otherwise `'unsafe-inline'`/`*` allow
+/// it. A policy with no effective directive does not restrict scripts.
+fn policy_allows_script(policy: &str, nonce: Option<&str>) -> bool {
+    let Some(tokens) = csp_directive(policy, "script-src").or_else(|| csp_directive(policy, "default-src"))
+    else {
+        return true; // not restricted by this policy
+    };
+    let toks: Vec<&str> = tokens.split_whitespace().collect();
+    let nonces: Vec<&str> = toks.iter().filter_map(|t| token_nonce(t)).collect();
+    if !nonces.is_empty() {
+        return nonce.is_some_and(|n| nonces.contains(&n));
+    }
+    toks.iter().any(|t| {
+        *t == "*" || t.trim_matches('\'').eq_ignore_ascii_case("unsafe-inline")
+    })
+}
+
+/// Extract the value of a `'nonce-…'` source token (case-insensitive prefix, the
+/// nonce value itself kept verbatim), or `None` for any other token.
+fn token_nonce(tok: &str) -> Option<&str> {
+    let inner = tok.strip_prefix('\'')?.strip_suffix('\'')?;
+    if inner.len() >= 6 && inner[..6].eq_ignore_ascii_case("nonce-") {
+        Some(&inner[6..])
+    } else {
+        None
     }
 }
 
@@ -985,7 +1013,7 @@ fn collect_meta_csp(doc: &Document) -> Vec<String> {
                     .is_some_and(|v| v.eq_ignore_ascii_case("content-security-policy"))
             {
                 if let Some(c) = e.attr("content") {
-                    out.push(c.to_ascii_lowercase());
+                    out.push(c.to_string());
                 }
             }
         }
@@ -999,18 +1027,23 @@ fn collect_meta_csp(doc: &Document) -> Vec<String> {
 }
 
 /// Extract a named directive's value (the tokens after the name) from a policy.
+/// The directive name matches case-insensitively; the value is returned verbatim
+/// (so case-sensitive nonces/hashes survive).
 fn csp_directive<'a>(policy: &'a str, name: &str) -> Option<&'a str> {
     policy.split(';').find_map(|d| {
         let d = d.trim();
-        d.strip_prefix(name)
-            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
-            .map(|rest| rest.trim())
+        let mut it = d.splitn(2, char::is_whitespace);
+        let dname = it.next()?;
+        dname
+            .eq_ignore_ascii_case(name)
+            .then(|| it.next().unwrap_or("").trim())
     })
 }
 
-/// Collect inline (`src`-less) `<script>` text in document order.
-fn collect_scripts(doc: &Document) -> Vec<String> {
-    fn walk(doc: &Document, id: NodeId, out: &mut Vec<String>) {
+/// Collect inline (`src`-less) `<script>` bodies in document order, each paired
+/// with its `nonce` attribute (for per-script CSP evaluation).
+fn collect_scripts(doc: &Document) -> Vec<(String, Option<String>)> {
+    fn walk(doc: &Document, id: NodeId, out: &mut Vec<(String, Option<String>)>) {
         if let NodeData::Element(e) = &doc.node(id).data {
             if e.name.is_html("script") && e.attr("src").is_none() {
                 let mut src = String::new();
@@ -1020,7 +1053,7 @@ fn collect_scripts(doc: &Document) -> Vec<String> {
                     }
                 }
                 if !src.trim().is_empty() {
-                    out.push(src);
+                    out.push((src, e.attr("nonce").map(str::to_string)));
                 }
             }
         }
@@ -2651,6 +2684,42 @@ mod tests {
         let mut doc2 = argus_html::parse(html2);
         apply_scripts(&mut doc2);
         assert_eq!(text_of(&doc2, "o"), "before", "a second restrictive meta blocks");
+    }
+
+    #[test]
+    fn csp_nonce_allows_matching_inline_script() {
+        // A nonce-based policy: only the script carrying the matching (case-sensitive)
+        // nonce runs; one without (or with the wrong nonce) is blocked.
+        let html = "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'nonce-AbC123'\">\
+             <div id=\"a\">a0</div><div id=\"b\">b0</div><div id=\"c\">c0</div>\
+             <script nonce=\"AbC123\">document.getElementById('a').textContent = 'a1';</script>\
+             <script nonce=\"wrong\">document.getElementById('b').textContent = 'b1';</script>\
+             <script>document.getElementById('c').textContent = 'c1';</script>";
+        let mut doc = argus_html::parse(html);
+        apply_scripts(&mut doc);
+        assert_eq!(text_of(&doc, "a"), "a1", "matching nonce runs");
+        assert_eq!(text_of(&doc, "b"), "b0", "wrong nonce blocked");
+        assert_eq!(text_of(&doc, "c"), "c0", "missing nonce blocked");
+    }
+
+    #[test]
+    fn csp_nonce_present_makes_unsafe_inline_ignored() {
+        // Per CSP3, when the policy carries a nonce, 'unsafe-inline' is ignored: a
+        // non-nonced script is blocked even though 'unsafe-inline' is listed.
+        let html = "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'unsafe-inline' 'nonce-keep'\">\
+             <div id=\"o\">before</div>\
+             <script>document.getElementById('o').textContent = 'after';</script>";
+        let mut doc = argus_html::parse(html);
+        apply_scripts(&mut doc);
+        assert_eq!(text_of(&doc, "o"), "before", "unsafe-inline ignored when a nonce is present");
+
+        // The same script with the matching nonce runs.
+        let html2 = "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'unsafe-inline' 'nonce-keep'\">\
+             <div id=\"o\">before</div>\
+             <script nonce=\"keep\">document.getElementById('o').textContent = 'after';</script>";
+        let mut doc2 = argus_html::parse(html2);
+        apply_scripts(&mut doc2);
+        assert_eq!(text_of(&doc2, "o"), "after", "matching nonce runs");
     }
 
     #[test]
