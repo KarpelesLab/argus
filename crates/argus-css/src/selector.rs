@@ -5,8 +5,9 @@
 //! and child (`>`) combinators. Evaluated pseudo-classes: `:first-child`,
 //! `:last-child`, `:nth-child(an+b)`, `:not(...)`, `:is(...)`/`:where(...)` (match
 //! any argument; `:is()` takes its most specific argument's weight, `:where()`
-//! contributes zero), and the form-state `:checked`/`:disabled`/`:enabled`. Other
-//! pseudo-classes/elements are parsed-and-ignored so they don't break matching.
+//! contributes zero), `:root`, `:empty`, and the form-state
+//! `:checked`/`:disabled`/`:enabled`. Other pseudo-classes/elements are
+//! parsed-and-ignored so they don't break matching.
 
 use crate::tokenizer::Token;
 use argus_dom::{Document, NodeData, NodeId};
@@ -53,6 +54,10 @@ pub enum PseudoClass {
     Checked,
     Disabled,
     Enabled,
+    /// `:root` — the document's root element (`<html>`).
+    Root,
+    /// `:empty` — no element or (non-whitespace) text children.
+    Empty,
 }
 
 /// A compound selector: an optional type plus id/classes/attrs/pseudo-classes.
@@ -265,6 +270,8 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                                 "checked" => c.pseudos.push(PseudoClass::Checked),
                                 "disabled" => c.pseudos.push(PseudoClass::Disabled),
                                 "enabled" => c.pseudos.push(PseudoClass::Enabled),
+                                "root" => c.pseudos.push(PseudoClass::Root),
+                                "empty" => c.pseudos.push(PseudoClass::Empty),
                                 _ => {}
                             }
                         }
@@ -547,6 +554,17 @@ fn pseudo_matches(doc: &Document, node: NodeId, p: PseudoClass) -> bool {
         PseudoClass::Checked => element_has_attr(doc, node, "checked"),
         PseudoClass::Disabled => element_has_attr(doc, node, "disabled"),
         PseudoClass::Enabled => !element_has_attr(doc, node, "disabled"),
+        // `:root` — an element whose parent is the document node.
+        PseudoClass::Root => doc
+            .node(node)
+            .parent()
+            .is_some_and(|p| matches!(doc.node(p).data, NodeData::Document)),
+        // `:empty` — no element children and no non-whitespace text.
+        PseudoClass::Empty => doc.children(node).all(|c| match &doc.node(c).data {
+            NodeData::Element(_) => false,
+            NodeData::Text(t) => t.chars().all(|ch| ch.is_whitespace()),
+            _ => true,
+        }),
     }
 }
 
@@ -778,6 +796,40 @@ mod tests {
         // Two :is() groups must each match.
         assert!(matches(&doc, h1, &sel(":is(h1, h2):is(#a)")));
         assert!(!matches(&doc, h2, &sel(":is(h1, h2):is(#a)")));
+    }
+
+    #[test]
+    fn root_and_empty_pseudo_classes() {
+        // <html><body><p id="e"></p><p id="ws"> </p><p id="f">x</p><div id="d"><span/></div></body></html>
+        let mut doc = Document::new();
+        let root = doc.root();
+        let html = doc.create_element(QualName::html("html"), vec![]);
+        doc.append(root, html);
+        let body = doc.create_element(QualName::html("body"), vec![]);
+        doc.append(html, body);
+        let empty = doc.create_element(QualName::html("p"), vec![Attribute::new("id", "e")]);
+        doc.append(body, empty);
+        let ws = doc.create_element(QualName::html("p"), vec![Attribute::new("id", "ws")]);
+        doc.append(body, ws);
+        let t = doc.create_text(" ");
+        doc.append(ws, t);
+        let full = doc.create_element(QualName::html("p"), vec![Attribute::new("id", "f")]);
+        doc.append(body, full);
+        let txt = doc.create_text("x");
+        doc.append(full, txt);
+        let parent = doc.create_element(QualName::html("div"), vec![Attribute::new("id", "d")]);
+        doc.append(body, parent);
+        let child = doc.create_element(QualName::html("span"), vec![]);
+        doc.append(parent, child);
+
+        // :root is the <html> element only.
+        assert!(matches(&doc, html, &sel(":root")));
+        assert!(!matches(&doc, body, &sel(":root")));
+        // :empty — no children, or whitespace-only text (Selectors-4 behavior).
+        assert!(matches(&doc, empty, &sel("p:empty")));
+        assert!(matches(&doc, ws, &sel(":empty")));
+        assert!(!matches(&doc, full, &sel(":empty"))); // has text
+        assert!(!matches(&doc, parent, &sel(":empty"))); // has an element child
     }
 
     #[test]
