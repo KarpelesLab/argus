@@ -843,7 +843,10 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
         }
     }
     // Compression: 1 = none, 5 = LZW, 8/32946 = Deflate (zlib), 32773 = PackBits.
-    if !matches!(compression, 1 | 5 | 8 | 32773 | 32946) || bits != 8 || width == 0 || height == 0
+    if !matches!(compression, 1 | 5 | 8 | 32773 | 32946)
+        || !matches!(bits, 8 | 16)
+        || width == 0
+        || height == 0
     {
         return None;
     }
@@ -851,7 +854,8 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
         return None;
     }
     // Predictor: 1 = none, 2 = horizontal differencing (undone after decompress).
-    if !matches!(predictor, 1 | 2) {
+    // Horizontal differencing is only modeled for 8-bit samples.
+    if !matches!(predictor, 1 | 2) || (predictor == 2 && bits != 8) {
         return None;
     }
     if (width as u64) * (height as u64) > 64_000_000 || strip_offsets.is_empty() {
@@ -859,10 +863,11 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
     }
     let (w, h) = (width as usize, height as usize);
     let spp = samples as usize;
+    let sb = (bits / 8) as usize; // bytes per sample (1 or 2)
     let white_is_zero = photometric == 0;
     // Total decoded sample budget — also the per-strip Deflate output cap so a
     // decompression bomb can never balloon past one image's worth of pixels.
-    let total = (w * h * spp) as u64;
+    let total = (w * h * spp * sb) as u64;
     // Decompress every strip into one row-major sample buffer.
     let mut data: Vec<u8> = Vec::with_capacity(w * h * spp);
     for (so, &off) in strip_offsets.iter().enumerate() {
@@ -890,22 +895,37 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
             }
         }
     }
+    // For 16-bit samples, take the high byte (most-significant) per the byte order
+    // to scale down to 8-bit.
+    let sample = |idx: usize| -> u8 {
+        let o = idx * sb;
+        if sb == 2 {
+            if le {
+                data[o + 1]
+            } else {
+                data[o]
+            }
+        } else {
+            data[o]
+        }
+    };
     let mut rgba = vec![0u8; w * h * 4];
     for px in 0..w * h {
-        let p = px * spp;
-        if p + spp > data.len() {
+        let first = px * spp;
+        if (first + spp) * sb > data.len() {
             break;
         }
         let d = px * 4;
         if spp >= 3 {
-            rgba[d] = data[p];
-            rgba[d + 1] = data[p + 1];
-            rgba[d + 2] = data[p + 2];
+            rgba[d] = sample(first);
+            rgba[d + 1] = sample(first + 1);
+            rgba[d + 2] = sample(first + 2);
             // A 4th sample is the associated alpha channel (photometric RGB).
-            rgba[d + 3] = if spp == 4 { data[p + 3] } else { 0xFF };
+            rgba[d + 3] = if spp == 4 { sample(first + 3) } else { 0xFF };
             continue;
         }
-        let g = if white_is_zero { 255 - data[p] } else { data[p] };
+        let v = sample(first);
+        let g = if white_is_zero { 255 - v } else { v };
         rgba[d] = g;
         rgba[d + 1] = g;
         rgba[d + 2] = g;
@@ -1312,6 +1332,38 @@ mod tests {
         assert_eq!(&img.rgba[4..8], &[255, 255, 255, 255], "(1,0) white");
         assert_eq!(&img.rgba[8..12], &[255, 0, 0, 255], "(0,1) red");
         assert_eq!(&img.rgba[12..16], &[0, 255, 0, 255], "(1,1) green");
+    }
+
+    #[test]
+    fn decodes_16bit_grayscale_tiff() {
+        // 2x1 little-endian 16-bit grayscale TIFF; the decoder takes the high byte.
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(b"II");
+        b.extend_from_slice(&42u16.to_le_bytes());
+        b.extend_from_slice(&12u32.to_le_bytes()); // IFD offset
+        // Two 16-bit LE samples: 0x8000 (hi=128) and 0xFF00 (hi=255), 4 bytes at 8.
+        b.extend_from_slice(&[0x00, 0x80, 0x00, 0xFF]);
+        let entry = |b: &mut Vec<u8>, tag: u16, ty: u16, val: u32| {
+            b.extend_from_slice(&tag.to_le_bytes());
+            b.extend_from_slice(&ty.to_le_bytes());
+            b.extend_from_slice(&1u32.to_le_bytes());
+            b.extend_from_slice(&val.to_le_bytes());
+        };
+        b.extend_from_slice(&9u16.to_le_bytes());
+        entry(&mut b, 256, 3, 2); // width
+        entry(&mut b, 257, 3, 1); // height
+        entry(&mut b, 258, 3, 16); // bits = 16
+        entry(&mut b, 259, 3, 1); // none
+        entry(&mut b, 262, 3, 1); // BlackIsZero gray
+        entry(&mut b, 273, 4, 8); // strip offset
+        entry(&mut b, 277, 3, 1); // samples
+        entry(&mut b, 278, 3, 1); // rows/strip
+        entry(&mut b, 279, 4, 4); // strip byte count
+        b.extend_from_slice(&0u32.to_le_bytes());
+        let img = decode(&b).expect("decode 16-bit tiff");
+        assert_eq!((img.width, img.height), (2, 1));
+        assert_eq!(img.rgba[0], 128, "px0 high byte");
+        assert_eq!(img.rgba[4], 255, "px1 high byte");
     }
 
     #[test]
