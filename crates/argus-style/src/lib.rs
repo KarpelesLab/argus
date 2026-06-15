@@ -218,6 +218,9 @@ pub struct ComputedStyle {
     pub accent_color: Option<Color>,
     /// `text-shadow` as `(offset-x, offset-y, color)` in px (blur ignored); inherited.
     pub text_shadow: Option<(f32, f32, Color)>,
+    /// `box-shadow` as `(offset-x, offset-y, spread, color)` in px (outer only,
+    /// blur ignored); not inherited.
+    pub box_shadow: Option<(f32, f32, f32, Color)>,
     /// Column count for a grid container (from `grid-template-columns`).
     pub grid_columns: u32,
     /// Per-column track sizes (parallel to `grid_columns`, capped at
@@ -338,6 +341,7 @@ impl ComputedStyle {
             decoration_color: None,
             accent_color: None,
             text_shadow: None,
+            box_shadow: None,
             grid_columns: 1,
             grid_tracks: [GridTrack::Auto; GRID_MAX_TRACKS],
             grid_column_span: 1,
@@ -776,6 +780,9 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         } else {
             parse_text_shadow(v, cs.color, cs.font_size)
         };
+    }
+    if let Some(v) = map.get("box-shadow") {
+        cs.box_shadow = parse_box_shadow(v, cs.font_size);
     }
     if let Some(v) = map
         .get("list-style-type")
@@ -1305,6 +1312,31 @@ fn parse_text_shadow(v: &str, text_color: Color, fs: f32) -> Option<(f32, f32, C
     }
     if lengths.len() >= 2 {
         Some((lengths[0], lengths[1], color))
+    } else {
+        None
+    }
+}
+
+/// Parse a (single, outer) `box-shadow` into `(offset-x, offset-y, spread, color)`
+/// in px. The lengths are offset-x, offset-y, blur (ignored), spread (in order); a
+/// color token sets the color (default black). `inset` shadows are skipped.
+fn parse_box_shadow(v: &str, fs: f32) -> Option<(f32, f32, f32, Color)> {
+    let layer = v.split(',').next()?.trim();
+    if layer == "none" || layer.split_whitespace().any(|t| t == "inset") {
+        return None;
+    }
+    let mut lengths: Vec<f32> = Vec::new();
+    let mut color = Color::rgb(0, 0, 0);
+    for tok in layer.split_whitespace() {
+        if let Some(l) = parse_length(tok) {
+            lengths.push(l.to_px(fs, 0.0));
+        } else if let Some(c) = parse_color(tok) {
+            color = c;
+        }
+    }
+    if lengths.len() >= 2 {
+        let spread = lengths.get(3).copied().unwrap_or(0.0);
+        Some((lengths[0], lengths[1], spread, color))
     } else {
         None
     }

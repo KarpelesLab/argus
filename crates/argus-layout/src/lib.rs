@@ -415,6 +415,12 @@ impl Ctx<'_> {
             });
         }
 
+        // Reserve a box-shadow slot first (painted behind the background), filled in
+        // once the box height is known.
+        let shadow_idx = (style.box_shadow.is_some() && !style.hidden).then(|| {
+            self.rects.push(RectFill::default());
+            self.rects.len() - 1
+        });
         // Reserve background + border rect slots up front so ancestors paint first.
         // `visibility: hidden` keeps the box's geometry but paints no ink.
         let bg_idx = (style.background_color.a > 0 && !style.hidden).then(|| {
@@ -775,6 +781,16 @@ impl Ctx<'_> {
         self.cursor_y += style.padding.bottom + style.border.bottom;
         let border_box_h = self.cursor_y - border_box_top;
 
+        if let (Some(i), Some((dx, dy, spread, sc))) = (shadow_idx, style.box_shadow) {
+            self.rects[i] = RectFill {
+                x: border_box_left + dx - spread,
+                y: border_box_top + dy - spread,
+                w: (border_box_w + 2.0 * spread).max(0.0),
+                h: (border_box_h + 2.0 * spread).max(0.0),
+                color: style.fade(sc),
+                radius: style.border_radius,
+            };
+        }
         if let Some(i) = bg_idx {
             self.rects[i].h = border_box_h;
         }
@@ -2971,6 +2987,27 @@ mod tests {
         assert!(l.runs.iter().find(|r| r.text == "slanted").unwrap().italic, "<em> is italic");
         assert!(l.runs.iter().find(|r| r.text == "x").unwrap().italic, "font-style:italic");
         assert!(!l.runs.iter().find(|r| r.text == "plain").unwrap().italic, "plain not italic");
+    }
+
+    #[test]
+    fn box_shadow_paints_an_offset_rect_behind_the_box() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A 50x30 box with a red box-shadow offset (4,4): a red rect should appear
+        // before (behind) the background, offset down-right.
+        let html = "<div style=\"width:50px; height:30px; background:#fff; box-shadow: 4px 4px 0 #ff0000\">x</div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let shadow = l
+            .rects
+            .iter()
+            .find(|r| r.color.r > 200 && r.color.g < 60 && r.color.b < 60)
+            .expect("red shadow rect");
+        // Offset from the page margin (~8) by +4.
+        assert!((shadow.x - 12.0).abs() < 2.0, "shadow offset x, got {}", shadow.x);
+        assert!((shadow.w - 50.0).abs() < 2.0 && (shadow.h - 30.0).abs() < 2.0, "shadow box size");
     }
 
     #[test]
