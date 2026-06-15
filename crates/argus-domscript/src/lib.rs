@@ -31,7 +31,8 @@
 //! `contains`, tree traversal (`parentNode`/`parentElement`, `children`, `childElementCount`,
 //! `first`/`lastElementChild`, `next`/`previousElementSibling`), `tagName`/
 //! `nodeName`, and `appendChild`/`append`/`prepend`/`insertBefore`/
-//! `insertAdjacentHTML`/`before`/`after`/`replaceWith`/`replaceChildren`/`remove`.
+//! `insertAdjacentHTML`/`insertAdjacentElement`/`before`/`after`/`replaceWith`/
+//! `replaceChildren`/`remove`.
 
 use argus_dom::{Attribute, Document, NodeData, NodeId, QualName};
 
@@ -349,6 +350,47 @@ function __argus_el(tgt) {
             var n = arguments[a];
             if (n && n.__tgt) __argus_ops.push({op: "append", tgt: tgt, child: n.__tgt});
           }
+        };
+      }
+      // el.insertAdjacentElement(position, node): insert `node` relative to this
+      // element at beforebegin/afterbegin/beforeend/afterend.
+      if (k === "insertAdjacentElement") {
+        return function(pos, node) {
+          if (!node || !node.__tgt) return node;
+          pos = ("" + pos).toLowerCase();
+          var meIx = __idxOf(tgt);
+          var me = __byIdx[meIx];
+          if (pos === "beforeend") {
+            __argus_ops.push({op: "append", tgt: tgt, child: node.__tgt});
+            return node;
+          }
+          if (pos === "afterbegin") {
+            var firstTgt = null;
+            for (var fi = 0; fi < __tree.length; fi++) {
+              if (__tree[fi].p === meIx) { firstTgt = {kind: "idx", val: __tree[fi].i}; break; }
+            }
+            __argus_ops.push({op: "insertBefore", tgt: tgt, child: node.__tgt, ref: firstTgt});
+            return node;
+          }
+          if (!me || me.p < 0) return node; // beforebegin/afterend need a parent
+          var parentTgt = {kind: "idx", val: me.p};
+          if (pos === "beforebegin") {
+            __argus_ops.push({op: "insertBefore", tgt: parentTgt, child: node.__tgt, ref: tgt});
+          } else if (pos === "afterend") {
+            var refTgt = null, sibs = [];
+            for (var si = 0; si < __tree.length; si++) {
+              if (__tree[si].p === me.p) sibs.push(__tree[si]);
+            }
+            for (var sj = 0; sj < sibs.length; sj++) {
+              if (sibs[sj].i === meIx) {
+                var nb = sibs[sj + 1];
+                if (nb) refTgt = {kind: "idx", val: nb.i};
+                break;
+              }
+            }
+            __argus_ops.push({op: "insertBefore", tgt: parentTgt, child: node.__tgt, ref: refTgt});
+          }
+          return node;
         };
       }
       if (k === "remove") {
@@ -2387,6 +2429,35 @@ mod tests {
         let apos = text.find('A');
         assert!(bpos.is_some() && rpos.is_some() && apos.is_some(), "got {text:?}");
         assert!(bpos < rpos && rpos < apos, "order B<ref<A, got {text:?}");
+    }
+
+    #[test]
+    fn insert_adjacent_element_positions() {
+        // beforebegin/afterend place siblings around the reference; afterbegin/
+        // beforeend place children inside it. Verify final order in the container.
+        let mut doc = argus_html::parse(
+            "<div id=\"box\"><span id=\"ref\">ref</span></div>\
+             <script>\
+               var r = document.getElementById('ref');\
+               var bb = document.createElement('span'); bb.textContent='BB';\
+               var ae = document.createElement('span'); ae.textContent='AE';\
+               var ab = document.createElement('span'); ab.textContent='AB';\
+               var be = document.createElement('span'); be.textContent='BE';\
+               r.insertAdjacentElement('beforebegin', bb);\
+               r.insertAdjacentElement('afterend', ae);\
+               r.insertAdjacentElement('afterbegin', ab);\
+               r.insertAdjacentElement('beforeend', be);\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        // box order: BB, ref, AE ; ref contains AB ... BE.
+        let box_text = text_of(&doc, "box");
+        let p = |s: &str| box_text.find(s);
+        assert!(p("BB") < p("ref"), "BB before ref: {box_text:?}");
+        assert!(p("ref") < p("AE"), "AE after ref: {box_text:?}");
+        let ref_text = text_of(&doc, "ref");
+        assert!(ref_text.find("AB") < ref_text.find("BE"), "AB before BE inside ref: {ref_text:?}");
+        assert!(ref_text.contains("AB") && ref_text.contains("BE"), "children inserted: {ref_text:?}");
     }
 
     #[test]
