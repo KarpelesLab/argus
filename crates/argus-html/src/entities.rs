@@ -1,11 +1,12 @@
 //! Character-reference decoding.
 //!
 //! Phase 1 handles numeric references (`&#123;` / `&#x1F;`), the common
-//! punctuation/symbol names, and the **full Latin-1 supplement** named set
-//! (`&eacute;`, `&uuml;`, `&ntilde;`, `&szlig;`, …). The remainder of the
-//! ~2200-entry table and the without-semicolon legacy matching rules are
-//! deferred — noted in `docs/subsystems/dom.md` — but the entry point is shaped
-//! to grow into them.
+//! punctuation/symbol names, the **full Latin-1 supplement** named set
+//! (`&eacute;`, `&uuml;`, `&ntilde;`, `&szlig;`, …), and the **Greek letters**
+//! plus common **arrow/math** symbols (`&alpha;`, `&Omega;`, `&rarr;`, `&sum;`,
+//! `&radic;`, …). The remainder of the ~2200-entry table and the
+//! without-semicolon legacy matching rules are deferred — noted in
+//! `docs/subsystems/dom.md` — but the entry point is shaped to grow into them.
 
 /// Consume a character reference beginning at `input[*pos] == '&'`, advancing
 /// `*pos` past it and returning the decoded text. If the `&` does not begin a
@@ -251,6 +252,103 @@ fn named(name: &str) -> Option<&'static str> {
         "yacute" => "\u{00FD}",
         "thorn" => "\u{00FE}",
         "yuml" => "\u{00FF}",
+        // Greek letters (common on math/science/Wikipedia pages).
+        "Alpha" => "\u{0391}",
+        "Beta" => "\u{0392}",
+        "Gamma" => "\u{0393}",
+        "Delta" => "\u{0394}",
+        "Epsilon" => "\u{0395}",
+        "Zeta" => "\u{0396}",
+        "Eta" => "\u{0397}",
+        "Theta" => "\u{0398}",
+        "Iota" => "\u{0399}",
+        "Kappa" => "\u{039A}",
+        "Lambda" => "\u{039B}",
+        "Mu" => "\u{039C}",
+        "Nu" => "\u{039D}",
+        "Xi" => "\u{039E}",
+        "Omicron" => "\u{039F}",
+        "Pi" => "\u{03A0}",
+        "Rho" => "\u{03A1}",
+        "Sigma" => "\u{03A3}",
+        "Tau" => "\u{03A4}",
+        "Upsilon" => "\u{03A5}",
+        "Phi" => "\u{03A6}",
+        "Chi" => "\u{03A7}",
+        "Psi" => "\u{03A8}",
+        "Omega" => "\u{03A9}",
+        "alpha" => "\u{03B1}",
+        "beta" => "\u{03B2}",
+        "gamma" => "\u{03B3}",
+        "delta" => "\u{03B4}",
+        "epsilon" => "\u{03B5}",
+        "zeta" => "\u{03B6}",
+        "eta" => "\u{03B7}",
+        "theta" => "\u{03B8}",
+        "iota" => "\u{03B9}",
+        "kappa" => "\u{03BA}",
+        "lambda" => "\u{03BB}",
+        "mu" => "\u{03BC}",
+        "nu" => "\u{03BD}",
+        "xi" => "\u{03BE}",
+        "omicron" => "\u{03BF}",
+        "pi" => "\u{03C0}",
+        "rho" => "\u{03C1}",
+        "sigmaf" => "\u{03C2}",
+        "sigma" => "\u{03C3}",
+        "tau" => "\u{03C4}",
+        "upsilon" => "\u{03C5}",
+        "phi" => "\u{03C6}",
+        "chi" => "\u{03C7}",
+        "psi" => "\u{03C8}",
+        "omega" => "\u{03C9}",
+        // Arrows and common math operators.
+        "larr" => "\u{2190}",
+        "uarr" => "\u{2191}",
+        "rarr" => "\u{2192}",
+        "darr" => "\u{2193}",
+        "harr" => "\u{2194}",
+        "lArr" => "\u{21D0}",
+        "rArr" => "\u{21D2}",
+        "hArr" => "\u{21D4}",
+        "forall" => "\u{2200}",
+        "part" => "\u{2202}",
+        "exist" => "\u{2203}",
+        "empty" => "\u{2205}",
+        "nabla" => "\u{2207}",
+        "isin" => "\u{2208}",
+        "notin" => "\u{2209}",
+        "ni" => "\u{220B}",
+        "prod" => "\u{220F}",
+        "sum" => "\u{2211}",
+        "minus" => "\u{2212}",
+        "lowast" => "\u{2217}",
+        "radic" => "\u{221A}",
+        "prop" => "\u{221D}",
+        "ang" => "\u{2220}",
+        "and" => "\u{2227}",
+        "or" => "\u{2228}",
+        "cap" => "\u{2229}",
+        "cup" => "\u{222A}",
+        "int" => "\u{222B}",
+        "there4" => "\u{2234}",
+        "sim" => "\u{223C}",
+        "cong" => "\u{2245}",
+        "asymp" => "\u{2248}",
+        "equiv" => "\u{2261}",
+        "sub" => "\u{2282}",
+        "sup" => "\u{2283}",
+        "sube" => "\u{2286}",
+        "supe" => "\u{2287}",
+        "oplus" => "\u{2295}",
+        "otimes" => "\u{2297}",
+        "perp" => "\u{22A5}",
+        "sdot" => "\u{22C5}",
+        "loz" => "\u{25CA}",
+        "spades" => "\u{2660}",
+        "clubs" => "\u{2663}",
+        "hearts" => "\u{2665}",
+        "diams" => "\u{2666}",
         _ => return None,
     })
 }
@@ -287,6 +385,20 @@ mod tests {
         assert_eq!(decode("&AElig;"), "Æ");
         // Case-sensitive: the accented-letter names differ by case.
         assert_ne!(decode("&Eacute;"), decode("&eacute;"));
+    }
+
+    #[test]
+    fn greek_arrow_and_math_entities() {
+        assert_eq!(decode("&alpha;"), "α");
+        assert_eq!(decode("&Omega;"), "Ω");
+        assert_eq!(decode("&pi;"), "π");
+        assert_eq!(decode("&rarr;"), "→");
+        assert_eq!(decode("&hArr;"), "⇔");
+        assert_eq!(decode("&sum;"), "∑");
+        assert_eq!(decode("&radic;"), "√");
+        assert_eq!(decode("&ne;"), "≠");
+        // Case-sensitive Greek (Pi ≠ pi).
+        assert_ne!(decode("&Pi;"), decode("&pi;"));
     }
 
     #[test]
