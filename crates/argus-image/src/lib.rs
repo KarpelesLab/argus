@@ -1,9 +1,11 @@
 //! Image decoding (Layer 1).
 //!
-//! Decodes image bytes into RGBA8 for the renderer. PNG (via `oxideav-png`), GIF
-//! (`oxideav-gif`), uncompressed 24/32-bit BMP (built in), and `data:` URLs are
-//! supported; JPEG/WebP/AVIF plug into [`decode`] once those oxideav codecs ship
-//! working decoders. See `docs/subsystems/media.md`.
+//! Decodes image bytes into RGBA8 for the renderer, using the first-party oxideav
+//! codecs: PNG (`oxideav-png`), GIF (`oxideav-gif`), **JPEG** (`oxideav-mjpeg` via
+//! the `oxideav-core` registry, YUV→RGBA through `oxideav-pixfmt`), **WebP**
+//! (`oxideav-webp`, lossless), uncompressed 24/32-bit BMP (built in), and `data:`
+//! URLs. AVIF and lossy-WebP (VP8) decode here once those codecs land. See
+//! `docs/subsystems/media.md`.
 
 /// A decoded image: `width * height * 4` straight-alpha RGBA bytes.
 #[derive(Clone, Debug)]
@@ -39,8 +41,90 @@ pub fn decode(bytes: &[u8]) -> Option<DecodedImage> {
     if bytes.starts_with(b"BM") {
         return decode_bmp(bytes);
     }
-    // JPEG (FF D8) and WebP (RIFF…WEBP) decode here as those codecs are wired in.
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return decode_jpeg(bytes);
+    }
+    if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return decode_webp(bytes);
+    }
     None
+}
+
+/// Decode a WebP (lossless; lossy VP8 is reported unsupported by the codec).
+fn decode_webp(bytes: &[u8]) -> Option<DecodedImage> {
+    let img = oxideav_webp::decode_webp(bytes).ok()?;
+    let frame = img.frames.into_iter().next()?;
+    Some(DecodedImage {
+        width: frame.width,
+        height: frame.height,
+        rgba: frame.rgba,
+    })
+}
+
+/// Decode a baseline/progressive JPEG via the oxideav codec registry (the still
+/// JPEG decoder lives in `oxideav-mjpeg`), converting the decoded frame to RGBA.
+fn decode_jpeg(bytes: &[u8]) -> Option<DecodedImage> {
+    use oxideav_core::{CodecId, CodecParameters, Packet, RuntimeContext, TimeBase};
+
+    let mut ctx = RuntimeContext::new();
+    oxideav_mjpeg::register(&mut ctx);
+    let params = CodecParameters::video(CodecId::new("mjpeg"));
+    let mut dec = ctx.codecs.first_decoder(&params).ok()?;
+    dec.send_packet(&Packet::new(0, TimeBase::SECONDS, bytes.to_vec()))
+        .ok()?;
+    let frame = dec.receive_arena_frame().ok()?;
+    frame_to_rgba(&frame)
+}
+
+/// Convert a decoded video frame (the common still-image pixel formats) to RGBA8.
+fn frame_to_rgba(frame: &oxideav_core::arena::sync::Frame) -> Option<DecodedImage> {
+    use oxideav_core::format::PixelFormat;
+    use oxideav_pixfmt::yuv::{yuv420_to_rgb24, yuv422_to_rgb24, yuv444_to_rgb24, YuvMatrix};
+
+    let hdr = frame.header();
+    let (w, h) = (hdr.width as usize, hdr.height as usize);
+    if w == 0 || h == 0 || w * h > 64_000_000 {
+        return None;
+    }
+    let plane = |i: usize| frame.plane(i);
+    // JPEG YCbCr is full-range BT.601.
+    let mat = YuvMatrix::BT601.with_range(false);
+
+    let rgba = match hdr.pixel_format {
+        PixelFormat::Rgba => plane(0)?.to_vec(),
+        PixelFormat::Rgb24 => rgb24_to_rgba(plane(0)?, w, h),
+        PixelFormat::Gray8 => {
+            let g = plane(0)?;
+            let mut out = vec![0u8; w * h * 4];
+            oxideav_pixfmt::gray::gray8_to_rgba(g, &mut out, w * h);
+            out
+        }
+        fmt @ (PixelFormat::Yuv420P | PixelFormat::Yuv422P | PixelFormat::Yuv444P) => {
+            let (y, u, v) = (plane(0)?, plane(1)?, plane(2)?);
+            let mut rgb = vec![0u8; w * h * 3];
+            match fmt {
+                PixelFormat::Yuv420P => yuv420_to_rgb24(y, u, v, &mut rgb, w, h, mat),
+                PixelFormat::Yuv422P => yuv422_to_rgb24(y, u, v, &mut rgb, w, h, mat),
+                _ => yuv444_to_rgb24(y, u, v, &mut rgb, w, h, mat),
+            }
+            rgb24_to_rgba(&rgb, w, h)
+        }
+        _ => return None, // uncommon formats (Cmyk, 10/12-bit, …) not handled yet
+    };
+    Some(DecodedImage {
+        width: w as u32,
+        height: h as u32,
+        rgba,
+    })
+}
+
+/// Expand packed RGB24 to opaque RGBA8.
+fn rgb24_to_rgba(rgb: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(w * h * 4);
+    for px in rgb.chunks_exact(3).take(w * h) {
+        out.extend_from_slice(&[px[0], px[1], px[2], 255]);
+    }
+    out
 }
 
 /// Decode an uncompressed 24- or 32-bit Windows BMP (BITMAPINFOHEADER) to RGBA.
@@ -200,6 +284,73 @@ mod tests {
     #[test]
     fn rejects_non_png() {
         assert!(decode(b"not an image").is_none());
+    }
+
+    #[test]
+    fn decodes_a_lossless_webp_roundtrip() {
+        // Encode a 2x2 RGBA image losslessly, then decode it back exactly.
+        let (w, h) = (2u32, 2u32);
+        let src: Vec<u8> = vec![
+            255, 0, 0, 255, // red
+            0, 255, 0, 255, // green
+            0, 0, 255, 255, // blue
+            255, 255, 255, 255, // white
+        ];
+        let Ok(encoded) = oxideav_webp::encode_webp_lossless(&src, w, h) else {
+            eprintln!("no webp lossless encoder; skipping");
+            return;
+        };
+        let img = decode(&encoded).expect("decode webp");
+        assert_eq!((img.width, img.height), (2, 2));
+        // Lossless → exact pixels.
+        assert_eq!(img.rgba, src);
+    }
+
+    #[test]
+    fn decodes_a_jpeg_roundtrip() {
+        // Encode a solid 16x16 mid-gray YUV420P frame to JPEG via the oxideav
+        // registry, then decode it back through our sniff+convert path.
+        use oxideav_core::format::PixelFormat;
+        use oxideav_core::{
+            CodecId, CodecParameters, Frame, RuntimeContext, VideoFrame, VideoPlane,
+        };
+        let (w, h) = (16usize, 16usize);
+        let frame = VideoFrame {
+            pts: Some(0),
+            planes: vec![
+                VideoPlane {
+                    stride: w,
+                    data: vec![128u8; w * h],
+                },
+                VideoPlane {
+                    stride: w / 2,
+                    data: vec![128u8; (w / 2) * (h / 2)],
+                },
+                VideoPlane {
+                    stride: w / 2,
+                    data: vec![128u8; (w / 2) * (h / 2)],
+                },
+            ],
+        };
+        let mut ctx = RuntimeContext::new();
+        oxideav_mjpeg::register(&mut ctx);
+        let mut params = CodecParameters::video(CodecId::new("mjpeg"));
+        params.width = Some(w as u32);
+        params.height = Some(h as u32);
+        params.pixel_format = Some(PixelFormat::Yuv420P);
+        let Ok(mut enc) = ctx.codecs.first_encoder(&params) else {
+            eprintln!("no mjpeg encoder available; skipping");
+            return;
+        };
+        enc.send_frame(&Frame::Video(frame)).expect("send_frame");
+        let pkt = enc.receive_packet().expect("receive_packet");
+
+        let img = decode(&pkt.data).expect("decode jpeg");
+        assert_eq!((img.width, img.height), (16, 16));
+        assert_eq!(img.rgba.len(), 16 * 16 * 4);
+        // A solid gray survives JPEG nearly exactly; alpha is opaque.
+        assert!((img.rgba[0] as i32 - 128).abs() < 16, "r={}", img.rgba[0]);
+        assert_eq!(img.rgba[3], 255);
     }
 
     #[test]

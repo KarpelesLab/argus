@@ -107,8 +107,12 @@ dependencies = [
 name = "argus-image"
 version = "0.0.0"
 dependencies = [
+ "oxideav-core",
  "oxideav-gif",
+ "oxideav-mjpeg",
+ "oxideav-pixfmt",
  "oxideav-png",
+ "oxideav-webp",
 ]
 
 [[package]]
@@ -580,6 +584,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxideav-mjpeg"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52af3762738a9512f85e555447522aaacff4b339f1696a7e9bb890c405593f48"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
 name = "oxideav-otf"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -636,6 +649,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92f066c65141a3ef78e04227b4a0f5d9637303f1c411f5fa534727f66e12a001"
 dependencies = [
  "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-vp8"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7b865e8b2e1235d596774797b704c02d956835b1f7f24069c89b65faf4bb90a"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-webp"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee92e26d49712cc579b79ef5fb3c59d51621867ebe9c1c574189207daaa9ca31"
+dependencies = [
+ "oxideav-core",
+ "oxideav-vp8",
 ]
 
 [[package]]
