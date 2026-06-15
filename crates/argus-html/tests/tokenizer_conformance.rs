@@ -60,6 +60,15 @@ fn numeric_character_references() {
 }
 
 #[test]
+fn numeric_reference_edge_cases() {
+    // A null reference becomes U+FFFD; the C1 range is windows-1252-remapped
+    // (`&#128;` → €); consecutive references each decode.
+    check("&#0;", vec![chars("\u{FFFD}")]);
+    check("&#128;", vec![chars("\u{20AC}")]);
+    check("&lt;&amp;&gt;", vec![chars("<&>")]);
+}
+
+#[test]
 fn ampersand_that_is_not_a_reference_is_literal() {
     // A bare ampersand (no valid name) is passed through as a literal character.
     check("a & b", vec![chars("a & b")]);
