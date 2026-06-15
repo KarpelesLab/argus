@@ -414,6 +414,56 @@ pub fn dump_text(url: Option<&str>) -> io::Result<String> {
     Ok(render_text(&doc))
 }
 
+/// Headless automation: fetch a page and return its **hyperlinks**, one per line as
+/// `link-text<TAB>resolved-href` in document order. Relative hrefs are resolved
+/// against the page URL. Used by `--dump-links` (link extraction / crawling).
+pub fn dump_links(url: Option<&str>) -> io::Result<String> {
+    log::set_role(Role::Browser);
+    let mut net = spawn_child(Role::NetService)?;
+    proto::parent_handshake(net.channel(), Size::new(800, 600))?;
+    let html = resolve_html(&net, url);
+    proto::send(net.channel(), Msg::Shutdown, &[])?;
+    net.wait()?;
+    let mut doc = argus_html::parse(&html);
+    argus_domscript::apply_scripts(&mut doc);
+    Ok(extract_links(&doc, url))
+}
+
+/// Collect `<a href>` links as `text<TAB>resolved-href` lines, in document order.
+/// Pure (no I/O) so it's unit-testable; `base` resolves relative hrefs.
+fn extract_links(doc: &argus_dom::Document, base: Option<&str>) -> String {
+    use argus_dom::{NodeData, NodeId};
+
+    fn text_of(doc: &argus_dom::Document, id: NodeId, out: &mut String) {
+        match &doc.node(id).data {
+            NodeData::Text(t) => out.push_str(t),
+            _ => {
+                for c in doc.children(id) {
+                    text_of(doc, c, out);
+                }
+            }
+        }
+    }
+    fn walk(doc: &argus_dom::Document, id: NodeId, base: Option<&str>, out: &mut String) {
+        if let NodeData::Element(e) = &doc.node(id).data {
+            if e.name.is_html("a") {
+                if let Some(href) = e.attr("href") {
+                    let mut t = String::new();
+                    text_of(doc, id, &mut t);
+                    let text = t.split_whitespace().collect::<Vec<_>>().join(" ");
+                    out.push_str(&format!("{text}\t{}\n", resolve_url(base, href)));
+                }
+            }
+        }
+        for c in doc.children(id) {
+            walk(doc, c, base, out);
+        }
+    }
+    let mut out = String::new();
+    walk(doc, doc.root(), base, &mut out);
+    out
+}
+
 /// Project a parsed document to `innerText`-style rendered text: drop
 /// non-rendered elements, collapse inline whitespace, and break lines at block
 /// boundaries and `<br>`. Table cells are tab-separated. Lines are trimmed.
@@ -868,7 +918,25 @@ fn verify_uniform(fb: &Framebuffer) -> io::Result<Color> {
 
 #[cfg(test)]
 mod tests {
-    use super::{page_title, render_text, resolve_url, History};
+    use super::{extract_links, page_title, render_text, resolve_url, History};
+
+    #[test]
+    fn extract_links_resolves_relative_hrefs() {
+        let doc = argus_html::parse(
+            "<a href=\"/about\">About</a>\
+             <a href=\"contact.html\">Contact us</a>\
+             <a href=\"https://other.example/x\">External</a>\
+             <span>not a link</span>\
+             <a href=\"//cdn.example/lib.js\">proto-relative</a>",
+        );
+        let out = extract_links(&doc, Some("https://site.example/dir/page.html"));
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "About\thttps://site.example/about");
+        assert_eq!(lines[1], "Contact us\thttps://site.example/dir/contact.html");
+        assert_eq!(lines[2], "External\thttps://other.example/x");
+        assert_eq!(lines[3], "proto-relative\thttps://cdn.example/lib.js");
+        assert_eq!(lines.len(), 4, "only <a href> elements are listed");
+    }
 
     #[test]
     fn extracts_page_title() {

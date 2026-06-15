@@ -73,6 +73,17 @@ fn main() {
             }
             return;
         }
+        // `--dump-links`: print the page's hyperlinks (text + resolved href) and exit.
+        if has_flag("--dump-links") {
+            match argus_browser::dump_links(url.as_deref()) {
+                Ok(links) => print!("{links}"),
+                Err(err) => {
+                    eprintln!("[browser] dump-links failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
     }
 
     let result = match role {
