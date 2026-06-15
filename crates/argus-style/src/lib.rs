@@ -313,6 +313,10 @@ pub struct ComputedStyle {
     /// from it when `height` is auto (resolved during layout).
     pub aspect_ratio: Option<f32>,
     pub text_align: TextAlign,
+    /// `direction: rtl` (or `dir="rtl"`) — right-to-left base direction. Inherited.
+    /// Drives default (`start`) alignment to the right. (Character-level bidi
+    /// reordering is not done — the shaper has no RTL glyph support.)
+    pub rtl: bool,
     /// `text-decoration: underline`.
     pub underline: bool,
     /// `text-decoration: line-through`.
@@ -492,6 +496,7 @@ impl ComputedStyle {
             max_height: None,
             aspect_ratio: None,
             text_align: TextAlign::Left,
+            rtl: false,
             underline: false,
             strike: false,
             overline: false,
@@ -721,6 +726,15 @@ fn presentational_hints(doc: &Document, node: NodeId) -> Vec<(String, String)> {
     let tag: &str = &e.name.local;
     let mut out: Vec<(String, String)> = Vec::new();
 
+    // The `dir` attribute maps to the `direction` property (`rtl`/`ltr`).
+    if let Some(d) = e.attr("dir") {
+        match d.trim().to_ascii_lowercase().as_str() {
+            "rtl" => out.push(("direction".into(), "rtl".into())),
+            "ltr" => out.push(("direction".into(), "ltr".into())),
+            _ => {}
+        }
+    }
+
     // A legacy color value: accept CSS colors and bare 3/6-hex digits (`ff0000`).
     fn legacy_color(v: &str) -> Option<String> {
         let v = v.trim();
@@ -949,6 +963,7 @@ pub fn computed_style(
         font_key: parent.font_key, // font-family selection inherits
         color: parent.color,
         text_align: parent.text_align,           // text-align inherits
+        rtl: parent.rtl,                         // direction inherits
         white_space_pre: parent.white_space_pre, // white-space inherits
         nowrap: parent.nowrap,                   // white-space inherits
         pre_line: parent.pre_line,               // white-space inherits
@@ -1311,13 +1326,41 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             cs.background_gradient = parse_radial_gradient(v, cs.color);
         }
     }
+    // `direction: rtl` / `dir="rtl"` (mapped to `direction` by presentational hints)
+    // sets the right-to-left base direction.
+    if let Some(v) = map.get("direction") {
+        match v.trim() {
+            "rtl" => cs.rtl = true,
+            "ltr" => cs.rtl = false,
+            _ => {}
+        }
+    }
     if let Some(v) = map.get("text-align") {
         cs.text_align = match v.as_str() {
             "center" => TextAlign::Center,
-            "right" | "end" => TextAlign::Right,
+            "right" => TextAlign::Right,
             "justify" => TextAlign::Justify,
+            // `start`/`end` are direction-relative.
+            "end" => {
+                if cs.rtl {
+                    TextAlign::Left
+                } else {
+                    TextAlign::Right
+                }
+            }
+            "start" => {
+                if cs.rtl {
+                    TextAlign::Right
+                } else {
+                    TextAlign::Left
+                }
+            }
             _ => TextAlign::Left,
         };
+    } else if map.get("direction").is_some() {
+        // Establishing a direction without an explicit `text-align` makes the
+        // default (`start`) alignment follow it: rtl → right, ltr → left.
+        cs.text_align = if cs.rtl { TextAlign::Right } else { TextAlign::Left };
     }
     if let Some(v) = map
         .get("text-decoration")
@@ -3098,6 +3141,36 @@ mod tests {
         // padding-block-start → top; padding-inline-end → right.
         assert_eq!(cs.padding.top, 5.0);
         assert_eq!(cs.padding.right, 7.0);
+    }
+
+    #[test]
+    fn direction_rtl_right_aligns_by_default() {
+        let mut doc = Document::new();
+        // `dir="rtl"` attribute → right-aligned, rtl flag set.
+        let d = one(&mut doc, "div", vec![Attribute::new("dir", "rtl")]);
+        let cs = computed_style(&doc, d, &ComputedStyle::initial(), &parse_stylesheet(""));
+        assert!(cs.rtl, "dir=rtl sets rtl");
+        assert_eq!(cs.text_align, TextAlign::Right, "rtl defaults to right-align");
+        // `direction: rtl` with `text-align: start` → right; explicit left wins.
+        let p = one(&mut doc, "p", vec![]);
+        let start = computed_style(
+            &doc,
+            p,
+            &ComputedStyle::initial(),
+            &parse_stylesheet("p { direction: rtl; text-align: start }"),
+        );
+        assert_eq!(start.text_align, TextAlign::Right, "start = right in rtl");
+        let explicit = computed_style(
+            &doc,
+            p,
+            &ComputedStyle::initial(),
+            &parse_stylesheet("p { direction: rtl; text-align: left }"),
+        );
+        assert_eq!(explicit.text_align, TextAlign::Left, "explicit left overrides");
+        // A plain ltr element is unaffected.
+        let plain = computed_style(&doc, p, &ComputedStyle::initial(), &parse_stylesheet(""));
+        assert!(!plain.rtl);
+        assert_eq!(plain.text_align, TextAlign::Left);
     }
 
     #[test]
