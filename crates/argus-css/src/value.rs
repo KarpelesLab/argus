@@ -9,6 +9,10 @@ pub enum Length {
     Em(f32),
     Percent(f32),
     Zero,
+    /// A simplified `calc()`: the sum of a pixel, em, and percent term (each may be
+    /// zero or negative). Covers the common `calc(100% - 80px)` / `calc(50% + 2em)`
+    /// shapes; multiplication/division and nesting fall back to no-value.
+    Calc { px: f32, em: f32, pct: f32 },
 }
 
 impl Length {
@@ -20,6 +24,7 @@ impl Length {
             Length::Em(v) => v * font_size,
             Length::Percent(v) => v / 100.0 * percent_base,
             Length::Zero => 0.0,
+            Length::Calc { px, em, pct } => px + em * font_size + pct / 100.0 * percent_base,
         }
     }
 }
@@ -31,6 +36,12 @@ pub fn parse_length(s: &str) -> Option<Length> {
     let s = s.trim();
     if s == "0" {
         return Some(Length::Zero);
+    }
+    // `calc(...)` (case-insensitive keyword) → a summed px/em/% term. Compare the
+    // ASCII prefix on bytes so arbitrary UTF-8 input can't split a char boundary.
+    let b = s.as_bytes();
+    if b.len() > 5 && b[..5].eq_ignore_ascii_case(b"calc(") && s.ends_with(')') {
+        return parse_calc(s[5..s.len() - 1].trim());
     }
     if let Some(num) = s.strip_suffix('%') {
         return num.trim().parse().ok().map(Length::Percent);
@@ -60,6 +71,47 @@ pub fn parse_length(s: &str) -> Option<Length> {
     }
     // Bare number → treat as px (lenient).
     s.parse().ok().map(Length::Px)
+}
+
+/// Parse a `calc()` body as a sum of space-separated `± <length>` terms (the CSS
+/// grammar requires whitespace around binary `+`/`-`). Multiplication/division,
+/// nested `calc()`/`var()`, and malformed input return `None` (no value), so the
+/// property falls back to its initial value rather than mis-resolving.
+fn parse_calc(body: &str) -> Option<Length> {
+    if body.contains("calc(") || body.contains("var(") {
+        return None;
+    }
+    let (mut px, mut em, mut pct) = (0.0f32, 0.0f32, 0.0f32);
+    let mut sign = 1.0f32;
+    let mut expect_term = true;
+    for tok in body.split_whitespace() {
+        if expect_term {
+            // A term must be a plain length — reject `*`/`/` (unsupported here).
+            if tok.contains(['*', '/']) {
+                return None;
+            }
+            match parse_length(tok)? {
+                Length::Px(v) => px += sign * v,
+                Length::Em(v) => em += sign * v,
+                Length::Percent(v) => pct += sign * v,
+                Length::Zero => {}
+                Length::Calc { .. } => return None,
+            }
+        } else {
+            sign = match tok {
+                "+" => 1.0,
+                "-" => -1.0,
+                _ => return None,
+            };
+        }
+        expect_term = !expect_term;
+    }
+    // `expect_term` is true again only after an operator (or empty input) — i.e. a
+    // dangling `+`/`-` or nothing at all, both invalid.
+    if expect_term {
+        return None;
+    }
+    Some(Length::Calc { px, em, pct })
 }
 
 /// Parse a color: `#rgb`, `#rrggbb`, `#rgba`, `#rrggbbaa`, `rgb()`/`rgba()`,
@@ -440,5 +492,23 @@ mod tests {
         assert!((mm - 96.0).abs() < 0.01, "25.4mm ≈ 96px, got {mm}");
         let q = parse_length("40q").unwrap().to_px(16.0, 0.0);
         assert!((q - 37.795).abs() < 0.01, "40q = 1cm ≈ 37.8px, got {q}");
+    }
+
+    #[test]
+    fn calc_sums_terms() {
+        // `calc(100% - 80px)` against a 500px base → 420px.
+        let l = parse_length("calc(100% - 80px)").unwrap();
+        assert!((l.to_px(16.0, 500.0) - 420.0).abs() < 0.01, "got {}", l.to_px(16.0, 500.0));
+        // Mixed em + percent + px, case-insensitive keyword.
+        let l2 = parse_length("CALC(2em + 50% + 10px)").unwrap();
+        // 2*16 + 0.5*200 + 10 = 32 + 100 + 10 = 142.
+        assert!((l2.to_px(16.0, 200.0) - 142.0).abs() < 0.01, "got {}", l2.to_px(16.0, 200.0));
+        // A leading-percent-minus-em form can go negative.
+        let l3 = parse_length("calc(10px - 1em)").unwrap();
+        assert!((l3.to_px(16.0, 0.0) - (-6.0)).abs() < 0.01);
+        // Unsupported shapes (mul/div, nesting, dangling op) yield no value.
+        assert_eq!(parse_length("calc(100% / 3)"), None);
+        assert_eq!(parse_length("calc(100% -)"), None);
+        assert_eq!(parse_length("calc(calc(1px + 2px))"), None);
     }
 }
