@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 pub use argus_css::Length;
+pub use argus_css::PseudoElement;
 pub use argus_css::Stylesheet as AuthorStylesheet;
 
 /// The `display` value, reduced to what layout understands.
@@ -429,6 +430,63 @@ pub fn computed_style(
     cs
 }
 
+/// The generated `content` string for an element's `::before`/`::after`
+/// pseudo-element, if any author rule sets one (the highest-specificity winner).
+/// Returns `None` for `content: none`/`normal` or when there's no content.
+pub fn pseudo_content(
+    doc: &Document,
+    node: NodeId,
+    author: &Stylesheet,
+    which: argus_css::PseudoElement,
+) -> Option<String> {
+    let mut best: Option<(Specificity, usize, String)> = None;
+    let mut order = 0usize;
+    for rule in &author.rules {
+        let spec = rule
+            .selectors
+            .iter()
+            .filter(|s| s.pseudo_element() == Some(which) && matches(doc, node, s))
+            .map(|s| s.specificity())
+            .max();
+        if let Some(spec) = spec {
+            for d in &rule.declarations {
+                if d.name == "content" {
+                    let key = (spec, order);
+                    if best.as_ref().is_none_or(|(s, o, _)| (key.0, key.1) >= (*s, *o)) {
+                        best = Some((spec, order, d.value.clone()));
+                    }
+                }
+                order += 1;
+            }
+        }
+    }
+    let raw = best?.2;
+    let v = raw.trim();
+    if v.eq_ignore_ascii_case("none") || v.eq_ignore_ascii_case("normal") {
+        return None;
+    }
+    Some(unquote_content(v))
+}
+
+/// Normalize a `content` string value. The CSS value parser already strips quotes,
+/// so the common case is a bare string; we strip any residual surrounding quotes
+/// and decode `\A`. `content()` functions (`attr()`, `counter()`, …) we don't
+/// evaluate yield an empty string.
+fn unquote_content(v: &str) -> String {
+    let v = v.trim();
+    let bytes = v.as_bytes();
+    if bytes.len() >= 2
+        && (bytes[0] == b'"' || bytes[0] == b'\'')
+        && bytes[bytes.len() - 1] == bytes[0]
+    {
+        v[1..v.len() - 1].replace("\\A", "\n").replace("\\\"", "\"")
+    } else if v.contains('(') {
+        String::new() // an unsupported content function
+    } else {
+        v.replace("\\A", "\n")
+    }
+}
+
 fn collect(
     sheet: &Stylesheet,
     origin: Origin,
@@ -441,7 +499,8 @@ fn collect(
         let best = rule
             .selectors
             .iter()
-            .filter(|s| matches(doc, node, s))
+            // A `::before`/`::after` rule styles a generated box, not the element.
+            .filter(|s| s.pseudo_element().is_none() && matches(doc, node, s))
             .map(|s| s.specificity())
             .max();
         if let Some(spec) = best {

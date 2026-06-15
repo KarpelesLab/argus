@@ -21,7 +21,8 @@ use argus_dom::{Document, ElementData, NodeData, NodeId};
 use argus_gfx::{Font, RectFill, TextRun};
 use argus_style::{
     author_stylesheet, computed_style, AuthorStylesheet, BoxSizing, ComputedStyle, Display,
-    FlexDirection, Length, ListStyle, Position, TextAlign, TextTransform, VerticalAlign,
+    FlexDirection, Length, ListStyle, Position, PseudoElement, TextAlign, TextTransform,
+    VerticalAlign,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -457,6 +458,12 @@ impl Ctx<'_> {
             // style); block-level children flush the line box and lay out separately.
             let mut words: Vec<InlineWord> = Vec::new();
             let mut pending_space = false;
+            // `::before` generated content is the element's first inline content.
+            if let Some(text) =
+                argus_style::pseudo_content(self.doc, id, self.author, PseudoElement::Before)
+            {
+                self.gather_generated(&text, &style, &mut words, &mut pending_space);
+            }
             // Form controls render synthesized text: a text `<input>`'s value (or
             // grey placeholder) or a `<select>`'s selected option. Checkbox/radio
             // render no text (a checked mark is drawn after the box).
@@ -591,6 +598,12 @@ impl Ctx<'_> {
                     }
                     _ => {}
                 }
+            }
+            // `::after` generated content is the element's last inline content.
+            if let Some(text) =
+                argus_style::pseudo_content(self.doc, id, self.author, PseudoElement::After)
+            {
+                self.gather_generated(&text, &style, &mut words, &mut pending_space);
             }
             self.flush_words(&mut words, &style, content_left, content_w);
         } // end !white_space_pre
@@ -1108,6 +1121,45 @@ impl Ctx<'_> {
                     self.gather_raw_text(child, out);
                 }
             }
+        }
+    }
+
+    /// Gather a generated-content string (`::before`/`::after`) into inline words,
+    /// styled like the element itself.
+    fn gather_generated(
+        &self,
+        text: &str,
+        style: &ComputedStyle,
+        words: &mut Vec<InlineWord>,
+        pending_space: &mut bool,
+    ) {
+        let (color, background) = if style.hidden {
+            (
+                argus_geometry::Color::TRANSPARENT,
+                argus_geometry::Color::TRANSPARENT,
+            )
+        } else {
+            (style.fade(style.color), style.fade(style.background_color))
+        };
+        let mut first = true;
+        for word in text.split_whitespace() {
+            words.push(InlineWord {
+                text: transform_text(word, style.text_transform),
+                font_size: style.font_size,
+                color,
+                background,
+                space_before: *pending_space || !first,
+                underline: style.underline && !style.hidden,
+                strike: style.strike && !style.hidden,
+                href: None,
+                hard_break: false,
+                baseline_shift: 0.0,
+            });
+            *pending_space = false;
+            first = false;
+        }
+        if text.ends_with(char::is_whitespace) {
+            *pending_space = true;
         }
     }
 
@@ -2085,6 +2137,25 @@ mod tests {
             two.x > one.x + 100.0,
             "second item should be in the next column"
         );
+    }
+
+    #[test]
+    fn generated_content_before_and_after() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let html = "<style>.x::before{content:\"PRE\"} .x::after{content:\"POST\"}</style>\
+                    <p class=\"x\">mid</p>";
+        let doc = parse(html);
+        let lay = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let texts: Vec<&str> = lay.runs.iter().map(|r| r.text.as_str()).collect();
+        // PRE comes before "mid" which comes before POST, all on the line.
+        let pre = texts.iter().position(|t| *t == "PRE");
+        let mid = texts.iter().position(|t| *t == "mid");
+        let post = texts.iter().position(|t| *t == "POST");
+        assert!(pre.is_some() && mid.is_some() && post.is_some(), "runs: {texts:?}");
+        assert!(pre < mid && mid < post, "order PRE<mid<POST: {texts:?}");
     }
 
     #[test]

@@ -9,7 +9,7 @@ pub mod selector;
 pub mod tokenizer;
 pub mod value;
 
-pub use selector::{matches, Combinator, Compound, Selector, Specificity};
+pub use selector::{matches, Combinator, Compound, PseudoElement, Selector, Specificity};
 pub use value::{parse_color, parse_length, Length};
 
 use tokenizer::Token;

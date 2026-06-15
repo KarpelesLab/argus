@@ -85,6 +85,13 @@ pub enum PseudoClass {
     Empty,
 }
 
+/// `::before` / `::after` generated-content pseudo-element.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PseudoElement {
+    Before,
+    After,
+}
+
 /// A compound selector: an optional type plus id/classes/attrs/pseudo-classes.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct Compound {
@@ -94,6 +101,9 @@ pub struct Compound {
     pub classes: Vec<String>,
     pub attrs: Vec<AttrSel>,
     pub pseudos: Vec<PseudoClass>,
+    /// `::before` / `::after` — the rule targets a generated-content box, not the
+    /// element itself.
+    pub pseudo_element: Option<PseudoElement>,
     /// `:not(...)` arguments — the compound matches only if none of these do.
     pub negations: Vec<Compound>,
     /// `:is(...)` groups — each group is a list of alternatives; the group matches
@@ -116,6 +126,12 @@ pub struct Selector {
 pub struct Specificity(pub u32, pub u32, pub u32);
 
 impl Selector {
+    /// The `::before`/`::after` pseudo-element this selector targets, if any (it
+    /// lives on the rightmost compound).
+    pub fn pseudo_element(&self) -> Option<PseudoElement> {
+        self.compounds.last().and_then(|c| c.pseudo_element)
+    }
+
     pub fn specificity(&self) -> Specificity {
         let mut s = Specificity::default();
         for c in &self.compounds {
@@ -304,6 +320,15 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                                 "last-of-type" => c.pseudos.push(PseudoClass::LastOfType),
                                 "only-child" => c.pseudos.push(PseudoClass::OnlyChild),
                                 "only-of-type" => c.pseudos.push(PseudoClass::OnlyOfType),
+                                // `:before`/`:after` are also valid (legacy single-colon).
+                                "before" => c.pseudo_element = Some(PseudoElement::Before),
+                                "after" => c.pseudo_element = Some(PseudoElement::After),
+                                _ => {}
+                            }
+                        } else {
+                            match name.as_str() {
+                                "before" => c.pseudo_element = Some(PseudoElement::Before),
+                                "after" => c.pseudo_element = Some(PseudoElement::After),
                                 _ => {}
                             }
                         }
