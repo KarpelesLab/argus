@@ -53,6 +53,7 @@ pub enum ListStyle {
     LowerAlpha,
     UpperAlpha,
     LowerRoman,
+    UpperRoman,
     None,
 }
 
@@ -504,6 +505,7 @@ fn parse_list_style(token: &str) -> Option<ListStyle> {
         "lower-alpha" | "lower-latin" => ListStyle::LowerAlpha,
         "upper-alpha" | "upper-latin" => ListStyle::UpperAlpha,
         "lower-roman" => ListStyle::LowerRoman,
+        "upper-roman" => ListStyle::UpperRoman,
         "none" => ListStyle::None,
         _ => return None,
     })

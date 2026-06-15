@@ -49,7 +49,8 @@ fn list_marker(style: ListStyle, index: u32) -> Option<Marker> {
         ListStyle::Decimal => Marker::Text(format!("{index}.")),
         ListStyle::LowerAlpha => Marker::Text(format!("{}.", alpha_marker(index, false))),
         ListStyle::UpperAlpha => Marker::Text(format!("{}.", alpha_marker(index, true))),
-        ListStyle::LowerRoman => Marker::Text(format!("{}.", roman_marker(index))),
+        ListStyle::LowerRoman => Marker::Text(format!("{}.", roman_marker(index, false))),
+        ListStyle::UpperRoman => Marker::Text(format!("{}.", roman_marker(index, true))),
         ListStyle::None => return None,
     })
 }
@@ -67,8 +68,9 @@ fn alpha_marker(mut n: u32, upper: bool) -> String {
     String::from_utf8(out).unwrap_or_default()
 }
 
-/// Lowercase Roman numeral for `n` (falls back to decimal outside 1..=3999).
-fn roman_marker(n: u32) -> String {
+/// Roman numeral for `n` (falls back to decimal outside 1..=3999), lowercase
+/// unless `upper`.
+fn roman_marker(n: u32, upper: bool) -> String {
     if n == 0 || n > 3999 {
         return n.to_string();
     }
@@ -94,6 +96,9 @@ fn roman_marker(n: u32) -> String {
             out.push_str(s);
             n -= v;
         }
+    }
+    if upper {
+        out.make_ascii_uppercase();
     }
     out
 }
@@ -533,8 +538,9 @@ impl Ctx<'_> {
             }
         }
 
-        // List items get a marker from their own `list-style-type`, counted 1-based.
-        let mut item_index = 0u32;
+        // List items get a marker from their own `list-style-type`. The running
+        // counter honors `<ol start>`/`reversed` and per-item `<li value>`.
+        let (list_reversed, mut next_item) = self.list_counter_init(id);
 
         // Preformatted (`white-space: pre`): emit raw lines, preserving whitespace
         // and breaking only on newlines (no collapsing, no wrapping).
@@ -871,8 +877,9 @@ impl Ctx<'_> {
                                     }
                                 }
                                 let child_marker = if self.is_li(child) {
-                                    item_index += 1;
-                                    list_marker(cstyle.list_style, item_index)
+                                    let cur = self.li_value(child).unwrap_or(next_item);
+                                    next_item = if list_reversed { cur - 1 } else { cur + 1 };
+                                    list_marker(cstyle.list_style, cur.max(0) as u32)
                                 } else {
                                     None
                                 };
@@ -1546,6 +1553,37 @@ impl Ctx<'_> {
 
     fn is_li(&self, id: NodeId) -> bool {
         matches!(&self.doc.node(id).data, NodeData::Element(e) if e.name.is_html("li"))
+    }
+
+    /// A `<li value="N">` override of the running list counter, if present.
+    fn li_value(&self, id: NodeId) -> Option<i64> {
+        match &self.doc.node(id).data {
+            NodeData::Element(e) if e.name.is_html("li") => {
+                e.attr("value").and_then(|v| v.trim().parse::<i64>().ok())
+            }
+            _ => None,
+        }
+    }
+
+    /// Seed the list-item counter for the children of container `id`: `(reversed,
+    /// first_index)`. Honors `<ol start>` and `reversed` (whose default start is
+    /// the `<li>` child count); plain `<ul>`/`<ol>` start at 1 ascending.
+    fn list_counter_init(&self, id: NodeId) -> (bool, i64) {
+        let NodeData::Element(e) = &self.doc.node(id).data else {
+            return (false, 1);
+        };
+        let reversed = e.name.is_html("ol") && e.attr("reversed").is_some();
+        let start = e
+            .attr("start")
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .unwrap_or_else(|| {
+                if reversed {
+                    self.doc.children(id).filter(|&c| self.is_li(c)).count() as i64
+                } else {
+                    1
+                }
+            });
+        (reversed, start)
     }
 
     /// Greedily wrap a single line into sub-lines that fit `width`, collapsing runs
@@ -3961,6 +3999,39 @@ mod tests {
         let outside = marker_x("");
         let inside = marker_x("list-style-position: inside");
         assert!(inside > outside, "inside marker is further right: {outside} -> {inside}");
+    }
+
+    #[test]
+    fn ordered_list_numbering_honors_start_value_reversed_and_roman() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Collect the ordered-list marker texts (e.g. "3.") in document order.
+        let markers = |html: &str| -> Vec<String> {
+            let doc = parse(html);
+            let l = layout(&doc, &font, 300.0, &ImageSizes::new());
+            l.runs
+                .iter()
+                .filter(|r| r.text.ends_with('.') && r.text[..r.text.len() - 1].chars().all(|c| !c.is_whitespace()))
+                .map(|r| r.text.clone())
+                .collect()
+        };
+        // `start` seeds the counter; a mid-list `value` resets it.
+        assert_eq!(
+            markers("<ol start=\"3\"><li>a</li><li value=\"7\">b</li><li>c</li></ol>"),
+            vec!["3.", "7.", "8."]
+        );
+        // `reversed` counts down from the item count (3, 2, 1).
+        assert_eq!(
+            markers("<ol reversed><li>a</li><li>b</li><li>c</li></ol>"),
+            vec!["3.", "2.", "1."]
+        );
+        // upper-roman markers.
+        assert_eq!(
+            markers("<ol style=\"list-style-type: upper-roman\"><li>a</li><li>b</li><li>c</li><li>d</li></ol>"),
+            vec!["I.", "II.", "III.", "IV."]
+        );
     }
 
     #[test]
