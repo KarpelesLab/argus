@@ -545,6 +545,18 @@ mod tests {
     }
 
     #[test]
+    fn nested_brace_at_rules_are_skipped_cleanly() {
+        // `@font-face` (one block) and `@keyframes` (nested from/to blocks) must be
+        // skipped without swallowing the following real rule.
+        let css = "@font-face { font-family: X; src: url(x.woff2) } \
+                   @keyframes spin { from { opacity: 0 } to { opacity: 1 } } \
+                   p { color: green }";
+        let sheet = parse_stylesheet(css);
+        assert_eq!(sheet.rules.len(), 1, "only the p rule survives");
+        assert_eq!(sheet.rules[0].declarations[0].value, "green");
+    }
+
+    #[test]
     fn supports_rule_is_gated_on_the_condition() {
         // Supported feature (display is applied) → the block's rule is kept.
         let s1 = parse_stylesheet("@supports (display: grid) { .x { color: red } }");
