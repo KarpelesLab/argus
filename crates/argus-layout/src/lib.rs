@@ -906,12 +906,41 @@ impl Ctx<'_> {
         if style.flex_direction == FlexDirection::Column {
             // Column: stack items vertically, each at full content width, with `gap`
             // between them. The container height is the sum of item heights + gaps.
+            // `align-items` controls cross-axis (horizontal) placement; an item with
+            // an explicit width can be flush-left (default/stretch), centered, or
+            // flush-right within the content box via a post-layout shift.
             for (i, &item) in items.iter().enumerate() {
                 if i > 0 {
                     self.cursor_y += style.gap;
                 }
                 let istyle = computed_style(self.doc, item, &style, self.author);
+                let ds = (
+                    self.rects.len(),
+                    self.runs.len(),
+                    self.images.len(),
+                    self.links.len(),
+                    self.bounds.len(),
+                );
                 self.layout_block(item, istyle, content_left, content_w, None);
+                // Cross-axis offset only applies to fixed-width items (a stretched
+                // item already fills the content box, leaving nothing to distribute).
+                if let Some(len) = istyle.width {
+                    let outer = border_box_to_content(&istyle, len.to_px(istyle.font_size, content_w))
+                        + istyle.padding.left
+                        + istyle.padding.right
+                        + istyle.border.left
+                        + istyle.border.right
+                        + istyle.margin.left
+                        + istyle.margin.right;
+                    let dx = match style.align_items {
+                        AlignItems::FlexStart | AlignItems::Stretch => 0.0,
+                        AlignItems::Center => ((content_w - outer) / 2.0).max(0.0),
+                        AlignItems::FlexEnd => (content_w - outer).max(0.0),
+                    };
+                    if dx != 0.0 {
+                        self.shift_display_list(ds, dx, 0.0);
+                    }
+                }
             }
             self.cursor_y += style.padding.bottom + style.border.bottom;
         } else {
@@ -2293,6 +2322,31 @@ mod tests {
         let end = baseline("flex-end");
         assert!(center > start + 20.0, "center lower than start: {start} -> {center}");
         assert!(end > center + 20.0, "end lower than center: {center} -> {end}");
+    }
+
+    #[test]
+    fn column_align_items_center_centers_horizontally() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A fixed-width item in a column. Default (stretch/flex-start) keeps it at the
+        // left; `center` and `flex-end` push it rightward within the content box.
+        let item_x = |ai: &str| -> f32 {
+            let html = format!(
+                "<div style=\"display:flex; flex-direction:column; width:400px; align-items:{ai}\">\
+                   <div style=\"width:40px\">it</div>\
+                 </div>"
+            );
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 800.0, &ImageSizes::new());
+            l.runs.iter().find(|r| r.text == "it").unwrap().x
+        };
+        let start = item_x("flex-start");
+        let center = item_x("center");
+        let end = item_x("flex-end");
+        assert!(center > start + 100.0, "center shifts right: {start} -> {center}");
+        assert!(end > center + 100.0, "flex-end further right: {center} -> {end}");
     }
 
     #[test]
