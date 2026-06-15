@@ -253,6 +253,10 @@ pub struct ComputedStyle {
     /// Per-column track sizes (parallel to `grid_columns`, capped at
     /// [`GRID_MAX_TRACKS`]). Unspecified tracks are [`GridTrack::Auto`].
     pub grid_tracks: [GridTrack; GRID_MAX_TRACKS],
+    /// Explicit row count from `grid-template-rows` (0 = rows sized by content).
+    pub grid_rows: u32,
+    /// Per-row track sizes from `grid-template-rows` (parallel to `grid_rows`).
+    pub grid_row_tracks: [GridTrack; GRID_MAX_TRACKS],
     /// Number of columns a grid *item* spans (`grid-column: span N`); 1 by default.
     pub grid_column_span: u32,
     /// Explicit 1-based starting column line for a grid item (`grid-column: 2 / 4`
@@ -394,6 +398,8 @@ impl ComputedStyle {
             background_gradient: None,
             grid_columns: 1,
             grid_tracks: [GridTrack::Auto; GRID_MAX_TRACKS],
+            grid_rows: 0,
+            grid_row_tracks: [GridTrack::Auto; GRID_MAX_TRACKS],
             grid_column_span: 1,
             grid_column_start: None,
             grid_row_span: 1,
@@ -1495,6 +1501,11 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         let (cols, tracks) = parse_grid_tracks(v);
         cs.grid_columns = cols;
         cs.grid_tracks = tracks;
+    }
+    if let Some(v) = map.get("grid-template-rows") {
+        let (rows, tracks) = parse_grid_tracks(v);
+        cs.grid_rows = rows;
+        cs.grid_row_tracks = tracks;
     }
     // `grid-column` / `grid-column-end` span for a grid item: `span N`, or an
     // `a / b` line range whose width is `b - a`. The explicit start line (when

@@ -2682,6 +2682,17 @@ impl Ctx<'_> {
                 }
             }
         }
+        // `grid-template-rows`: a fixed-length track sets that row's height
+        // explicitly (overriding the content measure); `auto`/`fr` keep content.
+        for (rh, track) in row_h
+            .iter_mut()
+            .zip(style.grid_row_tracks.iter())
+            .take(style.grid_rows as usize)
+        {
+            if let argus_style::GridTrack::Len(len) = track {
+                *rh = len.to_px(style.font_size, 0.0).max(0.0);
+            }
+        }
         // Cumulative y for each row top (grid content origin + heights + row gaps).
         let mut row_y = vec![grid_top; nrows];
         for r in 1..nrows {
@@ -6033,6 +6044,25 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         assert!((bx - 208.0).abs() < 6.0, "b in the third column, got {bx}");
         // "c" wraps to the next row, back under "a".
         assert!(cy > ay + 10.0 && (cx - ax).abs() < 2.0, "c under a on row 2");
+    }
+
+    #[test]
+    fn grid_template_rows_sets_explicit_heights() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Two single-column rows: the first is fixed at 100px, so the second row's
+        // content sits ~100px down regardless of the first cell's content height.
+        let html = "<div style=\"display:grid; width:200px; grid-template-columns: 1fr; grid-template-rows: 100px auto\">\
+                      <div>a</div>\
+                      <div>b</div>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let ay = l.runs.iter().find(|r| r.text == "a").unwrap().baseline;
+        let by = l.runs.iter().find(|r| r.text == "b").unwrap().baseline;
+        assert!((by - ay - 100.0).abs() < 6.0, "row 2 starts ~100px below row 1: {ay} -> {by}");
     }
 
     #[test]
