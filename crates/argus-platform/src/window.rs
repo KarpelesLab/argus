@@ -104,6 +104,12 @@ impl Window {
     }
 
     /// Present `pixels` (RGBA8, `size.area() * 4` bytes) into the window.
+    /// Set the window's title bar text (the current page's `<title>`).
+    pub fn set_title(&self, title: &str) {
+        self.window
+            .setTitle(&objc2_foundation::NSString::from_str(title));
+    }
+
     pub fn present(&self, pixels: &[u8], size: Size) {
         let expected = size.area() * 4;
         assert_eq!(pixels.len(), expected, "framebuffer byte length mismatch");

@@ -674,6 +674,26 @@ fn request_frame(
     Ok((Framebuffer::from_fd(fd, size)?, content_height))
 }
 
+/// The text of a document's `<title>` element, trimmed and whitespace-collapsed
+/// (empty if absent). A lightweight scan — no full parse needed.
+fn page_title(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let Some(open) = lower.find("<title") else {
+        return String::new();
+    };
+    let Some(gt) = lower[open..].find('>').map(|i| open + i + 1) else {
+        return String::new();
+    };
+    let end = lower[gt..]
+        .find("</title>")
+        .map(|i| gt + i)
+        .unwrap_or(html.len());
+    html[gt..end]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Load `target` (the sample when `None`/empty), provide it to content, reset its
 /// scroll, render a frame, and present it. Returns the page's content height.
 #[cfg(target_os = "macos")]
@@ -687,6 +707,8 @@ fn load_and_present(
         Some(u) => fetch_html(net, u).unwrap_or_else(|e| error_page(u, &e.to_string())),
         None => sample_html(),
     };
+    let title = page_title(&page);
+    window.set_title(if title.is_empty() { "Argus" } else { &title });
     provide_page(content, &page)?;
     proto::send(content.channel(), Msg::SetScroll { y: 0 }, &[])?;
     let (frame, h) = request_frame(content, net, target)?;
@@ -736,7 +758,8 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
 
     // Present the first frame.
     let (frame, mut content_height) = request_frame(&content, &net, current_url.as_deref())?;
-    let window = Window::open("Argus", viewport);
+    let title = page_title(&html);
+    let window = Window::open(if title.is_empty() { "Argus" } else { &title }, viewport);
     window.present(frame.pixels(), frame.size());
     log!("window open — click links to navigate, scroll the wheel, close to quit");
 
@@ -844,7 +867,18 @@ fn verify_uniform(fb: &Framebuffer) -> io::Result<Color> {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_text, resolve_url, History};
+    use super::{page_title, render_text, resolve_url, History};
+
+    #[test]
+    fn extracts_page_title() {
+        assert_eq!(
+            page_title("<html><head><title>Hello  World</title></head></html>"),
+            "Hello World"
+        );
+        // Attributes on <title> and mixed case are handled; missing title → empty.
+        assert_eq!(page_title("<TITLE lang=en>Mixed</TITLE>"), "Mixed");
+        assert_eq!(page_title("<html><body>no title</body></html>"), "");
+    }
 
     #[test]
     fn history_back_forward_and_truncation() {
