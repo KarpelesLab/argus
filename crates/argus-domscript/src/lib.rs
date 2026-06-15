@@ -407,6 +407,19 @@ var window = document.window = document;
 var location = window.location = __LOCATION__;
 document.location = location;
 document.URL = location.href;
+document.title = __TITLE__;
+
+// A minimal `navigator` so feature-detecting scripts don't trip over `undefined`.
+var navigator = window.navigator = {
+  userAgent: "Mozilla/5.0 (compatible; Argus/0.1; +https://example.invalid/argus)",
+  appName: "Netscape",
+  platform: "",
+  language: "en-US",
+  languages: ["en-US", "en"],
+  onLine: true,
+  cookieEnabled: true,
+  doNotTrack: null
+};
 
 // Timers: there is no wall clock in the synchronous reconciliation model, so
 // scheduled callbacks are queued and drained (earliest delay first) after the
@@ -558,10 +571,12 @@ fn run_scripts(
     let tree = tree_json(doc);
     let storage_seed = storage_json(storage);
     let location = location_json(url);
+    let title = json_string(&document_title(doc));
     let mut src = PRELUDE
         .replace("__SEED__", &seed)
         .replace("__TREE__", &tree)
         .replace("__LOCATION__", &location)
+        .replace("__TITLE__", &title)
         .replace("__STORAGE__", &storage_seed);
     for s in &scripts {
         src.push('\n');
@@ -614,6 +629,30 @@ fn run_sync_fallback(src: &str) -> Option<(String, String)> {
         }
     }
     Some((console, ops))
+}
+
+/// The document's `<title>` text (collapsed whitespace), for `document.title`.
+fn document_title(doc: &Document) -> String {
+    fn walk(doc: &Document, id: NodeId) -> Option<String> {
+        if let NodeData::Element(e) = &doc.node(id).data {
+            if e.name.is_html("title") {
+                let mut t = String::new();
+                for c in doc.children(id) {
+                    if let NodeData::Text(s) = &doc.node(c).data {
+                        t.push_str(s);
+                    }
+                }
+                return Some(t.split_whitespace().collect::<Vec<_>>().join(" "));
+            }
+        }
+        for c in doc.children(id) {
+            if let Some(t) = walk(doc, c) {
+                return Some(t);
+            }
+        }
+        None
+    }
+    walk(doc, doc.root()).unwrap_or_default()
 }
 
 /// Serialize the storage map to a JSON object for the prelude seed.
@@ -2050,6 +2089,19 @@ mod tests {
             .collect();
         assert_eq!(kids, vec!["ab", "be"], "afterbegin first, beforeend last");
         assert_eq!(text_of(&doc, "t"), "ABmidBE");
+    }
+
+    #[test]
+    fn navigator_and_document_title_are_available() {
+        let mut doc = argus_html::parse(
+            "<head><title>  My  Page  </title></head><div id=\"o\"></div>\
+             <script>\
+               document.getElementById('o').textContent =\
+                 document.title + '|' + (navigator.userAgent.indexOf('Argus') >= 0) + '|' + navigator.language;\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        assert_eq!(text_of(&doc, "o"), "My Page|true|en-US");
     }
 
     #[test]
