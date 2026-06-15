@@ -76,11 +76,14 @@ pub enum VerticalAlign {
     Super,
 }
 
-/// `position` (the subset layout honors: static flow vs. a relative offset).
+/// `position` (the subset layout honors: static flow, a relative offset, or
+/// out-of-flow absolute/fixed positioning).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Position {
     Static,
     Relative,
+    Absolute,
+    Fixed,
 }
 
 /// `flex-direction` for a flex container (the subset layout honors: main axis
@@ -544,11 +547,12 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         cs.hidden = matches!(v.as_str(), "hidden" | "collapse");
     }
     if let Some(v) = map.get("position") {
-        // Only `relative` is honored; absolute/fixed/sticky fall back to static.
-        cs.position = if v == "relative" {
-            Position::Relative
-        } else {
-            Position::Static
+        // `sticky` falls back to static (it needs scroll tracking).
+        cs.position = match v.as_str() {
+            "relative" => Position::Relative,
+            "absolute" => Position::Absolute,
+            "fixed" => Position::Fixed,
+            _ => Position::Static,
         };
     }
     // `inset` shorthand: 1–4 values → top/right/bottom/left (CSS edge order); each

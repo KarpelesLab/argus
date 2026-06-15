@@ -704,13 +704,26 @@ impl Ctx<'_> {
             });
         }
 
-        // `position: relative` paints the box (and its subtree) shifted by its
-        // inset, without affecting the normal flow of following siblings.
-        if style.position == Position::Relative {
-            let (dx, dy) = relative_offset(&style, avail);
-            if dx != 0.0 || dy != 0.0 {
-                self.shift_display_list(ds_start, dx, dy);
+        // Positioning. `relative` paints the box (and subtree) shifted by its inset
+        // without affecting following siblings. `absolute`/`fixed` additionally take
+        // the box out of normal flow (the parent's cursor is reset), positioning it
+        // by its insets relative to where it would have started.
+        match style.position {
+            Position::Relative => {
+                let (dx, dy) = relative_offset(&style, avail);
+                if dx != 0.0 || dy != 0.0 {
+                    self.shift_display_list(ds_start, dx, dy);
+                }
             }
+            Position::Absolute | Position::Fixed => {
+                let (dx, dy) = relative_offset(&style, avail);
+                if dx != 0.0 || dy != 0.0 {
+                    self.shift_display_list(ds_start, dx, dy);
+                }
+                // Out of flow: following siblings ignore this box's height.
+                self.cursor_y = border_box_top;
+            }
+            Position::Static => {}
         }
     }
 
@@ -2071,6 +2084,30 @@ mod tests {
         assert!(
             two.x > one.x + 100.0,
             "second item should be in the next column"
+        );
+    }
+
+    #[test]
+    fn absolute_positioning_removes_from_flow_and_offsets() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // The absolute box is out of flow (so "B" starts near the top, not below it)
+        // and shifted down by top:100.
+        let html = "<div style=\"position:absolute; top:100px\">A</div><div>B</div>";
+        let doc = parse(html);
+        let lay = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let a = lay.runs.iter().find(|r| r.text == "A").unwrap();
+        let b = lay.runs.iter().find(|r| r.text == "B").unwrap();
+        // B is not pushed down by A (A is out of flow): B sits near the top.
+        assert!(b.baseline < 40.0, "B should ignore the absolute box, got {}", b.baseline);
+        // A is shifted down by ~100px from its static position.
+        assert!(
+            a.baseline > b.baseline + 90.0,
+            "A should be offset ~100px below B, got A={} B={}",
+            a.baseline,
+            b.baseline
         );
     }
 
