@@ -173,6 +173,60 @@ fn list_marker(style: ListStyle, index: u32) -> Option<Marker> {
     })
 }
 
+/// Paint an outline frame: the outer rectangle is `(ol, ot, w, h)` with edge
+/// thickness `t`, drawn per `text`-style `style`:
+/// - `Solid`/`Wavy`: four solid edge rects.
+/// - `Double`: two concentric thin frames (outer + inner third of `t`).
+/// - `Dotted`/`Dashed`: each edge broken into square/short segments.
+#[allow(clippy::too_many_arguments)]
+fn push_outline(
+    rects: &mut Vec<RectFill>,
+    ol: f32,
+    ot: f32,
+    w: f32,
+    h: f32,
+    t: f32,
+    color: argus_geometry::Color,
+    style: argus_style::DecorationStyle,
+) {
+    use argus_style::DecorationStyle::*;
+    // Draw the four solid edges of a frame whose outer rect is (x, y, fw, fh).
+    let solid_frame = |rects: &mut Vec<RectFill>, x: f32, y: f32, fw: f32, fh: f32, et: f32| {
+        rects.push(rect(x, y, fw, et, color)); // top
+        rects.push(rect(x, y + fh - et, fw, et, color)); // bottom
+        rects.push(rect(x, y, et, fh, color)); // left
+        rects.push(rect(x + fw - et, y, et, fh, color)); // right
+    };
+    match style {
+        Solid | Wavy => solid_frame(rects, ol, ot, w, h, t),
+        Double => {
+            let th = (t / 3.0).max(1.0);
+            solid_frame(rects, ol, ot, w, h, th); // outer line
+            let inset = t - th;
+            solid_frame(rects, ol + inset, ot + inset, w - 2.0 * inset, h - 2.0 * inset, th);
+        }
+        Dotted | Dashed => {
+            let seg = if matches!(style, Dotted) { t } else { t * 3.0 };
+            let step = seg * 2.0;
+            // Horizontal edges (top, bottom) segment along x; verticals along y.
+            let mut x = ol;
+            while x < ol + w {
+                let sw = seg.min(ol + w - x);
+                rects.push(rect(x, ot, sw, t, color));
+                rects.push(rect(x, ot + h - t, sw, t, color));
+                x += step;
+            }
+            let mut y = ot;
+            while y < ot + h {
+                let sh = seg.min(ot + h - y);
+                rects.push(rect(ol, y, t, sh, color));
+                rects.push(rect(ol + w - t, y, t, sh, color));
+                y += step;
+            }
+        }
+    }
+}
+
 /// Push a text-decoration line at `(x, y)` of width `w` and thickness `h`,
 /// rendered per the word's `text-decoration-style`:
 /// - `Solid`/`Wavy`: one continuous rect (no curve primitive for wavy).
@@ -1283,13 +1337,7 @@ impl Ctx<'_> {
             let ow_full = border_box_w + 2.0 * (g + ow);
             let oh_full = border_box_h + 2.0 * (g + ow);
             let oc = style.outline_color;
-            self.rects.push(rect(ol, ot, ow_full, ow, oc)); // top
-            self.rects
-                .push(rect(ol, border_box_top + border_box_h + g, ow_full, ow, oc)); // bottom
-            self.rects.push(rect(ol, ot, ow, oh_full, oc)); // left
-            self.rects
-                .push(rect(border_box_left + border_box_w + g, ot, ow, oh_full, oc));
-            // right
+            push_outline(&mut self.rects, ol, ot, ow_full, oh_full, ow, oc, style.outline_style);
         }
 
         // Record this element's border-box for click hit-testing, if it has an id.
@@ -4674,6 +4722,27 @@ mod tests {
             red.iter().any(|r| r.x < PAGE_MARGIN),
             "outline extends left of border box"
         );
+    }
+
+    #[test]
+    fn outline_style_double_and_dotted_emit_more_rects() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let reds = |css: &str| -> usize {
+            let doc = parse(&format!(
+                "<div style=\"width:50px; outline: 6px #ff0000; {css}\">x</div>"
+            ));
+            layout(&doc, &font, 200.0, &ImageSizes::new())
+                .rects
+                .iter()
+                .filter(|r| r.color.r == 255 && r.color.g == 0 && r.color.b == 0)
+                .count()
+        };
+        // double → two concentric frames (8 edges); dotted → many segments.
+        assert_eq!(reds("outline-style: double"), 8, "double = two 4-edge frames");
+        assert!(reds("outline-style: dotted") > 8, "dotted breaks into segments");
     }
 
     #[test]

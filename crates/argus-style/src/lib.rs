@@ -428,6 +428,8 @@ pub struct ComputedStyle {
     pub outline_color: Color,
     /// `outline-offset` — gap between the border box and the outline (px).
     pub outline_offset: f32,
+    /// `outline-style` — solid/double/dotted/dashed (shares the decoration painter).
+    pub outline_style: DecorationStyle,
     /// `position` and its inset offsets (resolved during layout; not inherited).
     pub position: Position,
     pub inset_top: Option<Length>,
@@ -522,6 +524,7 @@ impl ComputedStyle {
             outline_width: 0.0,
             outline_offset: 0.0,
             outline_color: Color::TRANSPARENT,
+            outline_style: DecorationStyle::Solid,
             position: Position::Static,
             inset_top: None,
             inset_right: None,
@@ -1622,6 +1625,14 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         } else if mentions_current_color(v) {
             cs.outline_color = cs.color;
         }
+        for tok in v.split_whitespace() {
+            if let Some(s) = decoration_style_of(tok) {
+                cs.outline_style = s;
+            }
+        }
+    }
+    if let Some(s) = map.get("outline-style").and_then(|v| decoration_style_of(v.trim())) {
+        cs.outline_style = s;
     }
     if let Some(v) = map.get("outline-width").and_then(|v| len_px(v, fs)) {
         cs.outline_width = v;
