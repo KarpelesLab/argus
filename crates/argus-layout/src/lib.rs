@@ -22,7 +22,7 @@ use argus_gfx::{Font, RectFill, TextRun};
 use argus_style::{
     author_stylesheet, computed_style, AlignItems, AuthorStylesheet, BoxSizing, Clear,
     ComputedStyle, Display, FlexDirection, Float, GridTrack, JustifyContent, Length, ListStyle,
-    Position, PseudoElement, TextAlign, TextTransform, VerticalAlign,
+    Position, PseudoElement, TextAlign, TextTransform, VerticalAlign, GRID_MAX_TRACKS,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -1607,33 +1607,117 @@ impl Ctx<'_> {
             col_x.push(acc);
             acc += w + style.gap;
         }
-        let mut idx = 0;
-        let mut first_row = true;
-        while idx < items.len() {
-            if !first_row {
-                self.cursor_y += style.row_gap; // grid row gap
-            }
-            first_row = false;
-            let row_top = self.cursor_y;
-            let mut max_h = 0.0f32;
-            let mut c = 0usize;
-            while c < cols && idx < items.len() {
-                let item = items[idx];
-                let istyle = computed_style(self.doc, item, &style, self.author);
-                // An item may span multiple columns; clamp the span to what's left in
-                // the row (no wrapping mid-item). Its width covers those columns plus
-                // the gaps between them.
-                let span = (istyle.grid_column_span.max(1) as usize).min(cols - c);
-                let item_w =
-                    col_w[c..c + span].iter().sum::<f32>() + style.gap * (span - 1) as f32;
-                idx += 1;
-                self.cursor_y = row_top;
-                self.layout_block(item, istyle, col_x[c], item_w, None);
-                max_h = max_h.max(self.cursor_y - row_top);
-                c += span;
-            }
-            self.cursor_y = row_top + max_h;
+        let grid_top = self.cursor_y;
+        // Placement: scan the occupancy grid row-major, putting each item in the next
+        // free cell where its column-span fits, marking the cells its col×row span
+        // covers. Items may span columns and rows; spans are clamped to the grid.
+        struct Placed {
+            item: NodeId,
+            style: ComputedStyle,
+            row: usize,
+            col: usize,
+            rspan: usize,
+            width: f32,
         }
+        let mut occ: Vec<[bool; GRID_MAX_TRACKS]> = Vec::new();
+        let free_at = |occ: &Vec<[bool; GRID_MAX_TRACKS]>, r: usize, c: usize, cs: usize| {
+            (0..cs).all(|k| c + k < cols && (r >= occ.len() || !occ[r][c + k]))
+        };
+        let mut placed: Vec<Placed> = Vec::new();
+        let mut cursor = (0usize, 0usize); // (row, col) search start
+        for &item in &items {
+            let istyle = computed_style(self.doc, item, &style, self.author);
+            let cspan = (istyle.grid_column_span.max(1) as usize).min(cols);
+            let rspan = istyle.grid_row_span.max(1) as usize;
+            // Find the next free slot at or after the cursor.
+            let (mut r, mut c) = cursor;
+            loop {
+                if c + cspan > cols {
+                    r += 1;
+                    c = 0;
+                    continue;
+                }
+                if free_at(&occ, r, c, cspan) {
+                    break;
+                }
+                c += 1;
+            }
+            // Mark the span's cells occupied (growing the occupancy grid as needed).
+            while occ.len() < r + rspan {
+                occ.push([false; GRID_MAX_TRACKS]);
+            }
+            for dr in 0..rspan {
+                for dc in 0..cspan {
+                    occ[r + dr][c + dc] = true;
+                }
+            }
+            let width = col_w[c..c + cspan].iter().sum::<f32>() + style.gap * (cspan - 1) as f32;
+            placed.push(Placed {
+                item,
+                style: istyle,
+                row: r,
+                col: c,
+                rspan,
+                width,
+            });
+            cursor = (r, c + cspan);
+        }
+        let nrows = occ.len();
+
+        // Measure each item's natural height by laying it out at a throwaway origin,
+        // then truncating the display list (it's re-laid for real once row heights
+        // are known).
+        let mut heights = vec![0.0f32; placed.len()];
+        for (i, p) in placed.iter().enumerate() {
+            let mark = (
+                self.rects.len(),
+                self.runs.len(),
+                self.images.len(),
+                self.links.len(),
+                self.bounds.len(),
+            );
+            self.cursor_y = 0.0;
+            self.layout_block(p.item, p.style, col_x[p.col], p.width, None);
+            heights[i] = self.cursor_y;
+            self.rects.truncate(mark.0);
+            self.runs.truncate(mark.1);
+            self.images.truncate(mark.2);
+            self.links.truncate(mark.3);
+            self.bounds.truncate(mark.4);
+        }
+
+        // Row heights: single-row items set their row's height directly; multi-row
+        // items push any height deficit onto their last spanned row.
+        let mut row_h = vec![0.0f32; nrows];
+        for (i, p) in placed.iter().enumerate() {
+            if p.rspan == 1 {
+                row_h[p.row] = row_h[p.row].max(heights[i]);
+            }
+        }
+        for (i, p) in placed.iter().enumerate() {
+            if p.rspan > 1 {
+                let last = (p.row + p.rspan - 1).min(nrows - 1);
+                let spanned: f32 = row_h[p.row..=last].iter().sum::<f32>()
+                    + style.row_gap * (last - p.row) as f32;
+                if heights[i] > spanned {
+                    row_h[last] += heights[i] - spanned;
+                }
+            }
+        }
+        // Cumulative y for each row top (grid content origin + heights + row gaps).
+        let mut row_y = vec![grid_top; nrows];
+        for r in 1..nrows {
+            row_y[r] = row_y[r - 1] + row_h[r - 1] + style.row_gap;
+        }
+
+        // Real layout: place each item at its cell's (x, y).
+        for p in &placed {
+            self.cursor_y = row_y[p.row];
+            self.layout_block(p.item, p.style, col_x[p.col], p.width, None);
+        }
+        self.cursor_y = grid_top
+            + row_h.iter().sum::<f32>()
+            + style.row_gap * (nrows.saturating_sub(1)) as f32;
         self.cursor_y += style.padding.bottom + style.border.bottom;
         if let Some(idx) = bg_idx {
             self.rects[idx].h = self.cursor_y - border_box_top;
@@ -3417,6 +3501,38 @@ borderdisplay0123floatleftrightclearbothfrgrowshrinkwrapspanabsolutefixedrelativ
         assert!((bx - 208.0).abs() < 6.0, "b in the third column, got {bx}");
         // "c" wraps to the next row, back under "a".
         assert!(cy > ay + 10.0 && (cx - ax).abs() < 2.0, "c under a on row 2");
+    }
+
+    #[test]
+    fn grid_row_span_reserves_cells_below() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Two columns. The first item spans 2 rows in column 0; the next items flow
+        // into column 1 (row 0), then column 1 (row 1) — column 0 stays reserved by
+        // the spanning item. So: a@(r0,c0 spanning), b@(r0,c1), c@(r1,c1).
+        let html = "<div style=\"display:grid; width:200px; grid-template-columns: repeat(2,1fr)\">\
+                      <div style=\"grid-row: span 2; height:80px\">a</div>\
+                      <div style=\"height:30px\">b</div>\
+                      <div style=\"height:30px\">c</div>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let at = |t: &str| {
+            let r = l.runs.iter().find(|r| r.text == t).unwrap();
+            (r.x, r.baseline)
+        };
+        let (ax, ay) = at("a");
+        let (bx, by) = at("b");
+        let (cx, cy) = at("c");
+        // a in column 0; b and c in column 1 (to the right of a).
+        assert!(bx > ax + 50.0 && cx > ax + 50.0, "b,c in second column");
+        // a and b share the top row; c is on the row below (reserved cell under b).
+        assert!((ay - by).abs() < 2.0, "a and b on the first row");
+        assert!(cy > by + 10.0, "c on the second row below b, got b={by} c={cy}");
+        // c stays under b in column 1 (the spanning a keeps column 0 occupied).
+        assert!((cx - bx).abs() < 2.0, "c aligns under b in column 1");
     }
 
     #[test]

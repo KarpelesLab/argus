@@ -206,6 +206,8 @@ pub struct ComputedStyle {
     pub grid_tracks: [GridTrack; GRID_MAX_TRACKS],
     /// Number of columns a grid *item* spans (`grid-column: span N`); 1 by default.
     pub grid_column_span: u32,
+    /// Number of rows a grid *item* spans (`grid-row: span N`); 1 by default.
+    pub grid_row_span: u32,
     /// `float` (not inherited) — out-of-flow left/right with content flowing past.
     pub float: Float,
     /// `clear` (not inherited) — push below preceding floats on the given side(s).
@@ -291,6 +293,7 @@ impl ComputedStyle {
             grid_columns: 1,
             grid_tracks: [GridTrack::Auto; GRID_MAX_TRACKS],
             grid_column_span: 1,
+            grid_row_span: 1,
             float: Float::None,
             clear: Clear::None,
             flex_direction: FlexDirection::Row,
@@ -945,6 +948,9 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     // count only: `span N`, or an `a / b` line range whose width is `b - a`.
     if let Some(v) = map.get("grid-column").or_else(|| map.get("grid-column-end")) {
         cs.grid_column_span = parse_grid_span(v);
+    }
+    if let Some(v) = map.get("grid-row").or_else(|| map.get("grid-row-end")) {
+        cs.grid_row_span = parse_grid_span(v);
     }
     if let Some(v) = map.get("float") {
         cs.float = match v.trim() {
