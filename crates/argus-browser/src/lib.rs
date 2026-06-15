@@ -992,6 +992,63 @@ pub fn dump_meta(url: Option<&str>) -> io::Result<String> {
     Ok(extract_meta(&doc, base.as_deref()))
 }
 
+/// Headless automation: fetch a page and return its JSON-LD structured data —
+/// the verbatim bodies of every `<script type="application/ld+json">` block,
+/// wrapped into a single JSON array (`[block, block, …]`) for scraping/SEO
+/// pipelines. Used by `--dump-jsonld`.
+pub fn dump_jsonld(url: Option<&str>) -> io::Result<String> {
+    log::set_role(Role::Browser);
+    let mut net = spawn_child(Role::NetService)?;
+    proto::parent_handshake(net.channel(), Size::new(800, 600))?;
+    let html = resolve_html(&net, url);
+    proto::send(net.channel(), Msg::Shutdown, &[])?;
+    net.wait()?;
+    let mut doc = argus_html::parse(&html);
+    argus_domscript::apply_scripts_with_url(&mut doc, url);
+    Ok(extract_jsonld(&doc))
+}
+
+/// Collect the bodies of every `<script type="application/ld+json">` element
+/// (type matched case-insensitively, ignoring any `; charset=…` suffix) into a
+/// JSON array of their verbatim, whitespace-trimmed contents. Blank blocks are
+/// skipped; an empty result is `[]`. Pure (no I/O), unit-testable.
+fn extract_jsonld(doc: &argus_dom::Document) -> String {
+    use argus_dom::{Document, NodeData, NodeId};
+
+    fn text_of(doc: &Document, id: NodeId, out: &mut String) {
+        match &doc.node(id).data {
+            NodeData::Text(t) => out.push_str(t),
+            _ => {
+                for c in doc.children(id) {
+                    text_of(doc, c, out);
+                }
+            }
+        }
+    }
+    fn walk(doc: &Document, id: NodeId, out: &mut Vec<String>) {
+        if let NodeData::Element(e) = &doc.node(id).data {
+            if e.name.is_html("script") {
+                let ty = e.attr("type").unwrap_or("");
+                let ty = ty.split(';').next().unwrap_or("").trim();
+                if ty.eq_ignore_ascii_case("application/ld+json") {
+                    let mut body = String::new();
+                    text_of(doc, id, &mut body);
+                    let body = body.trim();
+                    if !body.is_empty() {
+                        out.push(body.to_string());
+                    }
+                }
+            }
+        }
+        for c in doc.children(id) {
+            walk(doc, c, out);
+        }
+    }
+    let mut blocks = Vec::new();
+    walk(doc, doc.root(), &mut blocks);
+    format!("[{}]\n", blocks.join(","))
+}
+
 /// Collect document metadata as `key: value` lines: `title`, `lang` (`<html lang>`),
 /// `charset`, `<meta name=…>` values (description/keywords/author/robots/viewport/
 /// theme-color), `<meta property=og:…>` / `name=twitter:…` social tags, and the
@@ -1661,7 +1718,8 @@ fn verify_uniform(fb: &Framebuffer) -> io::Result<Color> {
 mod tests {
     use super::{
         decode_html, dom_node_json, effective_base, extract_forms, extract_images, extract_json,
-        extract_links, extract_meta, extract_tables, page_title, render_text, resolve_url, History,
+        extract_jsonld, extract_links, extract_meta, extract_tables, page_title, render_text,
+        resolve_url, History,
     };
 
     #[test]
@@ -1837,6 +1895,30 @@ mod tests {
         // A blank line separates the two tables.
         assert!(lines.contains(&""), "tables separated by blank line: {out:?}");
         assert!(lines.contains(&"x"), "second table present: {out:?}");
+    }
+
+    #[test]
+    fn extract_jsonld_collects_ld_json_blocks() {
+        let doc = argus_html::parse(
+            "<html><head>\
+               <script type=\"application/ld+json\">  {\"@type\":\"Article\",\"name\":\"A\"}  </script>\
+               <script type=\"text/javascript\">var x = 1;</script>\
+               <script type=\"application/LD+JSON; charset=utf-8\">{\"@type\":\"Person\"}</script>\
+             </head><body>x</body></html>",
+        );
+        let out = extract_jsonld(&doc);
+        // Only the two ld+json blocks, trimmed, in document order; JS is skipped.
+        assert_eq!(
+            out,
+            "[{\"@type\":\"Article\",\"name\":\"A\"},{\"@type\":\"Person\"}]\n",
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn extract_jsonld_empty_when_none() {
+        let doc = argus_html::parse("<html><body><p>no structured data</p></body></html>");
+        assert_eq!(extract_jsonld(&doc), "[]\n");
     }
 
     #[test]

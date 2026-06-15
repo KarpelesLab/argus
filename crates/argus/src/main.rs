@@ -117,6 +117,17 @@ fn main() {
             }
             return;
         }
+        // `--dump-jsonld`: print the page's JSON-LD structured-data blocks.
+        if has_flag("--dump-jsonld") {
+            match argus_browser::dump_jsonld(url.as_deref()) {
+                Ok(j) => print!("{j}"),
+                Err(err) => {
+                    eprintln!("[browser] dump-jsonld failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         // `--dump-json`: print a structured JSON summary (title/headings/links).
         if has_flag("--dump-json") {
             match argus_browser::dump_json(url.as_deref()) {
