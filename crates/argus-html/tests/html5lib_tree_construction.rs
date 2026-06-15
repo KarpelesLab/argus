@@ -634,4 +634,20 @@ a</br>b
 |     "a"
 |     <br>
 |     "b"
+
+#data
+<table><colgroup><col><col></colgroup><tr><td>c</table>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <table>
+|       <colgroup>
+|         <col>
+|         <col>
+|       <tbody>
+|         <tr>
+|           <td>
+|             "c"
 "####;
