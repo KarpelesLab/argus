@@ -4,7 +4,7 @@
 //! codecs: PNG (`oxideav-png`), GIF (`oxideav-gif`), **JPEG** (`oxideav-mjpeg` via
 //! the `oxideav-core` registry, YUV→RGBA through `oxideav-pixfmt`), **WebP**
 //! (`oxideav-webp`, lossless), **QOI** (`oxideav-qoi`), and **ICO/CUR favicons**
-//! (`oxideav-ico`, largest sub-image) — plus uncompressed 24/32-bit BMP, **TGA**
+//! (`oxideav-ico`, largest sub-image) — plus uncompressed 8-bit-palette/24/32-bit BMP, **TGA**
 //! (Truevision true-color + grayscale, uncompressed + RLE), **Netpbm** (PPM/PGM,
 //! ASCII + binary), **PCX** (RLE 24-bit + 8-bit palette), **TIFF** (baseline
 //! uncompressed + PackBits + LZW + Deflate RGB/RGBA/grayscale, horizontal predictor, both byte orders), all built in, and `data:` URLs.
@@ -218,7 +218,7 @@ fn decode_bmp(bytes: &[u8]) -> Option<DecodedImage> {
     let height_raw = rd_i32(22)?;
     let bpp = rd_u16(28)?;
     let compression = rd_u32(30)?;
-    if compression != 0 || (bpp != 24 && bpp != 32) || width <= 0 || height_raw == 0 {
+    if compression != 0 || !matches!(bpp, 8 | 24 | 32) || width <= 0 || height_raw == 0 {
         return None;
     }
     // Guard against absurd dimensions before allocating (malicious headers).
@@ -228,6 +228,22 @@ fn decode_bmp(bytes: &[u8]) -> Option<DecodedImage> {
     let top_down = height_raw < 0;
     let width = width as usize;
     let height = height_raw.unsigned_abs() as usize;
+
+    // 8-bit images are palette-indexed: read the color table (BGR0 quads) that
+    // follows the DIB header, then look each pixel byte up in it.
+    let palette: Vec<[u8; 3]> = if bpp == 8 {
+        let pal_start = 14 + dib_size as usize;
+        let ncolors = rd_u32(46).filter(|&n| n != 0).unwrap_or(256).min(256) as usize;
+        let mut pal = Vec::with_capacity(ncolors);
+        for i in 0..ncolors {
+            let o = pal_start + i * 4;
+            pal.push([*bytes.get(o + 2)?, *bytes.get(o + 1)?, *bytes.get(o)?]); // R,G,B
+        }
+        pal
+    } else {
+        Vec::new()
+    };
+
     let bytes_pp = (bpp / 8) as usize;
     let row_size = (width * bytes_pp).div_ceil(4) * 4; // padded to 4 bytes
 
@@ -238,11 +254,15 @@ fn decode_bmp(bytes: &[u8]) -> Option<DecodedImage> {
         let row_start = data_offset + src_row * row_size;
         for col in 0..width {
             let p = row_start + col * bytes_pp;
-            let b = *bytes.get(p)?;
-            let g = *bytes.get(p + 1)?;
-            let r = *bytes.get(p + 2)?;
-            // 32bpp in a BITMAPINFOHEADER is BGRX (the 4th byte is padding, not
-            // alpha — that needs V4/V5 headers), so treat every pixel as opaque.
+            let (r, g, b) = if bpp == 8 {
+                let idx = *bytes.get(p)? as usize;
+                let c = palette.get(idx).copied().unwrap_or([0, 0, 0]);
+                (c[0], c[1], c[2])
+            } else {
+                // 32bpp in a BITMAPINFOHEADER is BGRX (the 4th byte is padding, not
+                // alpha — that needs V4/V5 headers), so treat every pixel as opaque.
+                (*bytes.get(p + 2)?, *bytes.get(p + 1)?, *bytes.get(p)?)
+            };
             let dst = (row * width + col) * 4;
             rgba[dst] = r;
             rgba[dst + 1] = g;
@@ -929,6 +949,42 @@ mod tests {
         assert_eq!(&img.rgba[4..8], &[255, 255, 255, 255]); // (1,0) white
         assert_eq!(&img.rgba[8..12], &[255, 0, 0, 255]); // (0,1) red
         assert_eq!(&img.rgba[12..16], &[0, 255, 0, 255]); // (1,1) green
+    }
+
+    #[test]
+    fn decodes_an_8bit_palette_bmp() {
+        // A 2x2 8-bit (256-color) BMP with a 4-entry palette, bottom-up.
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(b"BM");
+        b.extend_from_slice(&78u32.to_le_bytes()); // file size
+        b.extend_from_slice(&0u32.to_le_bytes()); // reserved
+        b.extend_from_slice(&70u32.to_le_bytes()); // pixel offset = 14+40+4*4
+        b.extend_from_slice(&40u32.to_le_bytes()); // DIB size
+        b.extend_from_slice(&2i32.to_le_bytes()); // width
+        b.extend_from_slice(&2i32.to_le_bytes()); // height (bottom-up)
+        b.extend_from_slice(&1u16.to_le_bytes()); // planes
+        b.extend_from_slice(&8u16.to_le_bytes()); // bpp
+        b.extend_from_slice(&0u32.to_le_bytes()); // compression
+        b.extend_from_slice(&0u32.to_le_bytes()); // image size
+        b.extend_from_slice(&0u32.to_le_bytes()); // x ppm
+        b.extend_from_slice(&0u32.to_le_bytes()); // y ppm
+        b.extend_from_slice(&4u32.to_le_bytes()); // colors used = 4
+        b.extend_from_slice(&0u32.to_le_bytes()); // colors important
+        // Palette: BGR0 quads — 0=red, 1=green, 2=blue, 3=white.
+        b.extend_from_slice(&[0, 0, 255, 0]); // red
+        b.extend_from_slice(&[0, 255, 0, 0]); // green
+        b.extend_from_slice(&[255, 0, 0, 0]); // blue
+        b.extend_from_slice(&[255, 255, 255, 0]); // white
+        // Pixel indices, each row padded to 4 bytes; bottom row stored first.
+        b.extend_from_slice(&[2, 3, 0, 0]); // bottom: blue, white
+        b.extend_from_slice(&[0, 1, 0, 0]); // top: red, green
+
+        let img = decode(&b).expect("decode 8-bit bmp");
+        assert_eq!((img.width, img.height), (2, 2));
+        assert_eq!(&img.rgba[0..4], &[255, 0, 0, 255], "(0,0) red");
+        assert_eq!(&img.rgba[4..8], &[0, 255, 0, 255], "(1,0) green");
+        assert_eq!(&img.rgba[8..12], &[0, 0, 255, 255], "(0,1) blue");
+        assert_eq!(&img.rgba[12..16], &[255, 255, 255, 255], "(1,1) white");
     }
 
     // Build an 18-byte TGA header for a true-color image.
