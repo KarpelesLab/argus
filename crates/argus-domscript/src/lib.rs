@@ -441,6 +441,25 @@ function __argus_el(tgt) {
       if (k === "focus" || k === "blur" || k === "scrollIntoView") {
         return function() {};
       }
+      // Geometry read-back isn't available in the reconciliation model; return
+      // zero-sized stubs so layout-measuring scripts run instead of throwing.
+      if (k === "getBoundingClientRect") {
+        return function() {
+          return {top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0};
+        };
+      }
+      if (k === "getClientRects") {
+        return function() { return []; };
+      }
+      if (k === "offsetWidth" || k === "offsetHeight" || k === "offsetTop" ||
+          k === "offsetLeft" || k === "clientWidth" || k === "clientHeight" ||
+          k === "scrollWidth" || k === "scrollHeight" || k === "scrollTop" ||
+          k === "scrollLeft") {
+        return 0;
+      }
+      if (k === "offsetParent") {
+        return null;
+      }
       if (k === "insertAdjacentHTML") {
         return function(pos, html) {
           __argus_ops.push({op: "insertAdjacentHTML", tgt: tgt,
@@ -2429,6 +2448,25 @@ mod tests {
         let apos = text.find('A');
         assert!(bpos.is_some() && rpos.is_some() && apos.is_some(), "got {text:?}");
         assert!(bpos < rpos && rpos < apos, "order B<ref<A, got {text:?}");
+    }
+
+    #[test]
+    fn geometry_stubs_dont_throw() {
+        // A script that measures layout (getBoundingClientRect / offset*) must run
+        // (returning zeros) rather than throwing, then still mutate the DOM.
+        let mut doc = argus_html::parse(
+            "<div id=\"o\">x</div>\
+             <script>\
+               var o = document.getElementById('o');\
+               var r = o.getBoundingClientRect();\
+               var w = o.offsetWidth + o.clientHeight + o.scrollTop;\
+               o.setAttribute('data-r', '' + (r.width + r.height + w));\
+               o.setAttribute('data-rects', '' + o.getClientRects().length);\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        assert_eq!(attr_of(&doc, "o", "data-r").as_deref(), Some("0"));
+        assert_eq!(attr_of(&doc, "o", "data-rects").as_deref(), Some("0"));
     }
 
     #[test]
