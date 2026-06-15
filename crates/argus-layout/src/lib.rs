@@ -491,20 +491,31 @@ impl Ctx<'_> {
         if style.white_space_pre {
             let mut raw = String::new();
             self.gather_raw_text(id, &mut raw);
+            let color = if style.hidden {
+                argus_geometry::Color::TRANSPARENT
+            } else {
+                style.fade(style.color)
+            };
+            let fs = style.font_size;
             for line in raw.trim_end_matches('\n').split('\n') {
-                let baseline = self.cursor_y + self.font.ascent_px(style.font_size);
-                self.runs.push(TextRun {
-                    x: content_left,
-                    baseline,
-                    text: line.to_string(),
-                    size_px: style.font_size,
-                    color: if style.hidden {
-                        argus_geometry::Color::TRANSPARENT
-                    } else {
-                        style.fade(style.color)
-                    },
-                });
-                self.cursor_y += style.font_size * style.line_height;
+                // `pre-line` collapses runs of whitespace to single spaces and wraps
+                // long lines; `pre`/`pre-wrap` keep each newline-delimited line whole.
+                let visual: Vec<String> = if style.pre_line {
+                    self.wrap_collapsed(line, fs, content_w)
+                } else {
+                    vec![line.to_string()]
+                };
+                for vline in visual {
+                    let baseline = self.cursor_y + self.font.ascent_px(fs);
+                    self.runs.push(TextRun {
+                        x: content_left,
+                        baseline,
+                        text: vline,
+                        size_px: fs,
+                        color,
+                    });
+                    self.cursor_y += fs * style.line_height;
+                }
             }
         } else {
             // Children. Inline-level content accumulates into `words` (each with its own
@@ -915,6 +926,33 @@ impl Ctx<'_> {
 
     fn is_li(&self, id: NodeId) -> bool {
         matches!(&self.doc.node(id).data, NodeData::Element(e) if e.name.is_html("li"))
+    }
+
+    /// Greedily wrap a single line into sub-lines that fit `width`, collapsing runs
+    /// of whitespace to single spaces (for `white-space: pre-line`). Always returns
+    /// at least one (possibly empty) sub-line, and never splits a single word.
+    fn wrap_collapsed(&self, line: &str, fs: f32, width: f32) -> Vec<String> {
+        let space_w = self.font.measure(" ", fs);
+        let mut out: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let mut cur_w = 0.0f32;
+        for word in line.split_whitespace() {
+            let ww = self.font.measure(word, fs);
+            if cur.is_empty() {
+                cur.push_str(word);
+                cur_w = ww;
+            } else if cur_w + space_w + ww > width {
+                out.push(std::mem::take(&mut cur));
+                cur.push_str(word);
+                cur_w = ww;
+            } else {
+                cur.push(' ');
+                cur.push_str(word);
+                cur_w += space_w + ww;
+            }
+        }
+        out.push(cur); // keep a trailing/only line even when empty
+        out
     }
 
     /// The inline region `[lx, rx]` left after subtracting any floats overlapping
@@ -2316,6 +2354,26 @@ mod tests {
             1,
             "nowrap stays on one line"
         );
+    }
+
+    #[test]
+    fn pre_line_preserves_newlines_collapses_spaces_and_wraps() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // pre-line keeps the explicit newline (two paragraphs), collapses the runs of
+        // spaces, and wraps the long second line within the narrow content box.
+        let html = "<p style=\"white-space: pre-line\">a    b\nthe quick brown fox jumps over the lazy dog again and again</p>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 160.0, &ImageSizes::new());
+        // First visual run is "a b" — the 4-space run collapsed to one space.
+        assert_eq!(l.runs[0].text, "a b", "spaces collapsed, newline kept");
+        // The second source line wraps into multiple visual lines (distinct baselines).
+        let mut ys: Vec<i32> = l.runs.iter().map(|r| r.baseline as i32).collect();
+        ys.sort_unstable();
+        ys.dedup();
+        assert!(ys.len() >= 3, "newline + wrapping → ≥3 visual lines, got {}", ys.len());
     }
 
     #[test]
