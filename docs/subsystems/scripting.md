@@ -41,19 +41,26 @@ The native-binding design below is the **target**; it assumes kataan's embedder 
 kataan 0.0.3 showed its JS is rich enough (ES6 `Proxy`, `Object.defineProperty`,
 `JSON`, closures, `this`) to bind the DOM **without** it. So today, scripting runs
 through a **JS-side `document`/`window` shim + post-execution reconciliation** in
-[`argus-content`](../../crates/argus-content/src/dom_script.rs):
+[`argus-domscript`](../../crates/argus-domscript/src/lib.rs):
 
 1. The real DOM's id'd elements are serialized into a seed object.
 2. A JS prelude defines `document`/`window` and proxy element handles whose get/set
    traps record mutation ops; it's run with the page scripts in one kataan execution.
-3. The recorded ops (emitted as JSON) are parsed in Rust and replayed into the real
-   `Document` before layout.
+3. The page scripts run via `argus_script::run_with_followup`, which drains kataan's
+   event loop (promise microtasks + `async`/`await` + native `setTimeout` callbacks),
+   then reads the recorded ops array back as a followup expression.
+4. The recorded ops (JSON) are parsed in Rust and replayed into the real `Document`
+   before layout.
 
-This is **synchronous only** — no event loop, timers, events, or live reflow (those
-still want the embedder API). It already supports `getElementById`/`querySelector`/
-`createElement`/`body`, and element `textContent`/`innerHTML`/`className`/
-`setAttribute`/`style.*`/`classList`/`appendChild`/`remove`. When the native embedder
-API lands, this shim is replaced by the direct bindings described below.
+What works today: `getElementById`/`querySelector`/`createElement`/`body`/`write`,
+element `textContent`/`innerHTML`/`className`/`setAttribute`/`style.*`/`classList`/
+`appendChild`/`insertBefore`/`remove`; **discrete events** (`addEventListener('click')`/
+`onclick` via deterministic replay); **timers** (`setTimeout`/`setInterval`, shim-queued
+and delay-ordered) and **promises/microtasks/`async`-`await`** (drained by kataan's event
+loop before reconciliation); `localStorage`/`sessionStorage`; keyboard text input.
+What still wants the embedder API is the **wall-clock** surface — real-time timer
+scheduling, continuous input events, live reflow, and geometry read-back. When the
+native embedder API lands, this shim is replaced by the direct bindings described below.
 
 ## Responsibilities
 

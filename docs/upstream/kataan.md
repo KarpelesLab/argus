@@ -12,11 +12,26 @@
 > page's scripts mutate proxy objects that record ops, which Rust replays into the real
 > DOM before layout. The Tier-1 embedder API below is therefore **no longer
 > Phase-2-blocking**; it remains the *better* long-term path and is **required for the
-> interactive surface** (event loop, `setTimeout`, event listeners, live reflow, reading
+> interactive surface** (real-time event loop, event listeners, live reflow, reading
 > back computed geometry), which the JS-shim approach cannot provide.
 
-**Critical path:** the embedding API + GC remain wanted for an **event-driven** DOM and
-performance, but no longer gate basic Phase 2 scripting.
+> **Update (kataan 0.0.4 — async now works):** the tree-walker `kataan::nbexec::Interp`
+> exposes a **persistent realm + a draining event loop**: each `interp.run(&program)`
+> runs the program *and then drains* promise microtasks, `async`/`await` continuations,
+> and native `setTimeout`/`setInterval` callbacks before returning, and realm state
+> persists across successive `run` calls. `argus-script` wraps this as
+> `run_with_followup(source, followup)` (run scripts, drain the loop, then evaluate a
+> followup expression in the same realm). `argus-domscript` uses it to capture
+> **asynchronous DOM mutations** — writes inside `Promise.then`/awaited continuations
+> now reconcile, not just synchronous ones. (The bytecode path
+> `nbvm::execute`/`compile_program` still rejects `globalThis`/`Proxy`; only the
+> tree-walker runs the full shim, so the shim path falls back to bytecode only when the
+> tree-walker errors.) What still needs the Tier-1 embedder API is the *wall-clock*
+> surface: real-time timer scheduling, continuous input events, and geometry read-back.
+
+**Critical path:** the embedding API + GC remain wanted for a **real-time event-driven**
+DOM and performance, but no longer gate basic Phase 2 scripting *or* discrete async
+(promises/microtasks/`setTimeout`) reconciliation.
 
 ## Baseline (what exists today)
 
