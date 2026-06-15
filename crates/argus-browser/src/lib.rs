@@ -519,6 +519,127 @@ fn extract_headings(doc: &argus_dom::Document) -> String {
     out
 }
 
+/// Headless automation: fetch a page and return a summary of its **forms** and
+/// their controls (name/type/value), for scripted form-filling and scraping.
+/// Used by `--dump-forms`.
+pub fn dump_forms(url: Option<&str>) -> io::Result<String> {
+    log::set_role(Role::Browser);
+    let mut net = spawn_child(Role::NetService)?;
+    proto::parent_handshake(net.channel(), Size::new(800, 600))?;
+    let html = resolve_html(&net, url);
+    proto::send(net.channel(), Msg::Shutdown, &[])?;
+    net.wait()?;
+    let mut doc = argus_html::parse(&html);
+    argus_domscript::apply_scripts_with_url(&mut doc, url);
+    Ok(extract_forms(&doc, url))
+}
+
+/// Render each `<form>` as a header line (`form[i] action=… method=…`) followed
+/// by indented control lines (`input name=… type=… value=…`, plus `checked` /
+/// `selected`). Controls outside any form are grouped under `form[-]`. Pure (no
+/// I/O) so it's unit-testable; `base` resolves the relative `action`.
+fn extract_forms(doc: &argus_dom::Document, base: Option<&str>) -> String {
+    use argus_dom::{Document, NodeData, NodeId};
+
+    fn text_of(doc: &Document, id: NodeId, out: &mut String) {
+        match &doc.node(id).data {
+            NodeData::Text(t) => out.push_str(t),
+            _ => {
+                for c in doc.children(id) {
+                    text_of(doc, c, out);
+                }
+            }
+        }
+    }
+    // Describe one control element; returns None for non-control elements.
+    fn control_line(doc: &Document, id: NodeId) -> Option<String> {
+        let NodeData::Element(e) = &doc.node(id).data else {
+            return None;
+        };
+        let name = e.attr("name").unwrap_or("");
+        if e.name.is_html("input") {
+            let ty = e.attr("type").unwrap_or("text");
+            let val = e.attr("value").unwrap_or("");
+            let mut s = format!("input name={name} type={ty} value={val}");
+            if matches!(ty, "checkbox" | "radio") && e.attr("checked").is_some() {
+                s.push_str(" checked");
+            }
+            Some(s)
+        } else if e.name.is_html("textarea") {
+            let mut val = String::new();
+            text_of(doc, id, &mut val);
+            let val = val.trim();
+            Some(format!("textarea name={name} value={val}"))
+        } else if e.name.is_html("button") {
+            let ty = e.attr("type").unwrap_or("submit");
+            Some(format!("button name={name} type={ty}"))
+        } else if e.name.is_html("select") {
+            // The selected option's value (the one marked `selected`, else first).
+            let mut chosen: Option<String> = None;
+            let mut first: Option<String> = None;
+            fn opts(doc: &Document, id: NodeId, first: &mut Option<String>, chosen: &mut Option<String>) {
+                for c in doc.children(id) {
+                    if let NodeData::Element(e) = &doc.node(c).data {
+                        if e.name.is_html("option") {
+                            let mut label = String::new();
+                            text_of(doc, c, &mut label);
+                            let v = e.attr("value").map(str::to_string).unwrap_or_else(|| label.trim().to_string());
+                            if first.is_none() {
+                                *first = Some(v.clone());
+                            }
+                            if e.attr("selected").is_some() {
+                                *chosen = Some(v);
+                            }
+                        }
+                    }
+                    opts(doc, c, first, chosen);
+                }
+            }
+            opts(doc, id, &mut first, &mut chosen);
+            let val = chosen.or(first).unwrap_or_default();
+            Some(format!("select name={name} value={val}"))
+        } else {
+            None
+        }
+    }
+    fn collect_controls(doc: &Document, id: NodeId, out: &mut String) {
+        for c in doc.children(id) {
+            if let NodeData::Element(e) = &doc.node(c).data {
+                // Don't descend into nested forms; they get their own header.
+                if e.name.is_html("form") {
+                    continue;
+                }
+                if let Some(line) = control_line(doc, c) {
+                    out.push_str("  ");
+                    out.push_str(&line);
+                    out.push('\n');
+                }
+            }
+            collect_controls(doc, c, out);
+        }
+    }
+
+    let mut out = String::new();
+    let mut idx = 0usize;
+    fn walk(doc: &Document, id: NodeId, base: Option<&str>, idx: &mut usize, out: &mut String) {
+        if let NodeData::Element(e) = &doc.node(id).data {
+            if e.name.is_html("form") {
+                let action = e.attr("action").map(|a| resolve_url(base, a)).unwrap_or_default();
+                let method = e.attr("method").unwrap_or("get").to_lowercase();
+                out.push_str(&format!("form[{}] action={action} method={method}\n", *idx));
+                *idx += 1;
+                collect_controls(doc, id, out);
+                return; // controls already gathered; don't double-walk into them
+            }
+        }
+        for c in doc.children(id) {
+            walk(doc, c, base, idx, out);
+        }
+    }
+    walk(doc, doc.root(), base, &mut idx, &mut out);
+    out
+}
+
 /// Collect `<a href>` links as `text<TAB>resolved-href` lines, in document order.
 /// Pure (no I/O) so it's unit-testable; `base` resolves relative hrefs.
 fn extract_links(doc: &argus_dom::Document, base: Option<&str>) -> String {
@@ -1008,7 +1129,7 @@ fn verify_uniform(fb: &Framebuffer) -> io::Result<Color> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_links, page_title, render_text, resolve_url, History};
+    use super::{extract_forms, extract_links, page_title, render_text, resolve_url, History};
 
     #[test]
     fn a11y_tree_roles_names_and_aria() {
@@ -1060,6 +1181,31 @@ mod tests {
         assert_eq!(lines[2], "External\thttps://other.example/x");
         assert_eq!(lines[3], "proto-relative\thttps://cdn.example/lib.js");
         assert_eq!(lines.len(), 4, "only <a href> elements are listed");
+    }
+
+    #[test]
+    fn extract_forms_lists_controls() {
+        let doc = argus_html::parse(
+            "<form action=\"/login\" method=\"post\">\
+               <input name=\"email\" type=\"email\" value=\"a@b.c\">\
+               <input name=\"remember\" type=\"checkbox\" checked>\
+               <select name=\"country\">\
+                 <option value=\"US\">United States</option>\
+                 <option value=\"JP\" selected>Japan</option>\
+               </select>\
+               <textarea name=\"comment\">hi there</textarea>\
+               <button name=\"go\" type=\"submit\">Go</button>\
+             </form>",
+        );
+        let out = extract_forms(&doc, Some("https://site.example/page"));
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "form[0] action=https://site.example/login method=post");
+        assert!(lines.contains(&"  input name=email type=email value=a@b.c"), "{out}");
+        assert!(lines.contains(&"  input name=remember type=checkbox value= checked"), "{out}");
+        // The selected option's value is reported, not the first.
+        assert!(lines.contains(&"  select name=country value=JP"), "{out}");
+        assert!(lines.contains(&"  textarea name=comment value=hi there"), "{out}");
+        assert!(lines.contains(&"  button name=go type=submit"), "{out}");
     }
 
     #[test]

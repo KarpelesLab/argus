@@ -95,6 +95,17 @@ fn main() {
             }
             return;
         }
+        // `--dump-forms`: print the page's forms and their controls and exit.
+        if has_flag("--dump-forms") {
+            match argus_browser::dump_forms(url.as_deref()) {
+                Ok(f) => print!("{f}"),
+                Err(err) => {
+                    eprintln!("[browser] dump-forms failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
     }
 
     let result = match role {
