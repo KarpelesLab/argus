@@ -13,18 +13,40 @@ pub enum Length {
     /// zero or negative). Covers the common `calc(100% - 80px)` / `calc(50% + 2em)`
     /// shapes; multiplication/division and nesting fall back to no-value.
     Calc { px: f32, em: f32, pct: f32 },
+    /// `min()`/`max()`/`clamp()` over `calc`-style terms (each `[px, em, pct]`),
+    /// resolved at use time. For `min`/`max` only `a`/`b` are used; for `clamp` the
+    /// terms are `(min, value, max)`.
+    Math { op: MathOp, a: [f32; 3], b: [f32; 3], c: [f32; 3] },
+}
+
+/// Which comparison [`Length::Math`] applies.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum MathOp {
+    Min,
+    Max,
+    Clamp,
 }
 
 impl Length {
     /// Resolve to pixels given the relevant `font_size` (for `em`) and a
     /// `percent_base` (for `%`).
     pub fn to_px(self, font_size: f32, percent_base: f32) -> f32 {
+        let resolve3 = |t: [f32; 3]| t[0] + t[1] * font_size + t[2] / 100.0 * percent_base;
         match self {
             Length::Px(v) => v,
             Length::Em(v) => v * font_size,
             Length::Percent(v) => v / 100.0 * percent_base,
             Length::Zero => 0.0,
             Length::Calc { px, em, pct } => px + em * font_size + pct / 100.0 * percent_base,
+            Length::Math { op, a, b, c } => {
+                let (ra, rb, rc) = (resolve3(a), resolve3(b), resolve3(c));
+                match op {
+                    MathOp::Min => ra.min(rb),
+                    MathOp::Max => ra.max(rb),
+                    // clamp(min, value, max) — and never let min exceed max.
+                    MathOp::Clamp => rb.clamp(ra.min(rc), rc.max(ra)),
+                }
+            }
         }
     }
 }
@@ -42,6 +64,17 @@ pub fn parse_length(s: &str) -> Option<Length> {
     let b = s.as_bytes();
     if b.len() > 5 && b[..5].eq_ignore_ascii_case(b"calc(") && s.ends_with(')') {
         return parse_calc(s[5..s.len() - 1].trim());
+    }
+    // `min()`/`max()`/`clamp()` over comma-separated terms (each a length or calc).
+    for (kw, op) in [
+        ("min(", MathOp::Min),
+        ("max(", MathOp::Max),
+        ("clamp(", MathOp::Clamp),
+    ] {
+        let n = kw.len();
+        if b.len() > n && b[..n].eq_ignore_ascii_case(kw.as_bytes()) && s.ends_with(')') {
+            return parse_math(s[n..s.len() - 1].trim(), op);
+        }
     }
     if let Some(num) = s.strip_suffix('%') {
         return num.trim().parse().ok().map(Length::Percent);
@@ -77,6 +110,60 @@ pub fn parse_length(s: &str) -> Option<Length> {
 /// grammar requires whitespace around binary `+`/`-`). Multiplication/division,
 /// nested `calc()`/`var()`, and malformed input return `None` (no value), so the
 /// property falls back to its initial value rather than mis-resolving.
+/// A `[px, em, pct]` term from a single length/calc token (for `min`/`max`/`clamp`
+/// arguments). Returns `None` for nested math or unparseable input.
+fn term_triple(s: &str) -> Option<[f32; 3]> {
+    match parse_length(s.trim())? {
+        Length::Px(v) => Some([v, 0.0, 0.0]),
+        Length::Em(v) => Some([0.0, v, 0.0]),
+        Length::Percent(v) => Some([0.0, 0.0, v]),
+        Length::Zero => Some([0.0, 0.0, 0.0]),
+        Length::Calc { px, em, pct } => Some([px, em, pct]),
+        Length::Math { .. } => None,
+    }
+}
+
+/// Split a function body on top-level commas (ignoring commas inside nested parens).
+fn split_top_commas(body: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut depth, mut start) = (0i32, 0usize);
+    for (i, c) in body.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                out.push(body[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(body[start..].trim());
+    out
+}
+
+/// Parse a `min()`/`max()`/`clamp()` body into a [`Length::Math`]. `min`/`max` take
+/// two arguments, `clamp` three; anything else is unsupported (no value).
+fn parse_math(body: &str, op: MathOp) -> Option<Length> {
+    let args = split_top_commas(body);
+    let z = [0.0; 3];
+    match (op, args.len()) {
+        (MathOp::Clamp, 3) => Some(Length::Math {
+            op,
+            a: term_triple(args[0])?,
+            b: term_triple(args[1])?,
+            c: term_triple(args[2])?,
+        }),
+        (MathOp::Min | MathOp::Max, 2) => Some(Length::Math {
+            op,
+            a: term_triple(args[0])?,
+            b: term_triple(args[1])?,
+            c: z,
+        }),
+        _ => None,
+    }
+}
+
 fn parse_calc(body: &str) -> Option<Length> {
     if body.contains("calc(") || body.contains("var(") {
         return None;
@@ -95,7 +182,7 @@ fn parse_calc(body: &str) -> Option<Length> {
                 Length::Em(v) => em += sign * v,
                 Length::Percent(v) => pct += sign * v,
                 Length::Zero => {}
-                Length::Calc { .. } => return None,
+                Length::Calc { .. } | Length::Math { .. } => return None,
             }
         } else {
             sign = match tok {
@@ -485,6 +572,26 @@ mod tests {
         // Angle units for hue: 0.5turn and 200grad are both 180° (cyan).
         assert_eq!(parse_color("hsl(0.5turn, 100%, 50%)"), Some(Color::rgb(0, 255, 255)));
         assert_eq!(parse_color("hsl(200grad, 100%, 50%)"), Some(Color::rgb(0, 255, 255)));
+    }
+
+    #[test]
+    fn min_max_clamp() {
+        let px = |l: Option<Length>, base: f32| l.unwrap().to_px(16.0, base);
+        // min(100%, 500px) against a 800px base → 500; against 300px → 300.
+        assert_eq!(px(parse_length("min(100%, 500px)"), 800.0), 500.0);
+        assert_eq!(px(parse_length("min(100%, 500px)"), 300.0), 300.0);
+        // max(50%, 200px) against 800px → 400; against 300px → 200.
+        assert_eq!(px(parse_length("max(50%, 200px)"), 800.0), 400.0);
+        assert_eq!(px(parse_length("max(50%, 200px)"), 300.0), 200.0);
+        // clamp(200px, 50%, 600px): value 50% of base, clamped to [200,600].
+        assert_eq!(px(parse_length("clamp(200px, 50%, 600px)"), 2000.0), 600.0); // 1000→600
+        assert_eq!(px(parse_length("clamp(200px, 50%, 600px)"), 800.0), 400.0); // 400 in range
+        assert_eq!(px(parse_length("clamp(200px, 50%, 600px)"), 100.0), 200.0); // 50→200
+        // An em term resolves against font-size; a calc arg works too.
+        assert_eq!(parse_length("min(2em, 40px)").unwrap().to_px(16.0, 0.0), 32.0);
+        assert_eq!(parse_length("max(calc(10px + 1em), 50px)").unwrap().to_px(16.0, 0.0), 50.0);
+        // Wrong arity → no value.
+        assert_eq!(parse_length("clamp(1px, 2px)"), None);
     }
 
     #[test]
