@@ -2159,24 +2159,115 @@ impl Ctx<'_> {
             self.layout_block(cap, cap_style, table_left, table_w, None);
         }
 
-        for row in &rows {
-            let row_top = self.cursor_y;
-            let mut max_h = 0.0f32;
-            let mut col = 0u32;
-            for &cell in row {
-                let span = self
-                    .cell_colspan(cell)
-                    .min(num_cols - col.min(num_cols - 1));
-                let cell_x = table_left + col as f32 * col_w;
-                let cell_w = span as f32 * col_w;
-                self.cursor_y = row_top;
-                let cell_style = computed_style(self.doc, cell, &style, self.author);
-                self.layout_block(cell, cell_style, cell_x, cell_w, None);
-                max_h = max_h.max(self.cursor_y - row_top);
-                col += span.max(1);
-            }
-            self.cursor_y = row_top + max_h;
+        // Placement honoring colspan *and* rowspan: scan an occupancy grid so cells
+        // in later rows flow past columns still covered by a rowspan above.
+        let cols = num_cols as usize;
+        struct PlacedCell {
+            cell: NodeId,
+            style: ComputedStyle,
+            row: usize,
+            col: usize,
+            cspan: usize,
+            rspan: usize,
         }
+        let mut occ: Vec<Vec<bool>> = Vec::new();
+        let mut placed: Vec<PlacedCell> = Vec::new();
+        for (r, row) in rows.iter().enumerate() {
+            while occ.len() <= r {
+                occ.push(vec![false; cols]);
+            }
+            let mut c = 0usize;
+            for &cell in row {
+                while c < cols && occ[r][c] {
+                    c += 1;
+                }
+                if c >= cols {
+                    break;
+                }
+                let cspan = (self.cell_colspan(cell) as usize).min(cols - c);
+                let rspan = (self.cell_rowspan(cell) as usize).max(1);
+                for dr in 0..rspan {
+                    while occ.len() <= r + dr {
+                        occ.push(vec![false; cols]);
+                    }
+                    for dc in 0..cspan {
+                        occ[r + dr][c + dc] = true;
+                    }
+                }
+                let cstyle = computed_style(self.doc, cell, &style, self.author);
+                placed.push(PlacedCell {
+                    cell,
+                    style: cstyle,
+                    row: r,
+                    col: c,
+                    cspan,
+                    rspan,
+                });
+                c += cspan;
+            }
+        }
+        let nrows = occ.len();
+
+        // Measure each cell's height (lay out at a throwaway origin, then truncate).
+        let table_top = self.cursor_y;
+        let mut heights = vec![0.0f32; placed.len()];
+        for (i, p) in placed.iter().enumerate() {
+            let mark = (
+                self.rects.len(),
+                self.runs.len(),
+                self.images.len(),
+                self.links.len(),
+                self.bounds.len(),
+            );
+            self.cursor_y = 0.0;
+            let w = p.cspan as f32 * col_w;
+            self.layout_block(p.cell, p.style, table_left + p.col as f32 * col_w, w, None);
+            heights[i] = self.cursor_y;
+            self.rects.truncate(mark.0);
+            self.runs.truncate(mark.1);
+            self.images.truncate(mark.2);
+            self.links.truncate(mark.3);
+            self.bounds.truncate(mark.4);
+        }
+        // Row heights: single-row cells set their row; multi-row deficits go to the
+        // last spanned row.
+        let mut row_h = vec![0.0f32; nrows.max(1)];
+        for (i, p) in placed.iter().enumerate() {
+            if p.rspan == 1 {
+                row_h[p.row] = row_h[p.row].max(heights[i]);
+            }
+        }
+        for (i, p) in placed.iter().enumerate() {
+            if p.rspan > 1 {
+                let last = (p.row + p.rspan - 1).min(nrows - 1);
+                let spanned: f32 = row_h[p.row..=last].iter().sum();
+                if heights[i] > spanned {
+                    row_h[last] += heights[i] - spanned;
+                }
+            }
+        }
+        let mut row_y = vec![table_top; nrows.max(1)];
+        for r in 1..nrows {
+            row_y[r] = row_y[r - 1] + row_h[r - 1];
+        }
+        // Real layout at each cell's (x, y).
+        for p in &placed {
+            self.cursor_y = row_y[p.row];
+            let w = p.cspan as f32 * col_w;
+            self.layout_block(p.cell, p.style, table_left + p.col as f32 * col_w, w, None);
+        }
+        self.cursor_y = table_top + row_h.iter().sum::<f32>();
+    }
+
+    /// The `rowspan` of a table cell (defaults to 1, clamped to `>= 1`).
+    fn cell_rowspan(&self, cell: NodeId) -> u32 {
+        self.doc
+            .node(cell)
+            .as_element()
+            .and_then(|e| e.attr("rowspan"))
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(1)
+            .max(1)
     }
 
     /// The `colspan` of a table cell (defaults to 1, clamped to `>= 1`).
@@ -3616,6 +3707,32 @@ mod tests {
             x_of("a")
         );
         assert!(x_of("y") > x_of("b"), "y should be past column 2");
+    }
+
+    #[test]
+    fn table_rowspan_reserves_column_below() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Row 1: a (rowspan 2), b. Row 2: c. With rowspan, "c" must land in column 2
+        // (under b), not column 1 — column 1 is still covered by a's rowspan.
+        let html = "<table><tr><td rowspan=2>a</td><td>b</td></tr>\
+                    <tr><td>c</td></tr></table>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 300.0, &ImageSizes::new());
+        let at = |t: &str| {
+            let r = l.runs.iter().find(|r| r.text == t).unwrap();
+            (r.x, r.baseline)
+        };
+        let (ax, ay) = at("a");
+        let (bx, _by) = at("b");
+        let (cx, cy) = at("c");
+        // c aligns under b (column 2), not under a (column 1).
+        assert!((cx - bx).abs() < 2.0, "c under b (col 2): cx={cx} bx={bx} ax={ax}");
+        assert!(cx > ax + 10.0, "c is not in column 1");
+        // c is on the second row (below a's baseline).
+        assert!(cy > ay + 10.0, "c on row 2");
     }
 
     #[test]
