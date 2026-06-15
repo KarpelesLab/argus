@@ -212,6 +212,8 @@ pub struct ComputedStyle {
     pub overline: bool,
     /// `text-decoration-color` — color of the decoration lines (`None` = text color).
     pub decoration_color: Option<Color>,
+    /// `accent-color` — tint for form controls (checkbox/radio/progress); inherited.
+    pub accent_color: Option<Color>,
     /// Column count for a grid container (from `grid-template-columns`).
     pub grid_columns: u32,
     /// Per-column track sizes (parallel to `grid_columns`, capped at
@@ -329,6 +331,7 @@ impl ComputedStyle {
             strike: false,
             overline: false,
             decoration_color: None,
+            accent_color: None,
             grid_columns: 1,
             grid_tracks: [GridTrack::Auto; GRID_MAX_TRACKS],
             grid_column_span: 1,
@@ -557,6 +560,7 @@ pub fn computed_style(
         tab_size: parent.tab_size,               // tab-size inherits
         pre_wrap: parent.pre_wrap,               // white-space inherits
         break_word: parent.break_word,           // overflow-wrap inherits
+        accent_color: parent.accent_color,       // accent-color inherits
         list_style: parent.list_style,           // list-style-type inherits
         text_transform: parent.text_transform,   // text-transform inherits
         line_height: parent.line_height,         // line-height inherits
@@ -745,6 +749,13 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         .and_then(|v| resolve_color(v, cs.color, parent.color))
     {
         cs.decoration_color = Some(c);
+    }
+    if let Some(v) = map.get("accent-color") {
+        cs.accent_color = if v.trim() == "auto" {
+            None
+        } else {
+            resolve_color(v, cs.color, parent.accent_color.unwrap_or(cs.color))
+        };
     }
     if let Some(v) = map
         .get("list-style-type")

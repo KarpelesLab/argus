@@ -814,7 +814,7 @@ impl Ctx<'_> {
                     y: border_box_top + inset,
                     w: (border_box_w - 2.0 * inset).max(0.0),
                     h: (border_box_h - 2.0 * inset).max(0.0),
-                    color: style.color,
+                    color: style.accent_color.unwrap_or(style.color),
                     radius,
                 });
             }
@@ -1024,13 +1024,15 @@ impl Ctx<'_> {
             color: argus_geometry::Color::rgb(0xd0, 0xd0, 0xd0),
             radius,
         });
-        // Filled portion (blue for progress, green for meter).
+        // Filled portion: `accent-color` if set, else blue (progress) / green (meter).
         if frac > 0.0 {
-            let fill = if is_meter {
-                argus_geometry::Color::rgb(0x3c, 0xb0, 0x37)
-            } else {
-                argus_geometry::Color::rgb(0x2b, 0x6c, 0xde)
-            };
+            let fill = istyle.accent_color.unwrap_or_else(|| {
+                if is_meter {
+                    argus_geometry::Color::rgb(0x3c, 0xb0, 0x37)
+                } else {
+                    argus_geometry::Color::rgb(0x2b, 0x6c, 0xde)
+                }
+            });
             self.rects.push(RectFill {
                 x,
                 y: top,
@@ -2884,6 +2886,27 @@ mod tests {
         let blue = l.rects.iter().any(|r| r.color.b > 200 && r.color.r < 60 && r.w < 6.0);
         assert!(red, "red top border present");
         assert!(blue, "blue left border present");
+    }
+
+    #[test]
+    fn accent_color_tints_checkbox_and_progress() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A checked checkbox tinted with accent-color: the inner fill is purple.
+        let html = "<input type=\"checkbox\" checked style=\"accent-color:#800080; width:16px; height:16px\">";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let purple = l.rects.iter().any(|r| r.color.r > 100 && r.color.r < 160 && r.color.g < 40 && r.color.b > 100);
+        assert!(purple, "checkbox fill uses accent-color");
+
+        // A progress bar's fill follows accent-color too.
+        let doc2 = parse("<progress value=\"0.5\" max=\"1\" style=\"accent-color:#800080\"></progress>");
+        let l2 = layout(&doc2, &font, 400.0, &ImageSizes::new());
+        let track = l2.rects.iter().find(|r| r.w > 100.0).unwrap();
+        let fill_purple = l2.rects.iter().any(|r| r.w < track.w && r.color.r > 100 && r.color.g < 40 && r.color.b > 100);
+        assert!(fill_purple, "progress fill uses accent-color");
     }
 
     #[test]
