@@ -1450,4 +1450,88 @@ hi</pre>
 |         "1"
 |       <li>
 |         "2"
+
+#data
+<table><thead><tr><th>H</th></tr></thead><tbody><tr><td>D</td></tr></tbody></table>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <table>
+|       <thead>
+|         <tr>
+|           <th>
+|             "H"
+|       <tbody>
+|         <tr>
+|           <td>
+|             "D"
+
+#data
+<hr>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <hr>
+
+#data
+<input type="text" name="q" value="hi">
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <input>
+|       name="q"
+|       type="text"
+|       value="hi"
+
+#data
+<!--a--><p>b</p>
+#errors
+#document
+| <!-- a -->
+| <html>
+|   <head>
+|   <body>
+|     <p>
+|       "b"
+
+#data
+<strong><em>x</em></strong>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <strong>
+|       <em>
+|         "x"
+
+#data
+<label>Name: <input></label>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <label>
+|       "Name: "
+|       <input>
+
+#data
+<dl><dt>a</dt><dd>b</dd></dl>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <dl>
+|       <dt>
+|         "a"
+|       <dd>
+|         "b"
 "####;
