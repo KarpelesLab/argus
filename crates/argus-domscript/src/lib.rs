@@ -324,6 +324,14 @@ function __argus_el(tgt) {
       if (k === "click") {
         return function() { __argus_dispatch(tgt.kind, tgt.val, "click"); };
       }
+      // el.dispatchEvent(ev): fire handlers registered for ev.type, passing the
+      // event object through so handlers can read .detail/.type/.target.
+      if (k === "dispatchEvent") {
+        return function(ev) {
+          if (ev && ev.type) __argus_dispatch_ev(tgt.kind, tgt.val, ev);
+          return !(ev && ev.defaultPrevented);
+        };
+      }
       // focus/blur/scrollIntoView: accepted no-ops (no real viewport here).
       if (k === "focus" || k === "blur" || k === "scrollIntoView") {
         return function() {};
@@ -409,13 +417,31 @@ function __argus_el(tgt) {
 }
 // Fire registered handlers of `type` on element {kind,val} (for replay dispatch).
 function __argus_dispatch(kind, val, type) {
+  __argus_dispatch_ev(kind, val, {type: type});
+}
+// Fire registered handlers for an event object's type on element {kind,val};
+// the handler receives the event itself (target/currentTarget filled in).
+function __argus_dispatch_ev(kind, val, ev) {
+  ev.target = ev.currentTarget = __argus_el({kind: kind, val: val});
   var ls = __argus_listeners[kind + "" + val];
   if (!ls) return;
-  var ev = {type: type, target: __argus_el({kind: kind, val: val})};
   for (var i = 0; i < ls.length; i++) {
-    if (ls[i].type === type) { ls[i].fn(ev); }
+    if (ls[i].type === ev.type) { ls[i].fn(ev); }
   }
 }
+// Event / CustomEvent constructors (no `this`; closure over the instance).
+function Event(type, opts) {
+  opts = opts || {};
+  var ev = {
+    type: "" + type, bubbles: !!opts.bubbles, cancelable: !!opts.cancelable,
+    detail: (opts.detail !== undefined ? opts.detail : null),
+    defaultPrevented: false, target: null, currentTarget: null,
+    stopPropagation: function() {}, stopImmediatePropagation: function() {}
+  };
+  ev.preventDefault = function() { ev.defaultPrevented = true; };
+  return ev;
+}
+function CustomEvent(type, opts) { return Event(type, opts); }
 var __newCount = 0;
 var document = {
   getElementById: function(id) { return __argus_el({kind: "id", val: "" + id}); },
@@ -513,6 +539,9 @@ window.matchMedia = function(q) {
     dispatchEvent: function() { return false; }
   };
 };
+// Expose the Event/CustomEvent constructors as globals (window.* and bare).
+window.Event = Event;
+window.CustomEvent = CustomEvent;
 
 // `MutationObserver`: a no-op stub (we reconcile synchronously, so there are no
 // async mutation records to deliver). Scripts that construct one won't break.
@@ -1964,6 +1993,38 @@ mod tests {
         let mut doc = argus_html::parse(html);
         apply_scripts_with_events(&mut doc, &[click.clone(), click.clone()]);
         assert_eq!(text_of(&doc, "n"), "12");
+    }
+
+    #[test]
+    fn custom_event_dispatch_carries_detail() {
+        // A script registers a handler for a custom event, then synchronously
+        // dispatches `new CustomEvent('ping', {detail: 42})`. The handler must run
+        // and read the carried `detail`, writing it into the DOM.
+        let html = "<div id=\"out\"></div>\
+             <script>\
+               var el = document.getElementById('out');\
+               el.addEventListener('ping', function(e){\
+                 el.textContent = 'got:' + e.detail + ':' + e.type;\
+               });\
+               el.dispatchEvent(new CustomEvent('ping', {detail: 42}));\
+             </script>";
+        let mut doc = argus_html::parse(html);
+        apply_scripts_with_events(&mut doc, &[]);
+        assert_eq!(text_of(&doc, "out"), "got:42:ping");
+    }
+
+    #[test]
+    fn dispatch_event_only_fires_matching_type() {
+        // Dispatching a 'foo' event must not trigger a 'bar' listener.
+        let html = "<div id=\"out\">init</div>\
+             <script>\
+               var el = document.getElementById('out');\
+               el.addEventListener('bar', function(){ el.textContent = 'bar-fired'; });\
+               el.dispatchEvent(new Event('foo'));\
+             </script>";
+        let mut doc = argus_html::parse(html);
+        apply_scripts_with_events(&mut doc, &[]);
+        assert_eq!(text_of(&doc, "out"), "init");
     }
 
     #[test]
