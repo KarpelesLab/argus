@@ -715,6 +715,9 @@ impl Ctx<'_> {
         // it (we don't clip overflow, so taller content still grows the box). Both
         // only extend, so the larger target wins.
         let content_top = border_box_top + style.border.top + style.padding.top;
+        // The natural content bottom (before any height/aspect extension) — `max-height`
+        // never shrinks below this, since overflow isn't clipped.
+        let natural_bottom = self.cursor_y;
         for len in [style.height, style.min_height].into_iter().flatten() {
             let target = content_top + len.to_px(style.font_size, content_w);
             if self.cursor_y < target {
@@ -729,6 +732,11 @@ impl Ctx<'_> {
                     self.cursor_y = target;
                 }
             }
+        }
+        // `max-height` caps the extended height, but never below the actual content.
+        if let Some(mh) = style.max_height {
+            let cap = content_top + mh.to_px(style.font_size, content_w);
+            self.cursor_y = self.cursor_y.min(cap).max(natural_bottom);
         }
 
         self.cursor_y += style.padding.bottom + style.border.bottom;
@@ -3446,6 +3454,25 @@ borderdisplay0123floatleftrightclearbothfrgrowshrinkwrapspanabsolutefixedrelativ
         assert!(
             b.baseline > 200.0,
             "second block should start below the 200px min-height, got {}",
+            b.baseline
+        );
+    }
+
+    #[test]
+    fn max_height_caps_an_explicit_height() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // height:300px capped by max-height:120px → the box is 120px tall, so the
+        // following block starts around 120px (not 300px).
+        let html = "<div style=\"height:300px; max-height:120px\">a</div><div id=\"next\">b</div>";
+        let doc = parse(html);
+        let lay = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let b = lay.runs.iter().find(|r| r.text == "b").unwrap();
+        assert!(
+            b.baseline > 120.0 && b.baseline < 180.0,
+            "max-height should cap the 300px height to ~120px, got {}",
             b.baseline
         );
     }
