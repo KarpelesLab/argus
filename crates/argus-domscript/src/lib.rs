@@ -640,10 +640,11 @@ var window = document.window = document;
 
 // Viewport metrics (the default headless/window viewport). Scripts read these for
 // responsive logic; scroll offsets are always 0 (no scrolling in this model).
-window.innerWidth = 800;
-window.innerHeight = 600;
-window.scrollX = window.pageXOffset = 0;
-window.scrollY = window.pageYOffset = 0;
+var __vp = __VIEWPORT__;
+window.innerWidth = __vp.w;
+window.innerHeight = __vp.h;
+window.scrollX = window.pageXOffset = __vp.sx;
+window.scrollY = window.pageYOffset = __vp.sy;
 window.devicePixelRatio = 1;
 window.scroll = window.scrollTo = window.scrollBy = function() {};
 window.screen = {
@@ -865,21 +866,21 @@ pub struct Interaction {
 /// Returns the console output (minus the internal ops line) for logging.
 pub fn apply_scripts(doc: &mut Document) -> Option<String> {
     let mut storage = std::collections::HashMap::new();
-    run_scripts(doc, &[], &mut storage, &[], None, &[])
+    run_scripts(doc, &[], &mut storage, &[], None, &[], DEFAULT_VIEWPORT)
 }
 
 /// Like [`apply_scripts`], but seeds `window.location` from `url` so scripts can
 /// read `location.href`/`pathname`/`search`/`hash`/etc.
 pub fn apply_scripts_with_url(doc: &mut Document, url: Option<&str>) -> Option<String> {
     let mut storage = std::collections::HashMap::new();
-    run_scripts(doc, &[], &mut storage, &[], url, &[])
+    run_scripts(doc, &[], &mut storage, &[], url, &[], DEFAULT_VIEWPORT)
 }
 
 /// Like [`apply_scripts`], but also replays `events` (deterministic event replay)
 /// with a throwaway storage (no cross-call persistence).
 pub fn apply_scripts_with_events(doc: &mut Document, events: &[Interaction]) -> Option<String> {
     let mut storage = std::collections::HashMap::new();
-    run_scripts(doc, events, &mut storage, &[], None, &[])
+    run_scripts(doc, events, &mut storage, &[], None, &[], DEFAULT_VIEWPORT)
 }
 
 /// Like [`apply_scripts`], but also honors **header-delivered** Content-Security-
@@ -888,7 +889,7 @@ pub fn apply_scripts_with_events(doc: &mut Document, events: &[Interaction]) -> 
 /// blocked if *any* meta or header policy forbids them.
 pub fn apply_scripts_with_csp(doc: &mut Document, header_csp: &[String]) -> Option<String> {
     let mut storage = std::collections::HashMap::new();
-    run_scripts(doc, &[], &mut storage, header_csp, None, &[])
+    run_scripts(doc, &[], &mut storage, header_csp, None, &[], DEFAULT_VIEWPORT)
 }
 
 /// The full session entry point: run scripts, replay `events`, and persist
@@ -899,7 +900,7 @@ pub fn apply_scripts_session(
     events: &[Interaction],
     storage: &mut std::collections::HashMap<String, String>,
 ) -> Option<String> {
-    run_scripts(doc, events, storage, &[], None, &[])
+    run_scripts(doc, events, storage, &[], None, &[], DEFAULT_VIEWPORT)
 }
 
 /// Like [`apply_scripts_session`], plus per-`id` element geometry (`[x, y, w, h]`)
@@ -910,9 +911,14 @@ pub fn apply_scripts_session_geom(
     events: &[Interaction],
     storage: &mut std::collections::HashMap<String, String>,
     geometry: &[(String, [f32; 4])],
+    viewport: [u32; 4],
 ) -> Option<String> {
-    run_scripts(doc, events, storage, &[], None, geometry)
+    run_scripts(doc, events, storage, &[], None, geometry, viewport)
 }
+
+/// Default window metrics (`[width, height, scrollX, scrollY]`) for callers that
+/// don't supply them.
+const DEFAULT_VIEWPORT: [u32; 4] = [800, 600, 0, 0];
 
 fn run_scripts(
     doc: &mut Document,
@@ -921,6 +927,7 @@ fn run_scripts(
     header_csp: &[String],
     url: Option<&str>,
     geometry: &[(String, [f32; 4])],
+    viewport: [u32; 4],
 ) -> Option<String> {
     let all_scripts = collect_scripts(doc);
     if all_scripts.is_empty() {
@@ -954,7 +961,14 @@ fn run_scripts(
         .replace("__LOCATION__", &location)
         .replace("__TITLE__", &title)
         .replace("__STORAGE__", &storage_seed)
-        .replace("__GEOMETRY__", &geometry_json(geometry));
+        .replace("__GEOMETRY__", &geometry_json(geometry))
+        .replace(
+            "__VIEWPORT__",
+            &format!(
+                "{{w:{},h:{},sx:{},sy:{}}}",
+                viewport[0], viewport[1], viewport[2], viewport[3]
+            ),
+        );
     for s in &scripts {
         src.push('\n');
         src.push_str(s);
@@ -2559,7 +2573,7 @@ mod tests {
         );
         let mut storage = std::collections::HashMap::new();
         let geom = [("o".to_string(), [12.0, 34.0, 100.0, 20.0])];
-        apply_scripts_session_geom(&mut doc, &[], &mut storage, &geom);
+        apply_scripts_session_geom(&mut doc, &[], &mut storage, &geom, [800, 600, 0, 0]);
         assert_eq!(attr_of(&doc, "o", "data-w").as_deref(), Some("100"));
         assert_eq!(attr_of(&doc, "o", "data-h").as_deref(), Some("20"));
         assert_eq!(attr_of(&doc, "o", "data-x").as_deref(), Some("12"));
@@ -2574,8 +2588,22 @@ mod tests {
               '' + document.getElementById('q').getBoundingClientRect().width);</script>",
         );
         let mut s2 = std::collections::HashMap::new();
-        apply_scripts_session_geom(&mut doc2, &[], &mut s2, &geom);
+        apply_scripts_session_geom(&mut doc2, &[], &mut s2, &geom, [800, 600, 0, 0]);
         assert_eq!(attr_of(&doc2, "q", "data-w").as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn window_metrics_reflect_viewport_and_scroll() {
+        // window.innerWidth/Height + scrollY/pageYOffset come from the metrics.
+        let mut doc = argus_html::parse(
+            "<div id=\"o\">x</div>\
+             <script>document.getElementById('o').setAttribute('data-m', \
+              window.innerWidth + ',' + window.innerHeight + ',' + \
+              window.scrollY + ',' + window.pageYOffset);</script>",
+        );
+        let mut storage = std::collections::HashMap::new();
+        apply_scripts_session_geom(&mut doc, &[], &mut storage, &[], [800, 572, 0, 150]);
+        assert_eq!(attr_of(&doc, "o", "data-m").as_deref(), Some("800,572,150,150"));
     }
 
     #[test]
