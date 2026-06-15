@@ -139,6 +139,7 @@ dependencies = [
  "argus-gfx",
  "argus-html",
  "argus-style",
+ "oxideav-scribe",
 ]
 
 [[package]]

@@ -28,6 +28,8 @@ use argus_style::{
 use std::collections::HashMap;
 use std::rc::Rc;
 
+mod bidi;
+
 const PAGE_MARGIN: f32 = 8.0;
 
 /// A list-item marker: either a glyph string (numbers/letters) or a geometric
@@ -3488,6 +3490,11 @@ impl Ctx<'_> {
                 if t.starts_with(char::is_whitespace) {
                     *pending_space = true;
                 }
+                // Bidi: text containing right-to-left characters is reordered from
+                // logical into visual order so the LTR shaper paints it correctly.
+                // Pure-LTR text returns `None` and is used unchanged.
+                let reordered = bidi::reorder_visual(t);
+                let t: &str = reordered.as_deref().unwrap_or(t);
                 let shift = match style.vertical_align {
                     VerticalAlign::Sub => style.font_size * 0.2,
                     VerticalAlign::Super => -style.font_size * 0.4,
@@ -4474,6 +4481,29 @@ mod tests {
         let [cx, _, cw, _] = run.clip.expect("clip-path produces a clip");
         assert!((cw - 80.0).abs() < 1.0, "clip width = 100 - 2*10, got {cw}");
         assert!((cx - (PAGE_MARGIN + 10.0)).abs() < 1.0, "clip x inset by left, got {cx}");
+    }
+
+    #[test]
+    fn rtl_text_is_reordered_to_visual_order() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Hebrew א ב ג in a paragraph: the painted run is in visual (reversed)
+        // order ג ב א, while LTR text is untouched.
+        let doc = parse("<p>\u{05D0}\u{05D1}\u{05D2}</p>");
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let run = l.runs.iter().find(|r| !r.text.trim().is_empty()).expect("a run");
+        assert_eq!(
+            run.text.chars().collect::<Vec<_>>(),
+            vec!['\u{05D2}', '\u{05D1}', '\u{05D0}'],
+            "Hebrew reordered to visual order"
+        );
+        // A plain English paragraph keeps its logical order.
+        let doc2 = parse("<p>abc</p>");
+        let l2 = layout(&doc2, &font, 400.0, &ImageSizes::new());
+        let run2 = l2.runs.iter().find(|r| r.text.contains('a')).expect("run");
+        assert_eq!(run2.text, "abc", "LTR text unchanged");
     }
 
     #[test]

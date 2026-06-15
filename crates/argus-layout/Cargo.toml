@@ -13,6 +13,7 @@ argus-style.workspace = true
 argus-css.workspace = true
 argus-gfx.workspace = true
 argus-geometry.workspace = true
+oxideav-scribe = "0.1"
 
 [dev-dependencies]
 argus-html.workspace = true
