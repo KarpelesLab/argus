@@ -1726,7 +1726,7 @@ fn parse_linear_gradient(v: &str) -> Option<Gradient> {
             _ => GradientDir::ToBottom,
         };
         color_parts = &parts[1..];
-    } else if let Some(deg) = first.strip_suffix("deg").and_then(|d| d.trim().parse::<f32>().ok()) {
+    } else if let Some(deg) = parse_angle_deg(first) {
         let a = ((deg % 360.0) + 360.0) % 360.0;
         dir = if !(45.0..315.0).contains(&a) {
             GradientDir::ToTop
@@ -1751,6 +1751,21 @@ fn parse_linear_gradient(v: &str) -> Option<Gradient> {
         to,
         radial: false,
     })
+}
+
+/// Parse a CSS `<angle>` to degrees: a bare number or `deg`, or a `grad`/`rad`/
+/// `turn` unit (`1turn = 360deg`, `400grad = 360deg`, `2π rad = 360deg`).
+fn parse_angle_deg(s: &str) -> Option<f32> {
+    let s = s.trim();
+    if let Some(n) = s.strip_suffix("turn") {
+        Some(n.trim().parse::<f32>().ok()? * 360.0)
+    } else if let Some(n) = s.strip_suffix("grad") {
+        Some(n.trim().parse::<f32>().ok()? * 0.9)
+    } else if let Some(n) = s.strip_suffix("rad") {
+        Some(n.trim().parse::<f32>().ok()?.to_degrees())
+    } else {
+        s.trim_end_matches("deg").trim().parse::<f32>().ok()
+    }
 }
 
 /// Parse a two-stop `radial-gradient(...)` — the first color is the center, the
@@ -2090,6 +2105,19 @@ mod tests {
         let cs = computed_style(&doc, dd, &ComputedStyle::initial(), &Stylesheet::default());
         assert_eq!(cs.display, Display::Block);
         assert_eq!(cs.margin.left, 40.0, "dd is indented by the UA default");
+    }
+
+    #[test]
+    fn gradient_angle_units() {
+        // 90deg / 0.25turn / 100grad all point to the right.
+        for v in [
+            "linear-gradient(90deg, red, blue)",
+            "linear-gradient(0.25turn, red, blue)",
+            "linear-gradient(100grad, red, blue)",
+        ] {
+            let g = parse_linear_gradient(v).expect(v);
+            assert_eq!(g.dir, GradientDir::ToRight, "{v}");
+        }
     }
 
     #[test]
