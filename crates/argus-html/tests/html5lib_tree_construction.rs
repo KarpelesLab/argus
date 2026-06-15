@@ -721,4 +721,15 @@ a</br>b
 |       "x"
 |     <search>
 |       "y"
+
+#data
+<body class="a"><body id="x">hi
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     class="a"
+|     id="x"
+|     "hi"
 "####;

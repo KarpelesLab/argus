@@ -171,6 +171,18 @@ impl TreeBuilder {
         id
     }
 
+    /// Merge attributes onto an element, keeping any already present (used when a
+    /// duplicate `<html>`/`<body>` start tag carries new attributes).
+    fn merge_attrs(&mut self, node: NodeId, attrs: &[(String, String)]) {
+        if let NodeData::Element(e) = self.doc.data_mut(node) {
+            for (n, v) in attrs {
+                if !e.attrs.iter().any(|a| &*a.name == n.as_str()) {
+                    e.attrs.push(Attribute::new(n.as_str(), v.as_str()));
+                }
+            }
+        }
+    }
+
     /// The namespace of the current open element (HTML at the document root).
     fn current_ns(&self) -> Namespace {
         self.open
@@ -512,8 +524,15 @@ impl TreeBuilder {
             return;
         }
 
-        // Ignore re-openings of the structural elements.
+        // A repeated `<html>`/`<body>` start tag doesn't create a new element, but
+        // its not-yet-present attributes are merged onto the existing one. `<head>`
+        // re-openings are simply ignored.
         if matches!(name, "html" | "head" | "body") {
+            if name != "head" {
+                if let Some(&id) = self.open.iter().find(|&&id| self.is_named(id, name)) {
+                    self.merge_attrs(id, attrs);
+                }
+            }
             return;
         }
         if CLOSES_P.contains(&name) {
