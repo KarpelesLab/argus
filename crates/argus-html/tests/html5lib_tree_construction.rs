@@ -884,4 +884,37 @@ a</br>b
 |     <a>
 |       href="2"
 |       "y"
+
+#data
+<table><td>1<tr><td>2</table>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <table>
+|       <tbody>
+|         <tr>
+|           <td>
+|             "1"
+|         <tr>
+|           <td>
+|             "2"
+
+#data
+<table><tbody><tr><td>1</tbody><tbody><tr><td>2</table>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <table>
+|       <tbody>
+|         <tr>
+|           <td>
+|             "1"
+|       <tbody>
+|         <tr>
+|           <td>
+|             "2"
 "####;

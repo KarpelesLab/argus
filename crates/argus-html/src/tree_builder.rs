@@ -843,6 +843,16 @@ impl TreeBuilder {
         {
             self.pop_until("caption");
         }
+        // A new table section closes an open section/row/cell back to the table
+        // (table scope), so `<tbody>…<tbody>` produces sibling sections.
+        if matches!(name, "tbody" | "thead" | "tfoot") {
+            while matches!(
+                self.name_of(self.current()),
+                Some("td" | "th" | "tr" | "tbody" | "thead" | "tfoot")
+            ) {
+                self.open.pop();
+            }
+        }
         // A new cell or row first closes any open cell (cells are siblings); a new
         // row also closes the open row.
         if matches!(name, "td" | "th" | "tr") {
