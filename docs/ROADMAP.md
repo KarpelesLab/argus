@@ -88,7 +88,7 @@ subset), `argus-text` (cmap + glyf + Latin metrics + UAX#14 line breaking),
 raster), `argus-net` + net service (http(s) GET over rsurl), `argus-engine`.
 
 **Exit criteria:**
-- [~] HTML parser runs an **html5lib-format tree-construction conformance harness** (`crates/argus-html/tests/html5lib_tree_construction.rs`) — a curated set of core cases (implicit html/head/body, attributes, text/entity merging, comments/doctype, `p`/`li`/`dt`/`dd` auto-closing, implicit table `tbody`/`tr`, RCDATA/RAWTEXT `title`/`script`/`style`) passes at 100%, gated in CI. Expanding to the full upstream corpus + the tokenizer-test JSON suite remains.
+- [~] HTML parser runs **html5lib-format conformance harnesses** for both halves: tree-construction (`crates/argus-html/tests/html5lib_tree_construction.rs`, 37 core cases — implicit html/head/body, attribute sorting, text/entity merging, comments/doctype, `p`/`li`/`dt`/`dd`/`option`/`button` auto-closing with nested-list shielding, implicit table `tbody`/`tr`, table-text **foster-parenting**, `pre`/`textarea` newline strip, RCDATA/RAWTEXT) and tokenizer (`tests/tokenizer_conformance.rs`, 14 cases — named/numeric char refs, attribute quoting, comments, doctype, RAWTEXT/RCDATA). Both pass at 100% and are CI-gated. Expanding to the full upstream corpus + adoption-agency reconstruction remains.
 - [ ] CSS parser + selector matching + cascade for the box-model/text/colors property subset; `getComputedStyle` for that subset.
 - [ ] Block + inline layout produces a correct fragment tree for paragraphs, headings, nested blocks, basic margins/padding/borders, and wrapped Latin text.
 - [ ] `argus-text` loads a system font, shapes Latin LTR, and the rasterizer draws anti-aliased glyphs + filled rects/borders.
