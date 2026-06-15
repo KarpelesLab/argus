@@ -300,6 +300,10 @@ fn fallback_font_bytes() -> Vec<Vec<u8>> {
         "/System/Library/Fonts/Apple Symbols.ttf",     // symbols
         "/System/Library/Fonts/PingFang.ttc",          // CJK
         "/System/Library/Fonts/Hiragino Sans GB.ttc",  // CJK fallback
+        "/System/Library/Fonts/SFArabic.ttf",          // Arabic
+        "/System/Library/Fonts/GeezaPro.ttc",          // Arabic fallback
+        "/System/Library/Fonts/SFHebrew.ttf",          // Hebrew
+        "/System/Library/Fonts/Supplemental/Raanana.ttc", // Hebrew fallback
     ] {
         if let Ok(bytes) = std::fs::read(path) {
             out.push(bytes);
