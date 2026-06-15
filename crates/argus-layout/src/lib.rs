@@ -2971,10 +2971,15 @@ impl Ctx<'_> {
         } else {
             (style.fade(style.color), style.fade(style.background_color))
         };
+        // Split on *breaking* whitespace only: a no-break space (U+00A0, `&nbsp;`)
+        // stays inside its word so the two sides never wrap apart, and renders as
+        // an ordinary space.
+        let is_break_ws = |c: char| c.is_whitespace() && c != '\u{00A0}';
         let mut first = true;
-        for word in text.split_whitespace() {
+        for word in text.split(is_break_ws).filter(|w| !w.is_empty()) {
+            let rendered = transform_text(word, style.text_transform).replace('\u{00A0}', " ");
             words.push(InlineWord {
-                text: transform_text(word, style.text_transform),
+                text: rendered,
                 font_size: style.font_size,
                 color,
                 background,
@@ -2994,7 +2999,7 @@ impl Ctx<'_> {
             *pending_space = false;
             first = false;
         }
-        if text.ends_with(char::is_whitespace) {
+        if text.ends_with(is_break_ws) {
             *pending_space = true;
         }
     }
@@ -3027,8 +3032,11 @@ impl Ctx<'_> {
                 } else {
                     (style.fade(style.color), style.fade(style.background_color))
                 };
+                // Split on breaking whitespace only — a no-break space (U+00A0)
+                // stays inside its word (and renders as a space) so it never wraps.
+                let is_break_ws = |c: char| c.is_whitespace() && c != '\u{00A0}';
                 let mut first = true;
-                for word in t.split_whitespace() {
+                for word in t.split(is_break_ws).filter(|w| !w.is_empty()) {
                     // A soft hyphen (U+00AD) is a break opportunity: split the word
                     // into adjacent sub-words there (the soft hyphen itself is not
                     // rendered), so long words can wrap at those points.
@@ -3038,7 +3046,7 @@ impl Ctx<'_> {
                             continue;
                         }
                         words.push(InlineWord {
-                            text: transform_text(sub, style.text_transform),
+                            text: transform_text(sub, style.text_transform).replace('\u{00A0}', " "),
                             font_size: style.font_size,
                             color,
                             background,
@@ -3063,7 +3071,7 @@ impl Ctx<'_> {
                         first_sub = false;
                     }
                 }
-                if t.ends_with(char::is_whitespace) {
+                if t.ends_with(is_break_ws) {
                     *pending_space = true;
                 }
             }
@@ -4586,6 +4594,29 @@ mod tests {
         // Three distinct column x-positions.
         let xs: std::collections::BTreeSet<i32> = cell_runs.iter().map(|r| r.x as i32).collect();
         assert_eq!(xs.len(), 3, "expected 3 columns, got {xs:?}");
+    }
+
+    #[test]
+    fn nbsp_keeps_words_on_one_line() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Number of distinct text-run baselines (≈ line count) for the body.
+        let lines = |html: &str| -> usize {
+            let doc = parse(html);
+            let l = layout(&doc, &font, 120.0, &ImageSizes::new());
+            let mut ys: Vec<i32> = l.runs.iter().map(|r| r.baseline as i32).collect();
+            ys.sort_unstable();
+            ys.dedup();
+            ys.len()
+        };
+        // At a narrow width an ordinary space lets the two long words wrap to two
+        // lines; a no-break space (U+00A0) keeps them together on one line.
+        let with_space = lines("<p>aaaaaaaaaa bbbbbbbbbb</p>");
+        let with_nbsp = lines("<p>aaaaaaaaaa\u{00A0}bbbbbbbbbb</p>");
+        assert!(with_space >= 2, "ordinary space wraps: {with_space}");
+        assert_eq!(with_nbsp, 1, "nbsp stays on one line: {with_nbsp}");
     }
 
     #[test]
