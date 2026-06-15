@@ -28,7 +28,7 @@
 //! `innerHTML`, `className`, `setAttribute`/`getAttribute`/`toggleAttribute`,
 //! `dataset.<camelCase>` (data-* attributes), `style.<camelCase>`,
 //! `classList`, scoped `querySelector`/`querySelectorAll`, `matches`/`closest`,
-//! tree traversal (`parentNode`/`parentElement`, `children`, `childElementCount`,
+//! `contains`, tree traversal (`parentNode`/`parentElement`, `children`, `childElementCount`,
 //! `first`/`lastElementChild`, `next`/`previousElementSibling`), `tagName`/
 //! `nodeName`, and `appendChild`/`append`/`insertBefore`/`insertAdjacentHTML`/`remove`.
 
@@ -367,6 +367,22 @@ function __argus_el(tgt) {
             cix = cn.p;
           }
           return null;
+        };
+      }
+      // el.contains(other): true if `other` is this element or a descendant of it.
+      if (k === "contains") {
+        return function(other) {
+          if (!other || !other.__tgt) return false;
+          var target = __idxOf(tgt);
+          if (target < 0) return false;
+          var cix = __idxOf(other.__tgt);
+          while (cix >= 0) {
+            if (cix === target) return true;
+            var cn = __byIdx[cix];
+            if (!cn) break;
+            cix = cn.p;
+          }
+          return false;
         };
       }
       // --- Read-only tree traversal (resolved against the seeded __tree) ---
@@ -2193,6 +2209,27 @@ mod tests {
         apply_scripts(&mut doc);
         assert_eq!(attr_of(&doc, "card", "data-found").as_deref(), Some("yes"));
         assert_eq!(attr_of(&doc, "card", "data-self").as_deref(), Some("y"));
+    }
+
+    #[test]
+    fn contains_tests_ancestor_descendant() {
+        // node.contains(other): true for a descendant (and self), false otherwise.
+        let mut doc = argus_html::parse(
+            "<div id=\"outer\"><div id=\"mid\"><span id=\"inner\">x</span></div></div>\
+             <div id=\"other\">y</div>\
+             <script>\
+               var outer = document.getElementById('outer');\
+               var inner = document.getElementById('inner');\
+               var other = document.getElementById('other');\
+               outer.setAttribute('data-desc', outer.contains(inner) ? 'y' : 'n');\
+               outer.setAttribute('data-self', outer.contains(outer) ? 'y' : 'n');\
+               outer.setAttribute('data-out', outer.contains(other) ? 'y' : 'n');\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        assert_eq!(attr_of(&doc, "outer", "data-desc").as_deref(), Some("y"));
+        assert_eq!(attr_of(&doc, "outer", "data-self").as_deref(), Some("y"));
+        assert_eq!(attr_of(&doc, "outer", "data-out").as_deref(), Some("n"));
     }
 
     #[test]
