@@ -5,7 +5,7 @@
 //! the `oxideav-core` registry, YUV→RGBA through `oxideav-pixfmt`), **WebP**
 //! (`oxideav-webp`, lossless), **QOI** (`oxideav-qoi`), and **ICO/CUR favicons**
 //! (`oxideav-ico`, largest sub-image) — plus uncompressed 1/4/8-bit-palette & 24/32-bit BMP, **TGA**
-//! (Truevision true-color + grayscale, uncompressed + RLE), **Netpbm** (PPM/PGM,
+//! (Truevision true-color, grayscale, + color-mapped, uncompressed + RLE), **Netpbm** (PPM/PGM,
 //! ASCII + binary), **PCX** (RLE 24-bit + 8-bit palette), **TIFF** (baseline
 //! uncompressed + PackBits + LZW + Deflate RGB/RGBA/grayscale, horizontal predictor, both byte orders), all built in, and `data:` URLs.
 //! AVIF and lossy-WebP
@@ -405,10 +405,29 @@ fn decode_bmp_rle(
 }
 
 /// Decode a TGA (Truevision Targa) image: uncompressed (type 2) or RLE (type 10)
-/// true-color (24-bit BGR / 32-bit BGRA), or uncompressed (type 3) / RLE (type 11)
-/// 8-bit grayscale. Color-mapped variants are not handled. TGA has no leading
-/// magic, so this is tried last and validates the header structurally (bounded
-/// reads fail closed on malformed data).
+/// true-color (24-bit BGR / 32-bit BGRA), uncompressed (type 3) / RLE (type 11)
+/// 8-bit grayscale, or uncompressed (type 1) / RLE (type 9) 8-bit color-mapped
+/// (15/16/24/32-bit palette). TGA has no leading magic, so this is tried last and
+/// validates the header structurally (bounded reads fail closed on malformed data).
+/// Convert one TGA color-map entry to RGBA. 15/16-bit are little-endian BGR555
+/// (the top bit is an unused/attribute bit); 24-bit is BGR; 32-bit is BGRA.
+fn tga_cmap_color(entry: &[u8], bits: usize) -> [u8; 4] {
+    match bits {
+        15 | 16 => {
+            let v = u16::from_le_bytes([entry[0], entry[1]]);
+            let expand = |c: u16| ((c << 3) | (c >> 2)) as u8; // 5-bit → 8-bit
+            [
+                expand((v >> 10) & 0x1F),
+                expand((v >> 5) & 0x1F),
+                expand(v & 0x1F),
+                0xFF,
+            ]
+        }
+        24 => [entry[2], entry[1], entry[0], 0xFF],
+        _ => [entry[2], entry[1], entry[0], entry[3]], // 32-bit BGRA
+    }
+}
+
 fn decode_tga(bytes: &[u8]) -> Option<DecodedImage> {
     if bytes.len() < 18 {
         return None;
@@ -423,20 +442,39 @@ fn decode_tga(bytes: &[u8]) -> Option<DecodedImage> {
     let depth = bytes[16] as usize;
     let descriptor = bytes[17];
 
-    // Uncompressed (2) / RLE (10) true-color at 24/32-bit, or uncompressed (3) /
-    // RLE (11) grayscale at 8-bit. (Color-mapped variants aren't handled.)
+    // Uncompressed (2) / RLE (10) true-color at 24/32-bit, uncompressed (3) /
+    // RLE (11) grayscale at 8-bit, or uncompressed (1) / RLE (9) color-mapped with
+    // an 8-bit index into a 15/16/24/32-bit palette.
     let truecolor = (img_type == 2 || img_type == 10) && (depth == 24 || depth == 32);
     let grayscale = (img_type == 3 || img_type == 11) && depth == 8;
-    let rle = img_type == 10 || img_type == 11;
-    if (!truecolor && !grayscale) || cmap_type > 1 {
+    let colormapped = (img_type == 1 || img_type == 9)
+        && cmap_type == 1
+        && depth == 8
+        && matches!(cmap_entry_bits, 15 | 16 | 24 | 32);
+    let rle = img_type == 10 || img_type == 11 || img_type == 9;
+    if (!truecolor && !grayscale && !colormapped) || cmap_type > 1 {
         return None;
     }
     if width == 0 || height == 0 || (width as u64) * (height as u64) > 64_000_000 {
         return None;
     }
     let bpp = depth / 8;
+    let cmap_first = u16::from_le_bytes([bytes[3], bytes[4]]) as usize;
+    let cmap_off = 18 + id_len;
+    let entry_bytes = cmap_entry_bits.div_ceil(8);
+    // Parse the color map (when present) into RGBA entries for index lookup.
+    let palette: Option<Vec<[u8; 4]>> = if colormapped {
+        let mut pal = Vec::with_capacity(cmap_len);
+        for i in 0..cmap_len {
+            let o = cmap_off + i * entry_bytes;
+            pal.push(tga_cmap_color(bytes.get(o..o + entry_bytes)?, cmap_entry_bits));
+        }
+        Some(pal)
+    } else {
+        None
+    };
     let cmap_bytes = if cmap_type == 1 {
-        cmap_len * cmap_entry_bits.div_ceil(8)
+        cmap_len * entry_bytes
     } else {
         0
     };
@@ -445,6 +483,18 @@ fn decode_tga(bytes: &[u8]) -> Option<DecodedImage> {
     // Pixels in stored order (first stored pixel first); flipped to top-down below.
     let mut px = vec![0u8; npx * 4];
     let read_pixel = |bytes: &[u8], p: &mut usize, out: &mut [u8]| -> Option<()> {
+        // Color-mapped: one index byte resolved through the palette.
+        if let Some(pal) = &palette {
+            let i = *bytes.get(*p)? as usize;
+            let c = i
+                .checked_sub(cmap_first)
+                .and_then(|j| pal.get(j))
+                .copied()
+                .unwrap_or([0, 0, 0, 0xFF]);
+            out.copy_from_slice(&c);
+            *p += 1;
+            return Some(());
+        }
         let (r, g, b, a) = if bpp == 1 {
             // 8-bit grayscale: one luminance byte, opaque.
             let l = *bytes.get(*p)?;
@@ -1222,6 +1272,30 @@ mod tests {
         b[16] = depth;
         b[17] = descriptor;
         b
+    }
+
+    #[test]
+    fn decodes_colormapped_tga() {
+        // A 2x1 color-mapped TGA (type 1): palette[0]=red, [1]=green; pixels 0,1.
+        let mut b = vec![0u8; 18];
+        b[1] = 1; // colormap type = present
+        b[2] = 1; // image type = uncompressed color-mapped
+        b[5..7].copy_from_slice(&2u16.to_le_bytes()); // colormap length
+        b[7] = 24; // colormap entry size (bits)
+        b[12..14].copy_from_slice(&2u16.to_le_bytes()); // width
+        b[14..16].copy_from_slice(&1u16.to_le_bytes()); // height
+        b[16] = 8; // index depth
+        b[17] = 0x20; // top-down
+        // Color map (BGR): 0 = red, 1 = green.
+        b.extend_from_slice(&[0, 0, 255]); // red
+        b.extend_from_slice(&[0, 255, 0]); // green
+        // Pixel indices.
+        b.extend_from_slice(&[0, 1]);
+
+        let img = decode(&b).expect("decode color-mapped tga");
+        assert_eq!((img.width, img.height), (2, 1));
+        assert_eq!(&img.rgba[0..4], &[255, 0, 0, 255], "px0 red");
+        assert_eq!(&img.rgba[4..8], &[0, 255, 0, 255], "px1 green");
     }
 
     #[test]
