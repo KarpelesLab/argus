@@ -323,8 +323,10 @@ fn supports_property(prop: &str) -> bool {
 }
 
 /// Whether a `@media` query matches a viewport `viewport_width` px wide. Supports
-/// `screen`/`all`/`print`, `(min-width)`/`(max-width)`/`(width)` in px/em, comma
-/// lists (OR), `and` (AND), and a leading `not` (negation). Unknown features are
+/// `screen`/`all`/`print`, `(min-width)`/`(max-width)`/`(width)` in px/em, the
+/// keyword features `prefers-color-scheme`/`prefers-reduced-motion`/`hover`/
+/// `pointer`/`orientation` (answered for a typical desktop screen), comma lists
+/// (OR), `and` (AND), and a leading `not` (negation). Unknown features are
 /// treated as non-matching.
 pub fn media_query_matches(query: &str, viewport_width: f32) -> bool {
     let q = query.trim();
@@ -347,8 +349,9 @@ fn media_branch_matches(branch: &str, vw: f32) -> bool {
         Some(rest) => (true, rest.trim().to_string()),
         None => (false, branch),
     };
-    // Every `and`-joined condition must hold.
-    let matched = branch.split("and").all(|cond| {
+    // Every `and`-joined condition must hold. Split on the ` and ` keyword (with
+    // surrounding spaces) so a value like `landscape` isn't split on its "and".
+    let matched = branch.split(" and ").all(|cond| {
         let cond = cond.trim().trim_start_matches("only ").trim();
         if cond.is_empty() || cond == "screen" || cond == "all" {
             return true;
@@ -361,7 +364,19 @@ fn media_branch_matches(branch: &str, vw: f32) -> bool {
                 return false;
             };
             let feat = feat.trim();
-            let px = parse_length(val.trim()).map(|l| l.to_px(16.0, vw));
+            let val = val.trim();
+            // Keyword features answered for a typical desktop screen (no dark mode,
+            // a fine pointer that can hover, landscape, no reduced-motion).
+            match feat {
+                "prefers-color-scheme" => return matches!(val, "light" | "no-preference"),
+                "prefers-reduced-motion" => return val == "no-preference",
+                "prefers-contrast" => return matches!(val, "no-preference" | "standard"),
+                "hover" | "any-hover" => return val == "hover",
+                "pointer" | "any-pointer" => return val == "fine",
+                "orientation" => return val == "landscape",
+                _ => {}
+            }
+            let px = parse_length(val).map(|l| l.to_px(16.0, vw));
             return match (feat, px) {
                 ("min-width", Some(p)) => vw >= p,
                 ("max-width", Some(p)) => vw <= p,
@@ -590,6 +605,19 @@ mod tests {
         // Exact `(width:)`.
         assert!(media_query_matches("(width: 800px)", 800.0));
         assert!(!media_query_matches("(width: 800px)", 700.0));
+
+        // Keyword features: desktop-screen defaults (light, fine pointer, hover,
+        // landscape, no reduced motion).
+        assert!(media_query_matches("(prefers-color-scheme: light)", 800.0));
+        assert!(!media_query_matches("(prefers-color-scheme: dark)", 800.0));
+        assert!(media_query_matches("(hover: hover)", 800.0));
+        assert!(!media_query_matches("(hover: none)", 800.0));
+        assert!(media_query_matches("(pointer: fine)", 800.0));
+        assert!(media_query_matches("(orientation: landscape)", 800.0));
+        assert!(!media_query_matches("(orientation: portrait)", 800.0));
+        assert!(media_query_matches("(prefers-reduced-motion: no-preference)", 800.0));
+        // Combined with width.
+        assert!(media_query_matches("(prefers-color-scheme: light) and (min-width: 600px)", 700.0));
 
         // A matching media rule overrides a base rule via matching_media().
         let sheet =
