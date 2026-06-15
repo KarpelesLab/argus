@@ -30,8 +30,8 @@
 //! `classList`, scoped `querySelector`/`querySelectorAll`, `matches`/`closest`,
 //! `contains`, tree traversal (`parentNode`/`parentElement`, `children`, `childElementCount`,
 //! `first`/`lastElementChild`, `next`/`previousElementSibling`), `tagName`/
-//! `nodeName`, and `appendChild`/`append`/`insertBefore`/`insertAdjacentHTML`/
-//! `before`/`after`/`replaceWith`/`remove`.
+//! `nodeName`, and `appendChild`/`append`/`prepend`/`insertBefore`/
+//! `insertAdjacentHTML`/`before`/`after`/`replaceWith`/`replaceChildren`/`remove`.
 
 use argus_dom::{Attribute, Document, NodeData, NodeId, QualName};
 
@@ -316,6 +316,39 @@ function __argus_el(tgt) {
           __argus_ops.push({op: "insertBefore", tgt: tgt,
             child: child ? child.__tgt : null, ref: ref ? ref.__tgt : null});
           return child;
+        };
+      }
+      // el.prepend(...nodes): insert nodes as the first children (before the first
+      // existing element child, else append).
+      if (k === "prepend") {
+        return function() {
+          var meIx = __idxOf(tgt);
+          var firstTgt = null;
+          for (var fi = 0; fi < __tree.length; fi++) {
+            if (__tree[fi].p === meIx) { firstTgt = {kind: "idx", val: __tree[fi].i}; break; }
+          }
+          for (var a = 0; a < arguments.length; a++) {
+            var n = arguments[a];
+            if (n && n.__tgt) {
+              __argus_ops.push({op: "insertBefore", tgt: tgt, child: n.__tgt, ref: firstTgt});
+            }
+          }
+        };
+      }
+      // el.replaceChildren(...nodes): remove all current children, then append the
+      // given nodes (only element children are tracked for removal).
+      if (k === "replaceChildren") {
+        return function() {
+          var meIx = __idxOf(tgt);
+          for (var ri = 0; ri < __tree.length; ri++) {
+            if (__tree[ri].p === meIx) {
+              __argus_ops.push({op: "remove", tgt: {kind: "idx", val: __tree[ri].i}});
+            }
+          }
+          for (var a = 0; a < arguments.length; a++) {
+            var n = arguments[a];
+            if (n && n.__tgt) __argus_ops.push({op: "append", tgt: tgt, child: n.__tgt});
+          }
         };
       }
       if (k === "remove") {
@@ -2297,6 +2330,33 @@ mod tests {
         let apos = text.find('A');
         assert!(bpos.is_some() && rpos.is_some() && apos.is_some(), "got {text:?}");
         assert!(bpos < rpos && rpos < apos, "order B<ref<A, got {text:?}");
+    }
+
+    #[test]
+    fn prepend_and_replace_children() {
+        // prepend inserts a new first child; replaceChildren clears then re-fills.
+        let mut doc = argus_html::parse(
+            "<ul id=\"l\"><li id=\"keep\">keep</li></ul>\
+             <script>\
+               var l = document.getElementById('l');\
+               var first = document.createElement('li'); first.textContent = 'FIRST';\
+               l.prepend(first);\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        let text = text_of(&doc, "l");
+        assert!(text.find("FIRST") < text.find("keep"), "prepend before existing: {text:?}");
+
+        let mut doc2 = argus_html::parse(
+            "<div id=\"box\"><span>old1</span><span>old2</span></div>\
+             <script>\
+               var n = document.createElement('span'); n.textContent = 'NEW';\
+               document.getElementById('box').replaceChildren(n);\
+             </script>",
+        );
+        apply_scripts(&mut doc2);
+        let t2 = text_of(&doc2, "box");
+        assert!(t2.contains("NEW") && !t2.contains("old1") && !t2.contains("old2"), "replaced: {t2:?}");
     }
 
     #[test]
