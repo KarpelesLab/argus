@@ -95,6 +95,20 @@ pub enum FlexDirection {
     Column,
 }
 
+/// The most grid columns we track per container (keeps [`ComputedStyle`] `Copy`).
+pub const GRID_MAX_TRACKS: usize = 16;
+
+/// A single `grid-template-columns` track size.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum GridTrack {
+    /// A flexible `<n>fr` track that shares leftover space by its factor.
+    Fr(f32),
+    /// A fixed length (`px`, `em`, `%`, …), resolved against the container width.
+    Len(Length),
+    /// `auto` / content-sized — treated as `1fr` by the layout subset.
+    Auto,
+}
+
 /// `justify-content` — main-axis distribution of free space in a flex container.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum JustifyContent {
@@ -170,6 +184,9 @@ pub struct ComputedStyle {
     pub strike: bool,
     /// Column count for a grid container (from `grid-template-columns`).
     pub grid_columns: u32,
+    /// Per-column track sizes (parallel to `grid_columns`, capped at
+    /// [`GRID_MAX_TRACKS`]). Unspecified tracks are [`GridTrack::Auto`].
+    pub grid_tracks: [GridTrack; GRID_MAX_TRACKS],
     /// `flex-direction` for a `display: flex` container (not inherited).
     pub flex_direction: FlexDirection,
     /// `justify-content` — main-axis free-space distribution (flex container).
@@ -244,6 +261,7 @@ impl ComputedStyle {
             underline: false,
             strike: false,
             grid_columns: 1,
+            grid_tracks: [GridTrack::Auto; GRID_MAX_TRACKS],
             flex_direction: FlexDirection::Row,
             justify_content: JustifyContent::FlexStart,
             align_items: AlignItems::Stretch,
@@ -863,7 +881,9 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         cs.aspect_ratio = parse_aspect_ratio(v);
     }
     if let Some(v) = map.get("grid-template-columns") {
-        cs.grid_columns = grid_track_count(v);
+        let (cols, tracks) = parse_grid_tracks(v);
+        cs.grid_columns = cols;
+        cs.grid_tracks = tracks;
     }
     if let Some(v) = map
         .get("flex-direction")
@@ -967,18 +987,62 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
 
 /// Count the columns named by a `grid-template-columns` value (a simplified read
 /// of `repeat(n, …)` and whitespace-separated track lists).
-fn grid_track_count(v: &str) -> u32 {
+/// Parse `grid-template-columns` into a track list (count + sizes). Supports a
+/// flat list of `<n>fr` / lengths / `auto`, plus a single leading
+/// `repeat(n, <track>...)`. The track list is capped at [`GRID_MAX_TRACKS`].
+fn parse_grid_tracks(v: &str) -> (u32, [GridTrack; GRID_MAX_TRACKS]) {
+    let mut tracks = [GridTrack::Auto; GRID_MAX_TRACKS];
+    let mut count = 0usize;
+    let mut push = |t: GridTrack| {
+        if count < GRID_MAX_TRACKS {
+            tracks[count] = t;
+            count += 1;
+        }
+    };
+    let parse_one = |tok: &str| -> GridTrack {
+        let tok = tok.trim();
+        if let Some(fr) = tok.strip_suffix("fr") {
+            GridTrack::Fr(fr.trim().parse::<f32>().unwrap_or(1.0).max(0.0))
+        } else if tok == "auto" || tok == "min-content" || tok == "max-content" {
+            GridTrack::Auto
+        } else if tok.starts_with("minmax(") {
+            // Approximate `minmax(a, b)` by its max term.
+            tok.trim_start_matches("minmax(")
+                .trim_end_matches(')')
+                .split(',')
+                .nth(1)
+                .map(parse_one_len)
+                .unwrap_or(GridTrack::Auto)
+        } else {
+            parse_one_len(tok)
+        }
+    };
     let v = v.trim();
+    // Expand a single leading `repeat(n, <tracks>)`.
     if let Some(rest) = v.strip_prefix("repeat(") {
-        if let Some(n) = rest
-            .split(',')
-            .next()
-            .and_then(|s| s.trim().parse::<u32>().ok())
-        {
-            return n.max(1);
+        let inner = rest.strip_suffix(')').unwrap_or(rest);
+        if let Some((n_str, tracks_str)) = inner.split_once(',') {
+            if let Ok(n) = n_str.trim().parse::<u32>() {
+                for _ in 0..n {
+                    for tok in tracks_str.split_whitespace() {
+                        push(parse_one(tok));
+                    }
+                }
+                return (count.max(1) as u32, tracks);
+            }
         }
     }
-    (v.split_whitespace().count() as u32).max(1)
+    for tok in v.split_whitespace() {
+        push(parse_one(tok));
+    }
+    (count.max(1) as u32, tracks)
+}
+
+/// Parse a single fixed-length grid track token (falling back to `Auto`).
+fn parse_one_len(tok: &str) -> GridTrack {
+    parse_length(tok.trim())
+        .map(GridTrack::Len)
+        .unwrap_or(GridTrack::Auto)
 }
 
 /// Resolve per-side overrides like `margin-top`, `padding-left`.

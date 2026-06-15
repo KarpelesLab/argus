@@ -21,8 +21,8 @@ use argus_dom::{Document, ElementData, NodeData, NodeId};
 use argus_gfx::{Font, RectFill, TextRun};
 use argus_style::{
     author_stylesheet, computed_style, AlignItems, AuthorStylesheet, BoxSizing, ComputedStyle,
-    Display, FlexDirection, JustifyContent, Length, ListStyle, Position, PseudoElement, TextAlign,
-    TextTransform, VerticalAlign,
+    Display, FlexDirection, GridTrack, JustifyContent, Length, ListStyle, Position, PseudoElement,
+    TextAlign, TextTransform, VerticalAlign,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -1386,8 +1386,43 @@ impl Ctx<'_> {
         });
 
         self.cursor_y += style.border.top + style.padding.top;
-        let col_w =
-            ((content_w - style.gap * (cols.saturating_sub(1)) as f32) / cols as f32).max(0.0);
+        // Resolve each column's width from its track size: fixed lengths take their
+        // value; `fr` (and `auto`, treated as `1fr`) share the leftover space by
+        // factor. Then compute each column's left edge (cumulative + gaps).
+        let tracks = &style.grid_tracks[..cols];
+        let fs = style.font_size;
+        let fixed_sum: f32 = tracks
+            .iter()
+            .map(|t| match t {
+                GridTrack::Len(l) => l.to_px(fs, content_w).max(0.0),
+                _ => 0.0,
+            })
+            .sum();
+        let fr_total: f32 = tracks
+            .iter()
+            .map(|t| match t {
+                GridTrack::Fr(f) => *f,
+                GridTrack::Auto => 1.0,
+                GridTrack::Len(_) => 0.0,
+            })
+            .sum();
+        let gaps = style.gap * (cols.saturating_sub(1)) as f32;
+        let free = (content_w - fixed_sum - gaps).max(0.0);
+        let fr_unit = if fr_total > 0.0 { free / fr_total } else { 0.0 };
+        let col_w: Vec<f32> = tracks
+            .iter()
+            .map(|t| match t {
+                GridTrack::Len(l) => l.to_px(fs, content_w).max(0.0),
+                GridTrack::Fr(f) => f * fr_unit,
+                GridTrack::Auto => fr_unit,
+            })
+            .collect();
+        let mut col_x = Vec::with_capacity(cols);
+        let mut acc = content_left;
+        for w in &col_w {
+            col_x.push(acc);
+            acc += w + style.gap;
+        }
         let mut idx = 0;
         let mut first_row = true;
         while idx < items.len() {
@@ -1405,8 +1440,7 @@ impl Ctx<'_> {
                 idx += 1;
                 self.cursor_y = row_top;
                 let istyle = computed_style(self.doc, item, &style, self.author);
-                let item_x = content_left + c as f32 * (col_w + style.gap);
-                self.layout_block(item, istyle, item_x, col_w, None);
+                self.layout_block(item, istyle, col_x[c], col_w[c], None);
                 max_h = max_h.max(self.cursor_y - row_top);
             }
             self.cursor_y = row_top + max_h;
@@ -2997,5 +3031,49 @@ mod tests {
             cy > ay + 10.0 && (cx - ax).abs() < 1.0,
             "c not under a on row 2"
         );
+    }
+
+    #[test]
+    fn grid_fixed_and_fr_tracks_size_columns() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // `100px 1fr 2fr` in a 400px content box (no gap): col0=100, remaining 300
+        // split 1:2 → col1=100, col2=200. Column left edges: 0, 100, 200 (+page
+        // margin 8). Items "a","b","c" land in those columns.
+        let html = "<div style=\"display:grid; width:400px; grid-template-columns: 100px 1fr 2fr\">\
+                    <div>a</div><div>b</div><div>c</div></div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 800.0, &ImageSizes::new());
+        let x = |t: &str| l.runs.iter().find(|r| r.text == t).unwrap().x;
+        let (ax, bx, cx) = (x("a"), x("b"), x("c"));
+        // a at content origin ~8; b after the 100px fixed column ~108; c after
+        // the 100px fr column ~208.
+        assert!((ax - 8.0).abs() < 3.0, "col0 at origin, got {ax}");
+        assert!((bx - 108.0).abs() < 4.0, "col1 after 100px fixed, got {bx}");
+        assert!((cx - 208.0).abs() < 4.0, "col2 after 1fr(=100), got {cx}");
+    }
+
+    #[test]
+    fn grid_fr_columns_widen_with_container() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Two `1fr` columns: the second column's left edge tracks half the content
+        // width, so a wider container pushes "b" further right.
+        let second_x = |w: u32| -> f32 {
+            let html = format!(
+                "<div style=\"display:grid; width:{w}px; grid-template-columns: 1fr 1fr\">\
+                 <div>a</div><div>b</div></div>"
+            );
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 1000.0, &ImageSizes::new());
+            l.runs.iter().find(|r| r.text == "b").unwrap().x
+        };
+        let narrow = second_x(200);
+        let wide = second_x(600);
+        assert!(wide > narrow + 150.0, "fr columns widen with container: {narrow} -> {wide}");
     }
 }
