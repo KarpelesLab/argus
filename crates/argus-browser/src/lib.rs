@@ -263,7 +263,52 @@ fn fetch_html(net: &Child, url: &str) -> io::Result<String> {
             "could not load (network error or empty response)",
         ))
     } else {
-        Ok(String::from_utf8_lossy(&body).into_owned())
+        Ok(decode_html(&body))
+    }
+}
+
+/// Decode HTML bytes to a string, honoring a declared charset. UTF-8 is used when
+/// valid (or declared); a declared legacy charset (`windows-1252`/`iso-8859-1`/
+/// `latin-1`) or invalid UTF-8 falls back to windows-1252.
+fn decode_html(body: &[u8]) -> String {
+    // Sniff a charset declaration from the head (`<meta charset>` or content-type).
+    let head = String::from_utf8_lossy(&body[..body.len().min(2048)]).to_ascii_lowercase();
+    let declared = head
+        .split("charset")
+        .nth(1)
+        .map(|s| s.trim_start_matches([' ', '=', '"', '\'']))
+        .map(|s| {
+            s.split([' ', '"', '\'', '/', '>', ';'])
+                .next()
+                .unwrap_or("")
+                .to_string()
+        });
+    let legacy = matches!(
+        declared.as_deref(),
+        Some("windows-1252" | "iso-8859-1" | "latin1" | "latin-1" | "cp1252")
+    );
+    if !legacy {
+        if let Ok(s) = std::str::from_utf8(body) {
+            return s.to_string();
+        }
+    }
+    // windows-1252 (a superset of Latin-1): map each byte to its code point, with
+    // the 0x80–0x9F C1 overrides.
+    body.iter().map(|&b| win1252_char(b)).collect()
+}
+
+/// Map a windows-1252 byte to its Unicode character.
+fn win1252_char(b: u8) -> char {
+    const C1: [char; 32] = [
+        '\u{20AC}', '\u{81}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}',
+        '\u{2021}', '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{8D}',
+        '\u{017D}', '\u{8F}', '\u{90}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}',
+        '\u{2013}', '\u{2014}', '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}',
+        '\u{9D}', '\u{017E}', '\u{0178}',
+    ];
+    match b {
+        0x80..=0x9F => C1[(b - 0x80) as usize],
+        _ => b as char,
     }
 }
 
@@ -1615,8 +1660,8 @@ fn verify_uniform(fb: &Framebuffer) -> io::Result<Color> {
 #[cfg(test)]
 mod tests {
     use super::{
-        dom_node_json, effective_base, extract_forms, extract_images, extract_json, extract_links,
-        extract_meta, extract_tables, page_title, render_text, resolve_url, History,
+        decode_html, dom_node_json, effective_base, extract_forms, extract_images, extract_json,
+        extract_links, extract_meta, extract_tables, page_title, render_text, resolve_url, History,
     };
 
     #[test]
@@ -1739,6 +1784,25 @@ mod tests {
         assert_eq!(lines[0], "https://site.example/a.png\tLogo\t64x32");
         assert_eq!(lines[1], "https://site.example/dir/b.jpg\t\t?x?");
         assert_eq!(lines.len(), 2, "only <img> elements: {out:?}");
+    }
+
+    #[test]
+    fn decode_html_handles_utf8_and_windows1252() {
+        // Valid UTF-8 passes through unchanged.
+        assert_eq!(decode_html("héllo €".as_bytes()), "héllo €");
+        // A windows-1252 page (declared) decodes the high bytes: 0xE9 = é, 0x80 = €.
+        let mut bytes = b"<meta charset=windows-1252><p>caf".to_vec();
+        bytes.push(0xE9); // é
+        bytes.extend_from_slice(b" ");
+        bytes.push(0x80); // €
+        bytes.extend_from_slice(b"</p>");
+        let s = decode_html(&bytes);
+        assert!(s.contains("café"), "0xE9 -> é: {s:?}");
+        assert!(s.contains('€'), "0x80 -> euro: {s:?}");
+        // Invalid UTF-8 with no charset falls back to windows-1252 (no replacement char).
+        let s2 = decode_html(&[b'x', 0xE9, b'y']);
+        assert_eq!(s2, "xéy");
+        assert!(!s2.contains('\u{FFFD}'), "no replacement char");
     }
 
     #[test]
