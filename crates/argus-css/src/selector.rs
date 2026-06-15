@@ -3,10 +3,11 @@
 //! Supports type, universal, class, id, and attribute (`[a]`/`[a=v]`/`~=`/`^=`/
 //! `$=`/`*=`) selectors in compound selectors, joined by descendant (whitespace)
 //! and child (`>`) combinators. Evaluated pseudo-classes: `:first-child`,
-//! `:last-child`, `:nth-child(an+b)`, `:not(...)`, `:is(...)`/`:where(...)` (match
-//! any argument; `:is()` takes its most specific argument's weight, `:where()`
-//! contributes zero), `:root`, `:empty`, and the form-state
-//! `:checked`/`:disabled`/`:enabled`. Other pseudo-classes/elements are
+//! `:last-child`, `:only-child`, `:nth-child(an+b)`, `:nth-last-child`,
+//! `:first/last/only-of-type`, `:nth-of-type`, `:nth-last-of-type`, `:not(...)`,
+//! `:is(...)`/`:where(...)` (match any argument; `:is()` takes its most specific
+//! argument's weight, `:where()` contributes zero), `:root`, `:empty`, and the
+//! form-state `:checked`/`:disabled`/`:enabled`. Other pseudo-classes/elements are
 //! parsed-and-ignored so they don't break matching.
 
 use crate::tokenizer::Token;
@@ -50,6 +51,18 @@ pub enum PseudoClass {
     LastChild,
     /// `:nth-child(an+b)`, stored as `(a, b)`. `odd` = `(2, 1)`, `even` = `(2, 0)`.
     NthChild(i32, i32),
+    /// `:nth-last-child(an+b)` — counted from the last element sibling.
+    NthLastChild(i32, i32),
+    /// `:nth-of-type(an+b)` — counted among same-type element siblings.
+    NthOfType(i32, i32),
+    /// `:nth-last-of-type(an+b)` — same-type, counted from the end.
+    NthLastOfType(i32, i32),
+    /// `:first-of-type` / `:last-of-type` — first/last same-type element sibling.
+    FirstOfType,
+    LastOfType,
+    /// `:only-child` — the sole element child; `:only-of-type` — sole of its type.
+    OnlyChild,
+    OnlyOfType,
     /// Form-state pseudo-classes, backed by attribute presence.
     Checked,
     Disabled,
@@ -272,13 +285,24 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                                 "enabled" => c.pseudos.push(PseudoClass::Enabled),
                                 "root" => c.pseudos.push(PseudoClass::Root),
                                 "empty" => c.pseudos.push(PseudoClass::Empty),
+                                "first-of-type" => c.pseudos.push(PseudoClass::FirstOfType),
+                                "last-of-type" => c.pseudos.push(PseudoClass::LastOfType),
+                                "only-child" => c.pseudos.push(PseudoClass::OnlyChild),
+                                "only-of-type" => c.pseudos.push(PseudoClass::OnlyOfType),
                                 _ => {}
                             }
                         }
                         *i += 1;
                     }
                     Some(Token::Function(fname)) => {
-                        let is_nth = !double && fname.eq_ignore_ascii_case("nth-child");
+                        // Which `:nth-*(an+b)` family member, if any.
+                        let nth_kind = if double {
+                            None
+                        } else {
+                            ["nth-child", "nth-last-child", "nth-of-type", "nth-last-of-type"]
+                                .iter()
+                                .position(|n| fname.eq_ignore_ascii_case(n))
+                        };
                         let is_not = !double && fname.eq_ignore_ascii_case("not");
                         let is_is = !double && fname.eq_ignore_ascii_case("is");
                         let is_where = !double && fname.eq_ignore_ascii_case("where");
@@ -301,9 +325,14 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                             }
                             *i += 1;
                         }
-                        if is_nth {
+                        if let Some(kind) = nth_kind {
                             if let Some((a, b)) = parse_nth(&args) {
-                                c.pseudos.push(PseudoClass::NthChild(a, b));
+                                c.pseudos.push(match kind {
+                                    0 => PseudoClass::NthChild(a, b),
+                                    1 => PseudoClass::NthLastChild(a, b),
+                                    2 => PseudoClass::NthOfType(a, b),
+                                    _ => PseudoClass::NthLastOfType(a, b),
+                                });
                             }
                         } else if is_not {
                             // `:not(<compound>)` — parse the inner simple selector.
@@ -533,23 +562,24 @@ fn pseudo_matches(doc: &Document, node: NodeId, p: PseudoClass) -> bool {
             }
             true
         }
-        PseudoClass::NthChild(a, b) => {
-            // 1-based index among element siblings.
-            let mut index = 1i32;
-            let mut sib = doc.node(node).prev_sibling();
-            while let Some(id) = sib {
-                if matches!(doc.node(id).data, NodeData::Element(_)) {
-                    index += 1;
-                }
-                sib = doc.node(id).prev_sibling();
-            }
-            // Matches if index == a*n + b for some integer n >= 0.
-            if a == 0 {
-                index == b
-            } else {
-                let diff = index - b;
-                diff % a == 0 && diff / a >= 0
-            }
+        PseudoClass::NthChild(a, b) => nth_matches(a, b, sibling_index(doc, node, false, false)),
+        PseudoClass::NthLastChild(a, b) => {
+            nth_matches(a, b, sibling_index(doc, node, true, false))
+        }
+        PseudoClass::NthOfType(a, b) => nth_matches(a, b, sibling_index(doc, node, false, true)),
+        PseudoClass::NthLastOfType(a, b) => {
+            nth_matches(a, b, sibling_index(doc, node, true, true))
+        }
+        // `:first/last-of-type` — index 1 among same-type siblings (from start/end).
+        PseudoClass::FirstOfType => sibling_index(doc, node, false, true) == 1,
+        PseudoClass::LastOfType => sibling_index(doc, node, true, true) == 1,
+        // `:only-child` — no element siblings either side.
+        PseudoClass::OnlyChild => {
+            sibling_index(doc, node, false, false) == 1 && sibling_index(doc, node, true, false) == 1
+        }
+        // `:only-of-type` — the sole same-type element among its siblings.
+        PseudoClass::OnlyOfType => {
+            sibling_index(doc, node, false, true) == 1 && sibling_index(doc, node, true, true) == 1
         }
         PseudoClass::Checked => element_has_attr(doc, node, "checked"),
         PseudoClass::Disabled => element_has_attr(doc, node, "disabled"),
@@ -571,6 +601,42 @@ fn pseudo_matches(doc: &Document, node: NodeId, p: PseudoClass) -> bool {
 /// Whether `node` is an element carrying attribute `name`.
 fn element_has_attr(doc: &Document, node: NodeId, name: &str) -> bool {
     matches!(&doc.node(node).data, NodeData::Element(e) if e.attr(name).is_some())
+}
+
+/// The 1-based position of `node` among its element siblings, counted from the end
+/// when `from_end`, and restricted to siblings sharing `node`'s tag when `same_type`.
+fn sibling_index(doc: &Document, node: NodeId, from_end: bool, same_type: bool) -> i32 {
+    let my_tag = doc.node(node).as_element().map(|e| e.name.local.clone());
+    let step = |id: NodeId| {
+        if from_end {
+            doc.node(id).next_sibling()
+        } else {
+            doc.node(id).prev_sibling()
+        }
+    };
+    let counts = |id: NodeId| match &doc.node(id).data {
+        NodeData::Element(e) => !same_type || Some(&e.name.local) == my_tag.as_ref(),
+        _ => false,
+    };
+    let mut index = 1i32;
+    let mut sib = step(node);
+    while let Some(id) = sib {
+        if counts(id) {
+            index += 1;
+        }
+        sib = step(id);
+    }
+    index
+}
+
+/// Whether a 1-based `index` satisfies `an + b` for some integer `n >= 0`.
+fn nth_matches(a: i32, b: i32, index: i32) -> bool {
+    if a == 0 {
+        index == b
+    } else {
+        let diff = index - b;
+        diff % a == 0 && diff / a >= 0
+    }
 }
 
 /// Parse the argument of `:nth-child(...)` into `(a, b)` for `an+b`. Handles
@@ -796,6 +862,59 @@ mod tests {
         // Two :is() groups must each match.
         assert!(matches(&doc, h1, &sel(":is(h1, h2):is(#a)")));
         assert!(!matches(&doc, h2, &sel(":is(h1, h2):is(#a)")));
+    }
+
+    #[test]
+    fn of_type_and_only_and_nth_last_pseudo_classes() {
+        // <div><h2 id="h"/><p id="p1"/><span id="s"/><p id="p2"/><p id="p3"/></div>
+        let mut doc = Document::new();
+        let root = doc.root();
+        let div = doc.create_element(QualName::html("div"), vec![]);
+        doc.append(root, div);
+        let mk = |doc: &mut Document, tag: &str, id: &str| {
+            let n = doc.create_element(QualName::html(tag), vec![Attribute::new("id", id)]);
+            doc.append(div, n);
+            n
+        };
+        let h = mk(&mut doc, "h2", "h");
+        let p1 = mk(&mut doc, "p", "p1");
+        let s = mk(&mut doc, "span", "s");
+        let p2 = mk(&mut doc, "p", "p2");
+        let p3 = mk(&mut doc, "p", "p3");
+
+        // :first-of-type / :last-of-type among <p> siblings.
+        assert!(matches(&doc, p1, &sel("p:first-of-type")));
+        assert!(!matches(&doc, p2, &sel("p:first-of-type")));
+        assert!(matches(&doc, p3, &sel("p:last-of-type")));
+        assert!(!matches(&doc, p2, &sel("p:last-of-type")));
+        // :nth-of-type counts only same-type siblings: p2 is the 2nd <p>.
+        assert!(matches(&doc, p2, &sel("p:nth-of-type(2)")));
+        assert!(!matches(&doc, p2, &sel("p:nth-of-type(3)")));
+        // :nth-last-child counts from the end: p3 is the last child.
+        assert!(matches(&doc, p3, &sel(":nth-last-child(1)")));
+        assert!(matches(&doc, p2, &sel(":nth-last-child(2)")));
+        // :nth-last-of-type: p3 is the last <p>, p2 the 2nd-from-last <p>.
+        assert!(matches(&doc, p3, &sel("p:nth-last-of-type(1)")));
+        assert!(matches(&doc, p2, &sel("p:nth-last-of-type(2)")));
+        // :only-of-type — h2 and span are each the sole one of their type.
+        assert!(matches(&doc, h, &sel("h2:only-of-type")));
+        assert!(matches(&doc, s, &sel("span:only-of-type")));
+        assert!(!matches(&doc, p1, &sel("p:only-of-type")));
+        // :only-child fails for everything here (div has 5 children).
+        assert!(!matches(&doc, h, &sel(":only-child")));
+    }
+
+    #[test]
+    fn only_child_matches_sole_element() {
+        // <ul><li id="solo"/></ul>
+        let mut doc = Document::new();
+        let root = doc.root();
+        let ul = doc.create_element(QualName::html("ul"), vec![]);
+        doc.append(root, ul);
+        let li = doc.create_element(QualName::html("li"), vec![Attribute::new("id", "solo")]);
+        doc.append(ul, li);
+        assert!(matches(&doc, li, &sel("li:only-child")));
+        assert!(matches(&doc, li, &sel("li:only-of-type")));
     }
 
     #[test]
