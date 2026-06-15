@@ -10,8 +10,9 @@
 //! This is a pragmatic subset — no live reflow — but it makes a real chunk of the
 //! DOM API actually change the rendered page, plus discrete `click` handlers (via
 //! deterministic replay through [`apply_scripts_with_events`]), `setTimeout`/
-//! `setInterval` callbacks (shim-queued, drained earliest-delay-first, no wall
-//! clock), **async DOM mutations** — writes inside `Promise.then`/`async`-`await`
+//! `setInterval`/`requestAnimationFrame` callbacks (shim-queued, drained
+//! earliest-delay-first, no wall clock; rAF gets a synthetic timestamp), **async
+//! DOM mutations** — writes inside `Promise.then`/`async`-`await`
 //! callbacks are reconciled too, because scripts run through
 //! [`argus_script::run_with_followup`], which drains the engine's event loop
 //! (promise microtasks + async tails) before the ops array is read back — and
@@ -169,6 +170,10 @@ function setTimeout(fn, delay) {
   return id;
 }
 function setInterval(fn, delay) { return setTimeout(fn, delay); }
+// requestAnimationFrame: no wall clock, so a frame callback is just a timer with
+// a ~16ms delay; it's drained like the rest and handed a monotonic timestamp.
+function requestAnimationFrame(fn) { return setTimeout(fn, 16); }
+function cancelAnimationFrame(id) { clearTimeout(id); }
 function clearTimeout(id) {
   for (var i = 0; i < __timers.length; i++) {
     if (__timers[i].id === id) { __timers.splice(i, 1); return; }
@@ -177,6 +182,9 @@ function clearTimeout(id) {
 function clearInterval(id) { clearTimeout(id); }
 window.setTimeout = setTimeout; window.setInterval = setInterval;
 window.clearTimeout = clearTimeout; window.clearInterval = clearInterval;
+window.requestAnimationFrame = requestAnimationFrame;
+window.cancelAnimationFrame = cancelAnimationFrame;
+var __rafClock = 0;
 function __argus_drain() {
   var iters = 0;
   while (__timers.length > 0 && iters < 1000) {
@@ -185,7 +193,10 @@ function __argus_drain() {
       if (__timers[i].delay < __timers[bi].delay) bi = i;
     }
     var t = __timers.splice(bi, 1)[0];
-    t.fn();
+    // Pass a synthetic, monotonically increasing timestamp; setTimeout callbacks
+    // ignore the extra argument, rAF callbacks use it.
+    __rafClock += 16;
+    t.fn(__rafClock);
     iters++;
   }
 }
@@ -1337,6 +1348,22 @@ mod tests {
         );
         apply_scripts(&mut doc);
         assert_eq!(text_of(&doc, "out"), "async-ok");
+    }
+
+    #[test]
+    fn request_animation_frame_runs_deferred_dom_init() {
+        // rAF callbacks are drained like timers; a write inside one must land, and
+        // the callback receives a (synthetic) numeric timestamp.
+        let mut doc = argus_html::parse(
+            "<div id=\"out\">pending</div>\
+             <script>\
+               requestAnimationFrame(function(ts){\
+                 document.getElementById('out').textContent = (typeof ts === 'number') ? 'frame' : 'no-ts';\
+               });\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        assert_eq!(text_of(&doc, "out"), "frame");
     }
 
     #[test]
