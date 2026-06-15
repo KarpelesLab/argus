@@ -83,6 +83,14 @@ pub enum Position {
     Relative,
 }
 
+/// `flex-direction` for a flex container (the subset layout honors: main axis
+/// horizontal vs. vertical).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FlexDirection {
+    Row,
+    Column,
+}
+
 /// Four edge values (top/right/bottom/left) in CSS pixels.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Edges {
@@ -130,6 +138,8 @@ pub struct ComputedStyle {
     pub strike: bool,
     /// Column count for a grid container (from `grid-template-columns`).
     pub grid_columns: u32,
+    /// `flex-direction` for a `display: flex` container (not inherited).
+    pub flex_direction: FlexDirection,
     /// Uniform `border-radius` in pixels.
     pub border_radius: f32,
     /// Element `opacity` in `0.0..=1.0`.
@@ -189,6 +199,7 @@ impl ComputedStyle {
             underline: false,
             strike: false,
             grid_columns: 1,
+            flex_direction: FlexDirection::Row,
             border_radius: 0.0,
             opacity: 1.0,
             white_space_pre: false,
@@ -654,6 +665,18 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     }
     if let Some(v) = map.get("grid-template-columns") {
         cs.grid_columns = grid_track_count(v);
+    }
+    if let Some(v) = map
+        .get("flex-direction")
+        .or_else(|| map.get("flex-flow"))
+    {
+        // `column`/`column-reverse` → vertical main axis; otherwise row.
+        let first = v.split_whitespace().next().unwrap_or("");
+        cs.flex_direction = if first.starts_with("column") {
+            FlexDirection::Column
+        } else {
+            FlexDirection::Row
+        };
     }
     if let Some(px) = map
         .get("border-radius")

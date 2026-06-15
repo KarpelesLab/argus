@@ -20,8 +20,8 @@
 use argus_dom::{Document, ElementData, NodeData, NodeId};
 use argus_gfx::{Font, RectFill, TextRun};
 use argus_style::{
-    author_stylesheet, computed_style, AuthorStylesheet, BoxSizing, ComputedStyle, Display, Length,
-    ListStyle, Position, TextAlign, TextTransform, VerticalAlign,
+    author_stylesheet, computed_style, AuthorStylesheet, BoxSizing, ComputedStyle, Display,
+    FlexDirection, Length, ListStyle, Position, TextAlign, TextTransform, VerticalAlign,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -799,9 +799,10 @@ impl Ctx<'_> {
         text.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
-    /// Lay out a `display: flex` container: block-level children are placed in a
-    /// single row, sharing the content width equally; the row's height is the
-    /// tallest item. A basic subset — no wrapping, `flex-grow`, or `justify`/`align`.
+    /// Lay out a `display: flex` container. In the default `row` direction the
+    /// children share the content width equally on a single line (height = tallest
+    /// item); in `flex-direction: column` they stack vertically at full width, `gap`
+    /// apart. A basic subset — no wrapping, `flex-grow`, or `justify`/`align`.
     fn layout_flex(&mut self, id: NodeId, style: ComputedStyle, x: f32, avail: f32) {
         let items: Vec<NodeId> = self
             .doc
@@ -852,17 +853,32 @@ impl Ctx<'_> {
         self.cursor_y += style.border.top + style.padding.top;
         let row_top = self.cursor_y;
         let n = items.len() as f32;
-        let total_gap = style.gap * (n - 1.0);
-        let item_w = ((content_w - total_gap) / n).max(0.0);
-        let mut max_h = 0.0f32;
-        for (i, &item) in items.iter().enumerate() {
-            self.cursor_y = row_top;
-            let istyle = computed_style(self.doc, item, &style, self.author);
-            let item_x = content_left + i as f32 * (item_w + style.gap);
-            self.layout_block(item, istyle, item_x, item_w, None);
-            max_h = max_h.max(self.cursor_y - row_top);
+
+        if style.flex_direction == FlexDirection::Column {
+            // Column: stack items vertically, each at full content width, with `gap`
+            // between them. The container height is the sum of item heights + gaps.
+            for (i, &item) in items.iter().enumerate() {
+                if i > 0 {
+                    self.cursor_y += style.gap;
+                }
+                let istyle = computed_style(self.doc, item, &style, self.author);
+                self.layout_block(item, istyle, content_left, content_w, None);
+            }
+            self.cursor_y += style.padding.bottom + style.border.bottom;
+        } else {
+            // Row: items share the main axis, each an equal slice of the free width.
+            let total_gap = style.gap * (n - 1.0);
+            let item_w = ((content_w - total_gap) / n).max(0.0);
+            let mut max_h = 0.0f32;
+            for (i, &item) in items.iter().enumerate() {
+                self.cursor_y = row_top;
+                let istyle = computed_style(self.doc, item, &style, self.author);
+                let item_x = content_left + i as f32 * (item_w + style.gap);
+                self.layout_block(item, istyle, item_x, item_w, None);
+                max_h = max_h.max(self.cursor_y - row_top);
+            }
+            self.cursor_y = row_top + max_h + style.padding.bottom + style.border.bottom;
         }
-        self.cursor_y = row_top + max_h + style.padding.bottom + style.border.bottom;
 
         if let Some(idx) = bg_idx {
             self.rects[idx].h = self.cursor_y - border_box_top;
@@ -2038,6 +2054,31 @@ mod tests {
         assert!(
             two.x > one.x + 100.0,
             "second item should be in the next column"
+        );
+    }
+
+    #[test]
+    fn flex_column_stacks_items_vertically() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let html = "<div style=\"display:flex; flex-direction:column\">\
+                    <div>one</div><div>two</div></div>";
+        let doc = parse(html);
+        let layout = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let one = layout.runs.iter().find(|r| r.text == "one").unwrap();
+        let two = layout.runs.iter().find(|r| r.text == "two").unwrap();
+        // Column: the second item is stacked below the first, in the same column.
+        assert!(
+            two.baseline > one.baseline + 10.0,
+            "second item should be on a lower line (got {} vs {})",
+            two.baseline,
+            one.baseline
+        );
+        assert!(
+            (one.x - two.x).abs() < 1.0,
+            "items should share the same x in a column"
         );
     }
 
