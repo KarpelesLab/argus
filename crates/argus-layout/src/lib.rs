@@ -1564,7 +1564,7 @@ impl Ctx<'_> {
         let istyle = computed_style(self.doc, img_id, style, self.author);
         let resolved = resolve_img_url(self.doc, img_id, self.viewport_w);
         let src = resolved.as_deref().unwrap_or("");
-        let (bw, bh) = self.image_box_size(e, src, content_w);
+        let (bw, bh) = self.image_box_size(e, src, &istyle, content_w);
         if bw > 0.0 && bh > 0.0 {
             // A sized image is an atomic inline box: lay it out at the origin and
             // push it as a "word" placed by flush_words.
@@ -1616,13 +1616,20 @@ impl Ctx<'_> {
 
     /// The `(width, height)` an `<img>` would occupy (border box), or `(0, 0)` if
     /// unresolved (no usable size — then `alt`/placeholder handling applies).
-    fn image_box_size(&self, e: &ElementData, src: &str, avail: f32) -> (f32, f32) {
+    fn image_box_size(&self, e: &ElementData, src: &str, istyle: &ComputedStyle, avail: f32) -> (f32, f32) {
         if src.is_empty() {
             return (0.0, 0.0);
         }
         let (iw, ih) = self.image_sizes.get(src).copied().unwrap_or((0, 0));
-        let attr_w = e.attr("width").and_then(|v| v.parse::<f32>().ok());
-        let attr_h = e.attr("height").and_then(|v| v.parse::<f32>().ok());
+        // CSS `width`/`height` win over the legacy HTML `width`/`height` attributes.
+        let attr_w = istyle
+            .width
+            .map(|l| l.to_px(istyle.font_size, avail))
+            .or_else(|| e.attr("width").and_then(|v| v.parse::<f32>().ok()));
+        let attr_h = istyle
+            .height
+            .map(|l| l.to_px(istyle.font_size, avail))
+            .or_else(|| e.attr("height").and_then(|v| v.parse::<f32>().ok()));
         let w = attr_w.unwrap_or(iw as f32).min(avail);
         let h = match (attr_w, attr_h) {
             (_, Some(h)) => h,
@@ -1641,9 +1648,16 @@ impl Ctx<'_> {
         let hidden = istyle.hidden;
         let (iw, ih) = self.image_sizes.get(src).copied().unwrap_or((0, 0));
 
-        // Width: the `width` attribute, else intrinsic, capped to the content box.
-        let attr_w = e.attr("width").and_then(|v| v.parse::<f32>().ok());
-        let attr_h = e.attr("height").and_then(|v| v.parse::<f32>().ok());
+        // Width: CSS `width`/`height` (preferred), else the legacy attribute, else
+        // intrinsic, capped to the content box.
+        let attr_w = istyle
+            .width
+            .map(|l| l.to_px(istyle.font_size, avail))
+            .or_else(|| e.attr("width").and_then(|v| v.parse::<f32>().ok()));
+        let attr_h = istyle
+            .height
+            .map(|l| l.to_px(istyle.font_size, avail))
+            .or_else(|| e.attr("height").and_then(|v| v.parse::<f32>().ok()));
         let mut w = attr_w.unwrap_or(iw as f32).min(avail);
         let mut h = match (attr_w, attr_h) {
             (_, Some(h)) => h,
@@ -5114,6 +5128,24 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         assert!((before.baseline - after.baseline).abs() < 3.0, "one line");
         assert!(img.x > before.x, "image after 'before' text");
         assert!(after.x > img.x + 38.0, "'after' past the 40px image: img={} after={}", img.x, after.x);
+    }
+
+    #[test]
+    fn css_width_sizes_image_over_attribute() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Intrinsic 100x50; CSS width:200px wins over the width=40 attribute and
+        // scales the height to keep the aspect ratio (200 * 50/100 = 100).
+        let mut sizes = ImageSizes::new();
+        sizes.insert("a.png".to_string(), (100, 50));
+        let html = "<img src=\"a.png\" width=\"40\" style=\"width:200px\">";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 600.0, &sizes);
+        let img = &l.images[0];
+        assert!((img.w - 200.0).abs() < 1.0, "CSS width wins: {}", img.w);
+        assert!((img.h - 100.0).abs() < 1.0, "height keeps aspect: {}", img.h);
     }
 
     #[test]
