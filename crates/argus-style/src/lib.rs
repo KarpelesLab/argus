@@ -279,6 +279,9 @@ pub struct ComputedStyle {
     pub border_right_color: Color,
     pub border_bottom_color: Color,
     pub border_left_color: Color,
+    /// `border-style` — solid (default) / double / dotted / dashed. Non-solid
+    /// borders are painted (uniformly) by the frame painter.
+    pub border_style: DecorationStyle,
     /// Specified width, resolved during layout (`None` = auto).
     pub width: Option<Length>,
     /// `min-width` / `max-width`, resolved during layout (`None` = no constraint).
@@ -457,6 +460,7 @@ impl ComputedStyle {
             border_right_color: Color::BLACK,
             border_bottom_color: Color::BLACK,
             border_left_color: Color::BLACK,
+            border_style: DecorationStyle::Solid,
             width: None,
             min_width: None,
             max_width: None,
@@ -1557,6 +1561,11 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         } else if mentions_current_color(v) {
             cs.border_color = cs.color;
         }
+        for tok in v.split_whitespace() {
+            if let Some(s) = decoration_style_of(tok) {
+                cs.border_style = s;
+            }
+        }
     }
     if let Some(v) = map.get("border-width").and_then(|v| len_px(v, fs)) {
         cs.border = Edges::uniform(v);
@@ -1580,9 +1589,12 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         cs.border.left = px;
     }
     // `border-style: none|hidden` suppresses the border even when a width/color was
-    // set; per-side `border-<side>-style` zeroes just that edge. Other style
-    // keywords (solid/dashed/…) leave the width intact (all rendered solid).
+    // set; per-side `border-<side>-style` zeroes just that edge. The visible style
+    // keywords (solid/double/dotted/dashed) pick how the (uniform) frame is drawn.
     let is_none_style = |v: &str| matches!(v.trim(), "none" | "hidden");
+    if let Some(s) = map.get("border-style").and_then(|v| decoration_style_of(v.trim())) {
+        cs.border_style = s;
+    }
     if map.get("border-style").is_some_and(|v| is_none_style(v)) {
         cs.border = Edges::uniform(0.0);
     }

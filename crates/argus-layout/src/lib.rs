@@ -716,7 +716,14 @@ impl Ctx<'_> {
             && !style.hidden
             && (style.border.top + style.border.right + style.border.bottom + style.border.left)
                 > 0.0;
-        let border_idx = has_border.then(|| {
+        // Solid borders use four reserved slots (painted behind descendants, with
+        // per-side widths/colors). Non-solid styles (double/dotted/dashed) are
+        // painted as a uniform frame once the height is known, after the subtree.
+        let solid_border = matches!(
+            style.border_style,
+            argus_style::DecorationStyle::Solid | argus_style::DecorationStyle::Wavy
+        );
+        let border_idx = (has_border && solid_border).then(|| {
             let i = self.rects.len();
             for _ in 0..4 {
                 self.rects.push(RectFill {
@@ -1255,6 +1262,21 @@ impl Ctx<'_> {
                 b.right,
                 border_box_h,
                 style.border_right_color,
+            );
+        } else if has_border && !solid_border {
+            // Non-solid border: a uniform frame (thickest side as width, top color)
+            // painted over the finished subtree by the shared frame painter.
+            let b = &style.border;
+            let t = b.top.max(b.right).max(b.bottom).max(b.left);
+            push_outline(
+                &mut self.rects,
+                border_box_left,
+                border_box_top,
+                border_box_w,
+                border_box_h,
+                t,
+                style.border_top_color,
+                style.border_style,
             );
         }
 
@@ -4231,6 +4253,29 @@ mod tests {
         let blue = l.rects.iter().any(|r| r.color.b > 200 && r.color.r < 60 && r.w < 6.0);
         assert!(red, "red top border present");
         assert!(blue, "blue left border present");
+    }
+
+    #[test]
+    fn non_solid_border_styles_change_segment_count() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let reds = |style: &str| -> usize {
+            let html = format!(
+                "<div style=\"border:6px {style} #ff0000; width:200px; height:120px\"></div>"
+            );
+            let doc = parse(&html);
+            layout(&doc, &font, 400.0, &ImageSizes::new())
+                .rects
+                .iter()
+                .filter(|r| r.color.r > 200 && r.color.g < 60 && r.color.b < 60)
+                .count()
+        };
+        assert_eq!(reds("solid"), 4, "solid border = 4 edge rects");
+        assert_eq!(reds("double"), 8, "double border = two 4-edge frames");
+        assert!(reds("dashed") > 8, "dashed border breaks into segments");
+        assert!(reds("dotted") > 8, "dotted border breaks into segments");
     }
 
     #[test]
