@@ -1428,6 +1428,19 @@ impl Ctx<'_> {
         if style.overflow_clip {
             self.stamp_clip(ds_start, [border_box_left, border_box_top, border_box_w, border_box_h]);
         }
+        // `clip-path: inset(...)` clips the element itself (background/border too)
+        // and its descendants to a rectangle inset from the border box.
+        if let Some([t, r, b, l]) = style.clip_path_inset {
+            self.stamp_clip(
+                ds_start,
+                [
+                    border_box_left + l,
+                    border_box_top + t,
+                    (border_box_w - l - r).max(0.0),
+                    (border_box_h - t - b).max(0.0),
+                ],
+            );
+        }
 
         // `outline`: four rects `outline-offset` outside the border box (no layout
         // effect).
@@ -4443,6 +4456,24 @@ mod tests {
         let visible = make("");
         let vrun = visible.runs.iter().find(|r| !r.text.trim().is_empty()).expect("a run");
         assert_eq!(vrun.clip, None, "visible overflow does not clip");
+    }
+
+    #[test]
+    fn clip_path_inset_clips_to_an_inset_rect() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A 100-wide box with clip-path: inset(5px 10px): runs are clipped to the
+        // border box inset by left/right 10 and top 5 → x≈margin+10, width≈80.
+        let doc = parse(
+            "<div style=\"width:100px; clip-path: inset(5px 10px)\">some clipped words here</div>",
+        );
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let run = l.runs.iter().find(|r| !r.text.trim().is_empty()).expect("a run");
+        let [cx, _, cw, _] = run.clip.expect("clip-path produces a clip");
+        assert!((cw - 80.0).abs() < 1.0, "clip width = 100 - 2*10, got {cw}");
+        assert!((cx - (PAGE_MARGIN + 10.0)).abs() < 1.0, "clip x inset by left, got {cx}");
     }
 
     #[test]

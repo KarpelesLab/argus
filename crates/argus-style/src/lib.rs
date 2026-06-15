@@ -383,6 +383,9 @@ pub struct ComputedStyle {
     /// inherited. (`scroll`/`auto` are left unclipped since we can't scroll within
     /// an element, so their overflow stays visible rather than being lost.)
     pub overflow_clip: bool,
+    /// `clip-path: inset(t r b l)` — pixel insets from the border box the element
+    /// (and its descendants) is clipped to. `None` = no clip-path. Not inherited.
+    pub clip_path_inset: Option<[f32; 4]>,
     /// `white-space: pre*` — preserve whitespace and honor newlines (inherited).
     pub white_space_pre: bool,
     /// `white-space: nowrap`/`pre` — suppress automatic line wrapping (inherited).
@@ -520,6 +523,7 @@ impl ComputedStyle {
             border_radius: 0.0,
             opacity: 1.0,
             overflow_clip: false,
+            clip_path_inset: None,
             white_space_pre: false,
             nowrap: false,
             pre_line: false,
@@ -1949,6 +1953,11 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             }
         }
     }
+    // `clip-path: inset(<t> [<r> <b> <l>])` — pixel insets from the border box
+    // (the `round <radius>` suffix is ignored). Other clip-path shapes are skipped.
+    if let Some(v) = map.get("clip-path") {
+        cs.clip_path_inset = parse_inset_clip_path(v, fs);
+    }
     if let Some(ws) = map.get("white-space") {
         cs.white_space_pre = matches!(
             ws.as_str(),
@@ -2402,6 +2411,26 @@ fn side_edge(map: &HashMap<String, String>, prop: &str, fs: f32, edges: &mut Edg
 
 fn len_px(v: &str, fs: f32) -> Option<f32> {
     parse_length(v).map(|l| l.to_px(fs, 0.0))
+}
+
+/// Parse `clip-path: inset(<t> [<r> <b> <l>])` into `[top, right, bottom, left]`
+/// pixel insets (CSS edge expansion: 1→all, 2→{tb,lr}, 3→{t,lr,b}, 4→t/r/b/l). A
+/// trailing `round <radius>` is dropped. Returns `None` for non-`inset()` shapes.
+fn parse_inset_clip_path(v: &str, fs: f32) -> Option<[f32; 4]> {
+    let inner = v.trim().strip_prefix("inset(")?;
+    let inner = inner.strip_suffix(')').unwrap_or(inner);
+    // Drop a `round ...` corner-radius suffix.
+    let inner = inner.split(" round ").next().unwrap_or(inner);
+    let vals: Vec<f32> = inner
+        .split_whitespace()
+        .filter_map(|t| parse_length(t).map(|l| l.to_px(fs, 0.0)))
+        .collect();
+    let pick = |i: usize, alt: usize| vals.get(i).or_else(|| vals.get(alt)).copied();
+    let t = *vals.first()?;
+    let r = pick(1, 0)?;
+    let b = pick(2, 0)?;
+    let l = vals.get(3).copied().or_else(|| vals.get(1).copied()).unwrap_or(r);
+    Some([t, r, b, l])
 }
 
 /// Resolve a `font-family` value to a face selector key: `FONT_KEY_MONOSPACE` for
@@ -3050,6 +3079,24 @@ mod tests {
         // padding-block-start → top; padding-inline-end → right.
         assert_eq!(cs.padding.top, 5.0);
         assert_eq!(cs.padding.right, 7.0);
+    }
+
+    #[test]
+    fn clip_path_inset_parses_edges() {
+        let mut doc = Document::new();
+        let d = one(&mut doc, "div", vec![]);
+        let inset = |css: &str| {
+            computed_style(&doc, d, &ComputedStyle::initial(), &parse_stylesheet(css)).clip_path_inset
+        };
+        // One value → all four edges.
+        assert_eq!(inset("div { clip-path: inset(10px) }"), Some([10.0, 10.0, 10.0, 10.0]));
+        // Four values t/r/b/l, with a `round` suffix dropped.
+        assert_eq!(
+            inset("div { clip-path: inset(1px 2px 3px 4px round 5px) }"),
+            Some([1.0, 2.0, 3.0, 4.0])
+        );
+        // Non-inset shapes are ignored.
+        assert_eq!(inset("div { clip-path: circle(40px) }"), None);
     }
 
     #[test]
