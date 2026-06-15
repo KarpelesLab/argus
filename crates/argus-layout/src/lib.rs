@@ -39,6 +39,34 @@ enum Marker {
     Square,
 }
 
+/// The URL an `<img>` resolves to: its explicit `src`, else the best `srcset`
+/// candidate (so srcset-only responsive images still load). Used by both the
+/// layout image sites and the content process's image-collection pass, so the
+/// fetched URL and the laid-out `ImageBox.src` always agree.
+pub fn img_url(e: &ElementData) -> Option<&str> {
+    e.attr("src")
+        .or_else(|| e.attr("srcset").and_then(srcset_best))
+}
+
+/// Pick the highest-resolution candidate URL from an `srcset` value: each
+/// comma-separated `URL [descriptor]` entry's `w`/`x` descriptor is a weight;
+/// the largest wins, falling back to the last candidate when undescribed.
+fn srcset_best(srcset: &str) -> Option<&str> {
+    let mut best: Option<(&str, f32)> = None;
+    for cand in srcset.split(',') {
+        let mut parts = cand.split_whitespace();
+        let Some(url) = parts.next() else { continue };
+        let weight = parts
+            .next()
+            .and_then(|d| d.trim_end_matches(['w', 'x']).parse::<f32>().ok())
+            .unwrap_or(1.0);
+        if best.is_none_or(|(_, bw)| weight >= bw) {
+            best = Some((url, weight));
+        }
+    }
+    best.map(|(u, _)| u)
+}
+
 /// The marker for a list item, given its `list-style-type` and 1-based index
 /// among siblings. Returns `None` for `list-style-type: none`.
 fn list_marker(style: ListStyle, index: u32) -> Option<Marker> {
@@ -1463,7 +1491,7 @@ impl Ctx<'_> {
     /// The `(width, height)` an `<img>` would occupy (border box), or `(0, 0)` if
     /// unresolved (no usable size — then `alt`/placeholder handling applies).
     fn image_box_size(&self, e: &ElementData, avail: f32) -> (f32, f32) {
-        let Some(src) = e.attr("src") else {
+        let Some(src) = img_url(e) else {
             return (0.0, 0.0);
         };
         let (iw, ih) = self.image_sizes.get(src).copied().unwrap_or((0, 0));
@@ -1485,7 +1513,7 @@ impl Ctx<'_> {
     /// unresolved image with non-empty `alt` text renders that text instead.
     fn place_image(&mut self, e: &ElementData, istyle: &ComputedStyle, x: f32, avail: f32) {
         let hidden = istyle.hidden;
-        let Some(src) = e.attr("src") else { return };
+        let Some(src) = img_url(e) else { return };
         let (iw, ih) = self.image_sizes.get(src).copied().unwrap_or((0, 0));
 
         // Width: the `width` attribute, else intrinsic, capped to the content box.
@@ -4687,6 +4715,23 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         assert!((before.baseline - after.baseline).abs() < 3.0, "one line");
         assert!(img.x > before.x, "image after 'before' text");
         assert!(after.x > img.x + 38.0, "'after' past the 40px image: img={} after={}", img.x, after.x);
+    }
+
+    #[test]
+    fn srcset_only_image_resolves_and_renders() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // No `src`; the intrinsic size is keyed under the chosen srcset candidate
+        // (largest `w`), so the image resolves and paints at that size.
+        let mut sizes = ImageSizes::new();
+        sizes.insert("big.png".to_string(), (80, 40));
+        let html = "<img srcset=\"small.png 200w, big.png 800w\" width=\"80\" height=\"40\">";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &sizes);
+        assert_eq!(l.images.len(), 1, "the srcset image is laid out");
+        assert_eq!(l.images[0].src, "big.png", "largest-w candidate chosen");
     }
 
     #[test]

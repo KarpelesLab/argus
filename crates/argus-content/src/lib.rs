@@ -380,7 +380,8 @@ fn collect_img_srcs(doc: &argus_dom::Document) -> Vec<String> {
     fn walk(doc: &argus_dom::Document, id: argus_dom::NodeId, out: &mut Vec<String>) {
         if let argus_dom::NodeData::Element(e) = &doc.node(id).data {
             if e.name.is_html("img") {
-                if let Some(src) = e.attr("src") {
+                // Fetch the same URL layout resolves (`src`, else best `srcset`).
+                if let Some(src) = argus_layout::img_url(e) {
                     out.push(src.to_string());
                 }
             }
