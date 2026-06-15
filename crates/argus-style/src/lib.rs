@@ -244,6 +244,8 @@ pub struct ComputedStyle {
     /// `white-space: pre-line` — collapse spaces but keep newlines, and wrap
     /// (inherited). Distinguishes pre-line from `pre`/`pre-wrap` in the pre path.
     pub pre_line: bool,
+    /// `tab-size` — spaces a tab expands to in preformatted text (inherited).
+    pub tab_size: u32,
     /// `white-space: pre-wrap` — preserve whitespace and newlines, but wrap long
     /// lines (inherited).
     pub pre_wrap: bool,
@@ -335,6 +337,7 @@ impl ComputedStyle {
             white_space_pre: false,
             nowrap: false,
             pre_line: false,
+            tab_size: 8,
             pre_wrap: false,
             break_word: false,
             ellipsis: false,
@@ -541,6 +544,7 @@ pub fn computed_style(
         white_space_pre: parent.white_space_pre, // white-space inherits
         nowrap: parent.nowrap,                   // white-space inherits
         pre_line: parent.pre_line,               // white-space inherits
+        tab_size: parent.tab_size,               // tab-size inherits
         pre_wrap: parent.pre_wrap,               // white-space inherits
         break_word: parent.break_word,           // overflow-wrap inherits
         list_style: parent.list_style,           // list-style-type inherits
@@ -1122,6 +1126,12 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         cs.nowrap = matches!(ws.as_str(), "nowrap" | "pre");
         cs.pre_line = ws.as_str() == "pre-line";
         cs.pre_wrap = matches!(ws.as_str(), "pre-wrap" | "break-spaces");
+    }
+    if let Some(v) = map.get("tab-size").or_else(|| map.get("-moz-tab-size")) {
+        // A bare number is a count of spaces; lengths aren't modeled here.
+        if let Ok(n) = v.trim().parse::<u32>() {
+            cs.tab_size = n.min(32);
+        }
     }
     // `overflow-wrap`/`word-wrap: break-word` (or `word-break: break-all`) splits
     // over-long words to avoid overflow.

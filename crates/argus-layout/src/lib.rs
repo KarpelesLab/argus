@@ -496,6 +496,10 @@ impl Ctx<'_> {
         if style.white_space_pre {
             let mut raw = String::new();
             self.gather_raw_text(id, &mut raw);
+            // Expand tabs to `tab-size` spaces (pre-line later collapses them).
+            if raw.contains('\t') {
+                raw = raw.replace('\t', &" ".repeat(style.tab_size.max(1) as usize));
+            }
             let color = if style.hidden {
                 argus_geometry::Color::TRANSPARENT
             } else {
@@ -2767,6 +2771,29 @@ mod tests {
             line_count("overflow-wrap: break-word") > 1,
             "break-word splits the long word across lines"
         );
+    }
+
+    #[test]
+    fn tab_size_expands_tabs_in_preformatted_text() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // In a <pre>, a leading tab expands to `tab-size` spaces; a smaller tab-size
+        // indents the text less, so "x" starts further left.
+        let x_of = |ts: u32| -> f32 {
+            let html = format!("<pre style=\"tab-size:{ts}\">\tx</pre>");
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+            // The run text begins with the expanded spaces; find the run containing x.
+            let run = l.runs.iter().find(|r| r.text.contains('x')).unwrap();
+            // Measure where the 'x' glyph lands within the run.
+            let lead = run.text.split('x').next().unwrap_or("");
+            run.x + font.measure(lead, run.size_px)
+        };
+        let narrow = x_of(2);
+        let wide = x_of(8);
+        assert!(wide > narrow + 10.0, "larger tab-size indents more: {narrow} -> {wide}");
     }
 
     #[test]
