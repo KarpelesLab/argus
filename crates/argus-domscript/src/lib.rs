@@ -420,6 +420,16 @@ var document = {
   getElementsByClassName: function(c) { return __collectClass("" + c, -1); },
   write: function(s) { __argus_ops.push({op: "write", value: "" + s}); }
 };
+// Common document metadata scripts read. We run scripts after the full parse, so
+// readyState is "complete"; cookie/referrer are empty (no client cookie jar here).
+document.readyState = "complete";
+document.cookie = "";
+document.referrer = "";
+document.characterSet = document.charset = "UTF-8";
+document.contentType = "text/html";
+document.compatMode = "CSS1Compat";
+document.visibilityState = "visible";
+document.hidden = false;
 document.body = __argus_el({kind: "sel", val: "body"});
 document.documentElement = __argus_el({kind: "sel", val: "html"});
 var window = document.window = document;
@@ -2141,6 +2151,19 @@ mod tests {
             .collect();
         assert_eq!(kids, vec!["ab", "be"], "afterbegin first, beforeend last");
         assert_eq!(text_of(&doc, "t"), "ABmidBE");
+    }
+
+    #[test]
+    fn document_metadata_properties() {
+        let mut doc = argus_html::parse(
+            "<div id=\"o\"></div>\
+             <script>\
+               document.getElementById('o').textContent =\
+                 document.readyState + '|' + document.characterSet + '|' + document.visibilityState;\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        assert_eq!(text_of(&doc, "o"), "complete|UTF-8|visible");
     }
 
     #[test]
