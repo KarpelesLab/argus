@@ -609,7 +609,9 @@ mod tests {
             seed ^= seed << 17;
             (seed & 0xff) as u8
         };
-        const BIAS: &[u8] = b"{}()[]:;,.#*>~+=\"' \n%/-0123abcdivpxemrgb()repeat,";
+        // Bias toward selector + value + at-rule + pseudo bytes for deep coverage.
+        const BIAS: &[u8] =
+            b"{}()[]:;,.#*>~+=\"' \n%/-0123abcdivpxemrgb()repeat,@medianotandfrhslvarisheronth";
         for _ in 0..4000 {
             let len = (byte() as usize) * 3;
             let bytes: Vec<u8> = (0..len)
@@ -623,13 +625,19 @@ mod tests {
                 .collect();
             let css = String::from_utf8_lossy(&bytes);
             let sheet = parse_stylesheet(&css);
-            // Exercise selector matching + value parsing on whatever parsed.
+            // Exercise selector machinery + value parsing on whatever parsed.
             for rule in &sheet.rules {
+                for sel in &rule.selectors {
+                    let _ = sel.specificity();
+                    let _ = sel.pseudo_element();
+                }
                 for d in &rule.declarations {
                     let _ = parse_color(&d.value);
                     let _ = parse_length(&d.value);
                 }
             }
+            // The inline-style declaration-block path is a separate parser.
+            let _ = parse_declaration_block(&css);
         }
     }
 }
