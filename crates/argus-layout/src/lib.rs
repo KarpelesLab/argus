@@ -205,6 +205,9 @@ struct InlineWord {
     hard_break: bool,
     /// Vertical baseline offset in pixels (negative = up), for sub/superscript.
     baseline_shift: f32,
+    /// An `inline-block` atomic box: display-list range `[start, end)` (laid out at
+    /// the origin) and `(width, height)`; shifted into place at flush time.
+    atomic: Option<(DisplayListMark, DisplayListMark, f32, f32)>,
 }
 
 /// A clickable hyperlink region in canvas pixels.
@@ -626,6 +629,7 @@ impl Ctx<'_> {
                         href: None,
                         hard_break: false,
                         baseline_shift: 0.0,
+                        atomic: None,
                     });
                 }
             }
@@ -710,6 +714,63 @@ impl Ctx<'_> {
                                     &mut words,
                                     &mut pending_space,
                                 );
+                            }
+                            Display::InlineBlock => {
+                                // Lay the inline-block out at the origin to capture its
+                                // box (display-list range + size), then push it as an
+                                // atomic "word" that flush_words places on the line.
+                                let bw = cstyle
+                                    .width
+                                    .map(|len| {
+                                        border_box_to_content(
+                                            &cstyle,
+                                            len.to_px(cstyle.font_size, content_w),
+                                        ) + cstyle.padding.left
+                                            + cstyle.padding.right
+                                            + cstyle.border.left
+                                            + cstyle.border.right
+                                    })
+                                    .unwrap_or_else(|| self.intrinsic_border_width(child, &cstyle))
+                                    .min(content_w);
+                                let start = (
+                                    self.rects.len(),
+                                    self.runs.len(),
+                                    self.images.len(),
+                                    self.links.len(),
+                                    self.bounds.len(),
+                                );
+                                let saved_y = self.cursor_y;
+                                self.cursor_y = 0.0;
+                                self.layout_block(child, cstyle, 0.0, bw, None);
+                                let bh = self.cursor_y;
+                                self.cursor_y = saved_y;
+                                let end = (
+                                    self.rects.len(),
+                                    self.runs.len(),
+                                    self.images.len(),
+                                    self.links.len(),
+                                    self.bounds.len(),
+                                );
+                                let space_before = pending_space;
+                                pending_space = false;
+                                words.push(InlineWord {
+                                    text: String::new(),
+                                    font_size: cstyle.font_size,
+                                    color: argus_geometry::Color::TRANSPARENT,
+                                    background: argus_geometry::Color::TRANSPARENT,
+                                    space_before,
+                                    underline: false,
+                                    strike: false,
+                                    overline: false,
+                                    bold: false,
+                                    italic: false,
+                                    shadow: None,
+                                    decoration_color: argus_geometry::Color::TRANSPARENT,
+                                    href: None,
+                                    hard_break: false,
+                                    baseline_shift: 0.0,
+                                    atomic: Some((start, end, bw, bh)),
+                                });
                             }
                             Display::Block => {
                                 self.flush_words(&mut words, &style, content_left, content_w);
@@ -1098,6 +1159,37 @@ impl Ctx<'_> {
             l.y += dy;
         }
         for b in &mut self.bounds[start.4..] {
+            b.x += dx;
+            b.y += dy;
+        }
+    }
+
+    /// Shift only the display-list items in the half-open range `[start, end)` by
+    /// `(dx, dy)` — used to place an inline-block laid out at the origin.
+    fn shift_display_list_range(
+        &mut self,
+        start: DisplayListMark,
+        end: DisplayListMark,
+        dx: f32,
+        dy: f32,
+    ) {
+        for r in &mut self.rects[start.0..end.0] {
+            r.x += dx;
+            r.y += dy;
+        }
+        for r in &mut self.runs[start.1..end.1] {
+            r.x += dx;
+            r.baseline += dy;
+        }
+        for im in &mut self.images[start.2..end.2] {
+            im.x += dx;
+            im.y += dy;
+        }
+        for l in &mut self.links[start.3..end.3] {
+            l.x += dx;
+            l.y += dy;
+        }
+        for b in &mut self.bounds[start.4..end.4] {
             b.x += dx;
             b.y += dy;
         }
@@ -2379,6 +2471,7 @@ impl Ctx<'_> {
                 href: None,
                 hard_break: false,
                 baseline_shift: 0.0,
+                atomic: None,
             });
             *pending_space = false;
             first = false;
@@ -2434,6 +2527,7 @@ impl Ctx<'_> {
                         href: if style.hidden { None } else { link.clone() },
                         hard_break: false,
                         baseline_shift: shift,
+                        atomic: None,
                     });
                     *pending_space = false;
                     first = false;
@@ -2465,6 +2559,7 @@ impl Ctx<'_> {
                         href: link.clone(),
                         hard_break: true,
                         baseline_shift: 0.0,
+                        atomic: None,
                     });
                     *pending_space = false;
                     return;
@@ -2597,7 +2692,10 @@ impl Ctx<'_> {
                 } else {
                     0.0
                 };
-                let ww = self.font.measure(&w.text, w.font_size);
+                let ww = match w.atomic {
+                    Some((_, _, bw, _)) => bw,
+                    None => self.font.measure(&w.text, w.font_size),
+                };
                 if !block.nowrap && i > line_start && pen + space + ww > avail {
                     break;
                 }
@@ -2615,6 +2713,7 @@ impl Ctx<'_> {
             // Line width, gap count, and tallest font for baseline/height.
             let mut line_w = 0.0f32;
             let mut max_size = 0.0f32;
+            let mut atomic_h = 0.0f32; // tallest inline-block on the line
             let mut gaps = 0u32;
             for (j, w) in line.iter().enumerate() {
                 let has_space = j > 0 && w.space_before;
@@ -2626,7 +2725,14 @@ impl Ctx<'_> {
                 if has_space && !w.text.is_empty() {
                     gaps += 1;
                 }
-                line_w += space + self.font.measure(&w.text, w.font_size);
+                let ww = match w.atomic {
+                    Some((_, _, bw, bh)) => {
+                        atomic_h = atomic_h.max(bh);
+                        bw
+                    }
+                    None => self.font.measure(&w.text, w.font_size),
+                };
+                line_w += space + ww;
                 max_size = max_size.max(w.font_size);
             }
             // `justify` stretches inter-word gaps on every line but the last
@@ -2652,9 +2758,19 @@ impl Ctx<'_> {
                 0.0
             };
             let line_top = self.cursor_y;
-            let line_h = max_size * block.line_height;
+            let line_h = (max_size * block.line_height).max(atomic_h);
             let mut pen_x = lx + offset + indent;
             for (j, w) in line.iter().enumerate() {
+                // An inline-block atomic: advance by its width and shift its
+                // (origin-laid-out) display-list range to the line position.
+                if let Some((start, end, bw, _bh)) = w.atomic {
+                    if j > 0 && w.space_before {
+                        pen_x += self.font.measure(" ", w.font_size) + block.word_spacing;
+                    }
+                    self.shift_display_list_range(start, end, pen_x, line_top);
+                    pen_x += bw;
+                    continue;
+                }
                 // The <br> sentinel only contributes line height, no glyphs.
                 if w.text.is_empty() {
                     continue;
@@ -3870,6 +3986,32 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
             second_x("40px") > second_x("0px") + 10.0,
             "gap should push the second item rightward"
         );
+    }
+
+    #[test]
+    fn inline_block_flows_on_the_line_with_box_width() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Two inline-block boxes (80px each) plus trailing text on the same line:
+        // the second box sits ~80px right of the first, and "after" sits past both.
+        let html = "<p>\
+            <span style=\"display:inline-block; width:80px; background:#f00\">A</span>\
+            <span style=\"display:inline-block; width:80px; background:#0f0\">B</span>\
+            after</p>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let a = l.runs.iter().find(|r| r.text == "A").unwrap();
+        let b = l.runs.iter().find(|r| r.text == "B").unwrap();
+        let after = l.runs.iter().find(|r| r.text == "after").unwrap();
+        // Same line (≈ same baseline).
+        assert!((a.baseline - b.baseline).abs() < 2.0, "boxes on one line");
+        // B is ~80px (+ a space) right of A; "after" is right of B.
+        assert!(b.x > a.x + 75.0, "B box width respected: a={} b={}", a.x, b.x);
+        assert!(after.x > b.x + 75.0, "text flows after both boxes: b={} after={}", b.x, after.x);
+        // The inline-block backgrounds (red, green) were shifted onto the line.
+        assert!(l.rects.iter().any(|r| r.color.r > 200 && r.color.g < 60 && r.x > 0.0 && r.y > 0.0), "red box placed");
     }
 
     #[test]

@@ -25,6 +25,8 @@ pub use argus_css::Stylesheet as AuthorStylesheet;
 pub enum Display {
     Block,
     Inline,
+    /// `display: inline-block` — an atomic box placed in the inline flow.
+    InlineBlock,
     /// A flex container (display: flex); children lay out in a row.
     Flex,
     /// A grid container (display: grid); children flow into equal columns.
@@ -789,6 +791,7 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     if let Some(v) = map.get("display") {
         cs.display = match v.as_str() {
             "block" => Display::Block,
+            "inline-block" => Display::InlineBlock,
             "flex" | "inline-flex" => Display::Flex,
             "grid" | "inline-grid" => Display::Grid,
             "none" => Display::None,
