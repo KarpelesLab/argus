@@ -2376,8 +2376,13 @@ impl Ctx<'_> {
                     .iter()
                     .enumerate()
                     .map(|(i, &b)| {
+                        // An item's `min-width` is a floor it won't shrink below.
+                        let floor = istyles[i]
+                            .min_width
+                            .map(|l| l.to_px(istyles[i].font_size, content_w))
+                            .unwrap_or(0.0);
                         if total_scaled > 0.0 {
-                            (b - overflow * scaled[i] / total_scaled).max(0.0)
+                            (b - overflow * scaled[i] / total_scaled).max(floor)
                         } else {
                             b
                         }
@@ -5475,6 +5480,28 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         // b and c come before a horizontally.
         assert!(bx < ax && cx < ax, "a (order:2) moves last: a={ax} b={bx} c={cx}");
         assert!(bx < cx, "b before c (equal order keeps source order)");
+    }
+
+    #[test]
+    fn flex_shrink_respects_min_width() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Two 200px items in a 300px row overflow and shrink. The second has
+        // min-width:150px, so it can't shrink below that — pushing the overflow
+        // onto the first item, whose right edge (≈ where the second starts) is
+        // therefore less than half the row.
+        let html = "<div style=\"display:flex; width:300px\">\
+                      <div style=\"width:200px\">a</div>\
+                      <div style=\"width:200px; min-width:150px\">b</div>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 600.0, &ImageSizes::new());
+        let bx = l.runs.iter().find(|r| r.text == "b").unwrap().x;
+        // Second item is 150px wide → it starts at ≈ 300-150 = 150px from the row
+        // left (page margin); the first item absorbed the rest.
+        assert!((bx - (PAGE_MARGIN + 150.0)).abs() < 8.0, "b honors min-width 150: {bx}");
     }
 
     #[test]
