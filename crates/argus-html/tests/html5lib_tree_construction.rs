@@ -538,4 +538,47 @@ hi</textarea>
 |         <tr>
 |           <td>
 |             "c"
+
+#data
+<meta charset="utf-8"><title>T</title>
+#errors
+#document
+| <html>
+|   <head>
+|     <meta>
+|       charset="utf-8"
+|     <title>
+|       "T"
+|   <body>
+
+#data
+<ul><li>a<ul><li>b</ul></li></ul>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <ul>
+|       <li>
+|         "a"
+|         <ul>
+|           <li>
+|             "b"
+
+#data
+<table><thead><tr><th>H</th></thead><tbody><tr><td>D</table>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <table>
+|       <thead>
+|         <tr>
+|           <th>
+|             "H"
+|       <tbody>
+|         <tr>
+|           <td>
+|             "D"
 "####;

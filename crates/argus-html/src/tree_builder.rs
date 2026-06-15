@@ -223,6 +223,21 @@ impl TreeBuilder {
         false
     }
 
+    /// Whether an open `item` (e.g. `li`/`dd`/`dt`) should be closed by a new one:
+    /// scan the open stack top-down and report `true` only if `item` is found before
+    /// any of `stoppers` (its list/sectioning container). A nested list thus shields
+    /// the outer item — matching the spec's "step until a special element" loop.
+    fn list_item_open(&self, item: &str, stoppers: &[&str]) -> bool {
+        for &id in self.open.iter().rev() {
+            match self.name_of(id) {
+                Some(n) if n == item => return true,
+                Some(n) if stoppers.contains(&n) => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
     fn generate_implied_end_tags(&mut self, except: Option<&str>) {
         while let Some(&top) = self.open.last() {
             match self.name_of(top) {
@@ -454,7 +469,7 @@ impl TreeBuilder {
         if CLOSES_P.contains(&name) {
             self.close_p();
         }
-        if name == "li" && self.has_in_scope("li", false) {
+        if name == "li" && self.list_item_open("li", &["ul", "ol", "menu", "dir"]) {
             self.generate_implied_end_tags(Some("li"));
             self.pop_until("li");
         }
@@ -462,9 +477,9 @@ impl TreeBuilder {
         // `except` must name the item we pop_until, so implied-end-tag generation
         // doesn't pop it out from under us first.
         if matches!(name, "dd" | "dt") {
-            let item = if self.has_in_scope("dd", false) {
+            let item = if self.list_item_open("dd", &["dl"]) {
                 Some("dd")
-            } else if self.has_in_scope("dt", false) {
+            } else if self.list_item_open("dt", &["dl"]) {
                 Some("dt")
             } else {
                 None
