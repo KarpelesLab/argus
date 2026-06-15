@@ -429,6 +429,26 @@ var navigator = window.navigator = {
   doNotTrack: null
 };
 
+// `matchMedia`: a conservative stub (nothing matches) with the listener surface,
+// so responsive-JS feature detection doesn't throw.
+window.matchMedia = function(q) {
+  return {
+    matches: false, media: "" + q, onchange: null,
+    addListener: function() {}, removeListener: function() {},
+    addEventListener: function() {}, removeEventListener: function() {},
+    dispatchEvent: function() { return false; }
+  };
+};
+
+// `MutationObserver`: a no-op stub (we reconcile synchronously, so there are no
+// async mutation records to deliver). Scripts that construct one won't break.
+function MutationObserver(cb) {
+  return {
+    observe: function() {}, disconnect: function() {}, takeRecords: function() { return []; }
+  };
+}
+window.MutationObserver = MutationObserver;
+
 // Timers: there is no wall clock in the synchronous reconciliation model, so
 // scheduled callbacks are queued and drained (earliest delay first) after the
 // script + event dispatches run. This makes deferred-init patterns work; it does
@@ -457,6 +477,15 @@ window.setTimeout = setTimeout; window.setInterval = setInterval;
 window.clearTimeout = clearTimeout; window.clearInterval = clearInterval;
 window.requestAnimationFrame = requestAnimationFrame;
 window.cancelAnimationFrame = cancelAnimationFrame;
+// `requestIdleCallback`: run the callback during the drain with a stub deadline.
+function requestIdleCallback(fn) {
+  return setTimeout(function() {
+    fn({ didTimeout: false, timeRemaining: function() { return 0; } });
+  }, 0);
+}
+function cancelIdleCallback(id) { clearTimeout(id); }
+window.requestIdleCallback = requestIdleCallback;
+window.cancelIdleCallback = cancelIdleCallback;
 var __rafClock = 0;
 function __argus_drain() {
   var iters = 0;
@@ -2097,6 +2126,25 @@ mod tests {
             .collect();
         assert_eq!(kids, vec!["ab", "be"], "afterbegin first, beforeend last");
         assert_eq!(text_of(&doc, "t"), "ABmidBE");
+    }
+
+    #[test]
+    fn matchmedia_observer_and_idle_callback_stubs() {
+        let mut doc = argus_html::parse(
+            "<div id=\"o\">x</div>\
+             <script>\
+               var m = window.matchMedia('(min-width: 600px)');\
+               var obs = new MutationObserver(function(){});\
+               obs.observe(document.body, {childList:true});\
+               requestIdleCallback(function(){\
+                 document.getElementById('o').textContent =\
+                   m.matches + '|' + m.media + '|' + (typeof obs.disconnect);\
+               });\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        // The idle callback ran during the drain; matchMedia/observer didn't throw.
+        assert_eq!(text_of(&doc, "o"), "false|(min-width: 600px)|function");
     }
 
     #[test]
