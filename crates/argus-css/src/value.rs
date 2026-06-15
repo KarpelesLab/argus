@@ -24,23 +24,39 @@ impl Length {
     }
 }
 
-/// Parse a length from a trimmed value string (e.g. `12px`, `1.5em`, `50%`, `0`).
+/// Parse a length from a trimmed value string (e.g. `12px`, `1.5em`, `50%`, `0`,
+/// `10pt`, `2cm`). Absolute units resolve to px via the CSS reference pixel
+/// (`96px = 1in`); `em`/`rem` stay relative until resolved against a font size.
 pub fn parse_length(s: &str) -> Option<Length> {
     let s = s.trim();
     if s == "0" {
         return Some(Length::Zero);
     }
-    if let Some(num) = s.strip_suffix("px") {
-        return num.trim().parse().ok().map(Length::Px);
+    if let Some(num) = s.strip_suffix('%') {
+        return num.trim().parse().ok().map(Length::Percent);
+    }
+    // Font-relative units. `rem` must be checked before `em` (else `em` matches the
+    // `…rem` suffix and fails to parse the leftover `r`).
+    if let Some(num) = s.strip_suffix("rem") {
+        return num.trim().parse().ok().map(Length::Em); // rem≈em until root size lands
     }
     if let Some(num) = s.strip_suffix("em") {
         return num.trim().parse().ok().map(Length::Em);
     }
-    if let Some(num) = s.strip_suffix("rem") {
-        return num.trim().parse().ok().map(Length::Em); // rem≈em until root size lands
-    }
-    if let Some(num) = s.strip_suffix('%') {
-        return num.trim().parse().ok().map(Length::Percent);
+    // Absolute units → px.
+    const ABS: &[(&str, f32)] = &[
+        ("px", 1.0),
+        ("pt", 96.0 / 72.0),
+        ("pc", 16.0),
+        ("in", 96.0),
+        ("cm", 96.0 / 2.54),
+        ("mm", 96.0 / 25.4),
+        ("q", 96.0 / 101.6),
+    ];
+    for (suffix, mult) in ABS {
+        if let Some(num) = s.strip_suffix(suffix) {
+            return num.trim().parse::<f32>().ok().map(|v| Length::Px(v * mult));
+        }
     }
     // Bare number → treat as px (lenient).
     s.parse().ok().map(Length::Px)
@@ -255,5 +271,21 @@ mod tests {
         assert_eq!(parse_length("50%"), Some(Length::Percent(50.0)));
         assert_eq!(parse_length("0"), Some(Length::Zero));
         assert_eq!(Length::Em(2.0).to_px(16.0, 0.0), 32.0);
+    }
+
+    #[test]
+    fn rem_and_absolute_units() {
+        // Regression: `rem` must parse (previously the `em` branch swallowed it).
+        assert_eq!(parse_length("2rem"), Some(Length::Em(2.0)));
+        // Absolute units resolve to px (96px = 1in).
+        assert_eq!(parse_length("1in"), Some(Length::Px(96.0)));
+        assert_eq!(parse_length("72pt"), Some(Length::Px(96.0)));
+        assert_eq!(parse_length("1pc"), Some(Length::Px(16.0)));
+        let cm = parse_length("2.54cm").unwrap().to_px(16.0, 0.0);
+        assert!((cm - 96.0).abs() < 0.01, "2.54cm ≈ 96px, got {cm}");
+        let mm = parse_length("25.4mm").unwrap().to_px(16.0, 0.0);
+        assert!((mm - 96.0).abs() < 0.01, "25.4mm ≈ 96px, got {mm}");
+        let q = parse_length("40q").unwrap().to_px(16.0, 0.0);
+        assert!((q - 37.795).abs() < 0.01, "40q = 1cm ≈ 37.8px, got {q}");
     }
 }
