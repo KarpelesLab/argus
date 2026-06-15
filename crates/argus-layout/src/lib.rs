@@ -2715,12 +2715,26 @@ impl Ctx<'_> {
                 col_nat[p.col] = col_nat[p.col].max(cw);
             }
         }
-        let nat_total: f32 = col_nat.iter().sum();
-        let col_w: Vec<f32> = if nat_total > 1.0 {
-            col_nat.iter().map(|&n| n * table_w / nat_total).collect()
-        } else {
-            vec![table_w / cols.max(1) as f32; cols]
-        };
+        // Explicit `<col>`/`<colgroup>` widths pin those columns; the rest share
+        // the leftover table width by their content (or equally). With no `<col>`
+        // declared this reduces exactly to content-proportional auto widths.
+        let col_explicit = self.collect_col_widths(id, cols, style.font_size, table_w);
+        let explicit_total: f32 = col_explicit.iter().flatten().sum();
+        let auto_cols = (0..cols).filter(|&c| col_explicit[c].is_none());
+        let auto_nat_total: f32 = auto_cols.clone().map(|c| col_nat[c]).sum();
+        let auto_count = auto_cols.count();
+        let remaining = (table_w - explicit_total).max(0.0);
+        let col_w: Vec<f32> = (0..cols)
+            .map(|c| {
+                if let Some(w) = col_explicit[c] {
+                    w
+                } else if auto_nat_total > 1.0 {
+                    col_nat[c] * remaining / auto_nat_total
+                } else {
+                    remaining / auto_count.max(1) as f32
+                }
+            })
+            .collect();
         let mut col_x = vec![table_left; cols];
         let mut acc = table_left;
         for (c, w) in col_w.iter().enumerate() {
@@ -2801,6 +2815,76 @@ impl Ctx<'_> {
             .and_then(|v| v.trim().parse::<u32>().ok())
             .unwrap_or(1)
             .max(1)
+    }
+
+    /// A `<col>`/`<colgroup>` slot's `(span, explicit width px)`: the element's
+    /// CSS `width` (resolved against `table_w`), else its HTML `width` attribute
+    /// (a px number or a percentage). `None` width means an auto column.
+    fn col_slot(&self, el: NodeId, fs: f32, table_w: f32) -> (usize, Option<f32>) {
+        let Some(e) = self.doc.node(el).as_element() else {
+            return (1, None);
+        };
+        let span = e
+            .attr("span")
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .unwrap_or(1)
+            .max(1);
+        let cstyle = computed_style(self.doc, el, &ComputedStyle::initial(), self.author);
+        let w = cstyle
+            .width
+            .map(|l| l.to_px(fs, table_w))
+            .or_else(|| {
+                e.attr("width")
+                    .and_then(argus_css::parse_length)
+                    .map(|l| l.to_px(fs, table_w))
+            })
+            .filter(|w| *w > 0.0);
+        (span, w)
+    }
+
+    /// Per-column explicit widths from a table's `<colgroup>`/`<col>` children
+    /// (in document order, honoring `span`). Columns without a `<col>` width are
+    /// `None` (auto). Returns all-`None` when the table declares no columns.
+    fn collect_col_widths(&self, table: NodeId, cols: usize, fs: f32, table_w: f32) -> Vec<Option<f32>> {
+        let mut out = vec![None; cols];
+        let mut idx = 0usize;
+        let mut put = |this: &Self, el: NodeId| {
+            let (span, w) = this.col_slot(el, fs, table_w);
+            for _ in 0..span {
+                if idx >= cols {
+                    break;
+                }
+                if w.is_some() {
+                    out[idx] = w;
+                }
+                idx += 1;
+            }
+        };
+        for child in self.doc.children(table) {
+            let Some(ce) = self.doc.node(child).as_element() else {
+                continue;
+            };
+            if ce.name.is_html("colgroup") {
+                let inner: Vec<NodeId> = self
+                    .doc
+                    .children(child)
+                    .filter(|&c| {
+                        matches!(&self.doc.node(c).data,
+                            NodeData::Element(e) if e.name.is_html("col"))
+                    })
+                    .collect();
+                if inner.is_empty() {
+                    put(self, child); // group itself carries span/width
+                } else {
+                    for col in inner {
+                        put(self, col);
+                    }
+                }
+            } else if ce.name.is_html("col") {
+                put(self, child);
+            }
+        }
+        out
     }
 
     /// Collect a table's rows (flattening `thead`/`tbody`/`tfoot`); each row is the
@@ -4488,6 +4572,31 @@ mod tests {
         // Three distinct column x-positions.
         let xs: std::collections::BTreeSet<i32> = cell_runs.iter().map(|r| r.x as i32).collect();
         assert_eq!(xs.len(), 3, "expected 3 columns, got {xs:?}");
+    }
+
+    #[test]
+    fn table_col_widths_pin_columns() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A 300px table (less page margins) with the first column pinned to 200px
+        // via <col>; the second column takes the remainder. The second column's
+        // cells should start ~200px past the first column's left edge.
+        let html = "<table style=\"width:300px\">\
+                      <colgroup><col style=\"width:200px\"><col></colgroup>\
+                      <tr><td>a</td><td>b</td></tr>\
+                    </table>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 600.0, &ImageSizes::new());
+        let a = l.runs.iter().find(|r| r.text == "a").unwrap();
+        let b = l.runs.iter().find(|r| r.text == "b").unwrap();
+        assert!(
+            (b.x - a.x - 200.0).abs() < 8.0,
+            "second column starts ~200px right of the first: a={} b={}",
+            a.x,
+            b.x
+        );
     }
 
     #[test]
