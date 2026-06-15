@@ -1401,4 +1401,53 @@ hi</pre>
 |     <img>
 |       alt="y"
 |       src="x"
+
+#data
+<p>a&amp;&lt;b</p>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <p>
+|       "a&<b"
+
+#data
+<div><span>x</span><span>y</span></div>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <div>
+|       <span>
+|         "x"
+|       <span>
+|         "y"
+
+#data
+<h1>a<b>b</b>c</h1>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <h1>
+|       "a"
+|       <b>
+|         "b"
+|       "c"
+
+#data
+<ol><li>1</li><li>2</li></ol>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <ol>
+|       <li>
+|         "1"
+|       <li>
+|         "2"
 "####;
