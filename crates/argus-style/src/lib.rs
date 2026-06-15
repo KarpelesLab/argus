@@ -216,6 +216,8 @@ pub struct ComputedStyle {
     pub decoration_color: Option<Color>,
     /// `accent-color` — tint for form controls (checkbox/radio/progress); inherited.
     pub accent_color: Option<Color>,
+    /// `text-shadow` as `(offset-x, offset-y, color)` in px (blur ignored); inherited.
+    pub text_shadow: Option<(f32, f32, Color)>,
     /// Column count for a grid container (from `grid-template-columns`).
     pub grid_columns: u32,
     /// Per-column track sizes (parallel to `grid_columns`, capped at
@@ -335,6 +337,7 @@ impl ComputedStyle {
             overline: false,
             decoration_color: None,
             accent_color: None,
+            text_shadow: None,
             grid_columns: 1,
             grid_tracks: [GridTrack::Auto; GRID_MAX_TRACKS],
             grid_column_span: 1,
@@ -566,6 +569,7 @@ pub fn computed_style(
         pre_wrap: parent.pre_wrap,               // white-space inherits
         break_word: parent.break_word,           // overflow-wrap inherits
         accent_color: parent.accent_color,       // accent-color inherits
+        text_shadow: parent.text_shadow,         // text-shadow inherits
         list_style: parent.list_style,           // list-style-type inherits
         text_transform: parent.text_transform,   // text-transform inherits
         line_height: parent.line_height,         // line-height inherits
@@ -764,6 +768,13 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             None
         } else {
             resolve_color(v, cs.color, parent.accent_color.unwrap_or(cs.color))
+        };
+    }
+    if let Some(v) = map.get("text-shadow") {
+        cs.text_shadow = if v.trim() == "none" {
+            None
+        } else {
+            parse_text_shadow(v, cs.color, cs.font_size)
         };
     }
     if let Some(v) = map
@@ -1275,6 +1286,28 @@ fn parse_transform_translate(v: &str) -> Option<(Length, Length)> {
         }
     }
     None
+}
+
+/// Parse a (single) `text-shadow` into `(offset-x, offset-y, color)` in px. The
+/// first two lengths are the offsets (a third, the blur radius, is ignored); a
+/// color token anywhere sets the shadow color (default: the element's text color).
+fn parse_text_shadow(v: &str, text_color: Color, fs: f32) -> Option<(f32, f32, Color)> {
+    // Only the first comma-separated shadow layer is modeled.
+    let layer = v.split(',').next()?.trim();
+    let mut lengths: Vec<f32> = Vec::new();
+    let mut color = text_color;
+    for tok in layer.split_whitespace() {
+        if let Some(l) = parse_length(tok) {
+            lengths.push(l.to_px(fs, 0.0));
+        } else if let Some(c) = parse_color(tok) {
+            color = c;
+        }
+    }
+    if lengths.len() >= 2 {
+        Some((lengths[0], lengths[1], color))
+    } else {
+        None
+    }
 }
 
 /// Parse the `scale`/`scaleX`/`scaleY` part of a `transform` value into an

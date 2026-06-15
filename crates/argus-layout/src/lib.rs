@@ -180,6 +180,8 @@ struct InlineWord {
     bold: bool,
     /// Whether this word is italic (`font-style: italic`).
     italic: bool,
+    /// `text-shadow` (offset-x, offset-y, color), if any.
+    shadow: Option<(f32, f32, argus_geometry::Color)>,
     /// Color of the decoration lines (`text-decoration-color`, else the text color).
     decoration_color: argus_geometry::Color,
     /// The hyperlink target, if this word is inside an `<a href>`.
@@ -462,6 +464,7 @@ impl Ctx<'_> {
                         color: style.color,
                         bold: style.bold,
                         italic: style.italic,
+                        shadow: style.text_shadow,
                     });
                 }
                 bullet => {
@@ -532,6 +535,7 @@ impl Ctx<'_> {
                         color,
                         bold: style.bold,
                         italic: style.italic,
+                        shadow: style.text_shadow,
                     });
                     self.cursor_y += fs * style.line_height;
                 }
@@ -587,6 +591,7 @@ impl Ctx<'_> {
                         overline: false,
                         bold: false,
                         italic: false,
+                        shadow: None,
                         decoration_color: argus_geometry::Color::TRANSPARENT,
                         href: None,
                         hard_break: false,
@@ -1103,6 +1108,7 @@ impl Ctx<'_> {
                         color,
                         bold: istyle.bold,
                         italic: istyle.italic,
+                        shadow: istyle.text_shadow,
                     });
                     self.cursor_y += fs * istyle.line_height;
                 }
@@ -2132,6 +2138,7 @@ impl Ctx<'_> {
                 overline: style.overline && !style.hidden,
                 bold: style.bold,
                 italic: style.italic,
+                shadow: style.text_shadow,
                 decoration_color: style.fade(style.decoration_color.unwrap_or(style.color)),
                 href: None,
                 hard_break: false,
@@ -2186,6 +2193,7 @@ impl Ctx<'_> {
                         overline: style.overline && !style.hidden,
                         bold: style.bold,
                         italic: style.italic,
+                        shadow: style.text_shadow,
                         decoration_color: style.fade(style.decoration_color.unwrap_or(style.color)),
                         href: if style.hidden { None } else { link.clone() },
                         hard_break: false,
@@ -2216,6 +2224,7 @@ impl Ctx<'_> {
                         overline: false,
                         bold: false,
                         italic: false,
+                        shadow: None,
                         decoration_color: argus_geometry::Color::TRANSPARENT,
                         href: link.clone(),
                         hard_break: true,
@@ -2304,6 +2313,7 @@ impl Ctx<'_> {
                     color,
                     bold: taken.iter().any(|w| w.bold),
                     italic: taken.iter().any(|w| w.italic),
+                    shadow: taken.iter().find_map(|w| w.shadow),
                 });
                 self.cursor_y += max_size * block.line_height;
                 return;
@@ -2426,6 +2436,7 @@ impl Ctx<'_> {
                     color: w.color,
                     bold: w.bold,
                     italic: w.italic,
+                    shadow: w.shadow,
                 });
                 if w.underline {
                     let uy = wb + (w.font_size * 0.08).max(1.0);
@@ -2960,6 +2971,21 @@ mod tests {
         assert!(l.runs.iter().find(|r| r.text == "slanted").unwrap().italic, "<em> is italic");
         assert!(l.runs.iter().find(|r| r.text == "x").unwrap().italic, "font-style:italic");
         assert!(!l.runs.iter().find(|r| r.text == "plain").unwrap().italic, "plain not italic");
+    }
+
+    #[test]
+    fn text_shadow_is_carried_on_runs() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let html = "<p style=\"text-shadow: 2px 3px #ff0000\">hi</p>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let run = l.runs.iter().find(|r| r.text == "hi").unwrap();
+        let (dx, dy, c) = run.shadow.expect("shadow set");
+        assert!((dx - 2.0).abs() < 0.5 && (dy - 3.0).abs() < 0.5, "offsets {dx},{dy}");
+        assert!(c.r > 200 && c.g < 60, "shadow color red");
     }
 
     #[test]

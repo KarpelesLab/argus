@@ -84,6 +84,8 @@ pub struct TextRun {
     pub bold: bool,
     /// Italic text is faux-slanted by an x-shear of the glyph run.
     pub italic: bool,
+    /// `text-shadow` as `(offset-x, offset-y, color)`, painted behind the glyphs.
+    pub shadow: Option<(f32, f32, Color)>,
 }
 
 /// A filled rectangle in canvas pixels (e.g. an element background), optionally
@@ -304,6 +306,18 @@ fn render_run(root: Group, width: u32, height: u32) -> oxideav_core::VideoFrame 
 /// faux-bolded by overprinting a second copy offset ~0.6px on the x-axis, which
 /// thickens the strokes without a dedicated bold face.
 fn push_run_nodes(font: &Font, run: &TextRun, out: &mut Vec<Node>) {
+    // Paint the text-shadow copy first (behind the glyphs).
+    if let Some((dx, dy, scolor)) = run.shadow {
+        let spaint = Paint::Solid(rgba_of(scolor));
+        let mut sgroup = build_run(font, &run.text, run.size_px, run.x + dx, run.baseline + dy);
+        if run.italic {
+            sgroup.transform = sgroup.transform.compose(&Transform2D::skew_x(-0.21));
+        }
+        for child in &mut sgroup.children {
+            recolor(child, &spaint);
+        }
+        out.push(Node::Group(sgroup));
+    }
     let paint = Paint::Solid(rgba_of(run.color));
     let offsets: &[f32] = if run.bold { &[0.0, 0.6] } else { &[0.0] };
     for &dx in offsets {
