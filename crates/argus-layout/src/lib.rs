@@ -21,8 +21,9 @@ use argus_dom::{Document, ElementData, NodeData, NodeId};
 use argus_gfx::{Font, RectFill, TextRun};
 use argus_style::{
     author_stylesheet, computed_style, AlignItems, AuthorStylesheet, BoxSizing, Clear,
-    ComputedStyle, Display, FlexDirection, Float, GridTrack, JustifyContent, Length, ListStyle,
-    Position, PseudoElement, TextAlign, TextTransform, VerticalAlign, GRID_MAX_TRACKS,
+    ComputedStyle, Display, FlexDirection, Float, Gradient, GradientDir, GridTrack, JustifyContent,
+    Length, ListStyle, Position, PseudoElement, TextAlign, TextTransform, VerticalAlign,
+    GRID_MAX_TRACKS,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -134,6 +135,20 @@ fn clamp_content_width(style: &ComputedStyle, width: f32, avail: f32) -> f32 {
 /// A snapshot of the display-list lengths (rects, runs, images, links, bounds),
 /// used to shift everything appended after the mark by a delta.
 type DisplayListMark = (usize, usize, usize, usize, usize);
+
+/// Strip count used to approximate a `linear-gradient` background.
+const GRAD_STEPS: usize = 24;
+
+/// Linearly interpolate between two colors (`t` in `0..=1`).
+fn lerp_color(a: argus_geometry::Color, b: argus_geometry::Color, t: f32) -> argus_geometry::Color {
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round().clamp(0.0, 255.0) as u8;
+    argus_geometry::Color {
+        r: l(a.r, b.r),
+        g: l(a.g, b.g),
+        b: l(a.b, b.b),
+        a: l(a.a, b.a),
+    }
+}
 
 /// A placed float: the vertical band it occupies and the inner edge that inline
 /// content flows up to (a left float's right edge; a right float's left edge).
@@ -433,6 +448,15 @@ impl Ctx<'_> {
                 radius: style.border_radius,
             });
             self.rects.len() - 1
+        });
+        // A linear-gradient background reserves a fixed strip budget, painted over
+        // the (optional) solid bg but behind content; filled once height is known.
+        let grad_start = (style.background_gradient.is_some() && !style.hidden).then(|| {
+            let i = self.rects.len();
+            for _ in 0..GRAD_STEPS {
+                self.rects.push(RectFill::default());
+            }
+            i
         });
         let has_border = style.border_color.a > 0
             && !style.hidden
@@ -794,6 +818,16 @@ impl Ctx<'_> {
         if let Some(i) = bg_idx {
             self.rects[i].h = border_box_h;
         }
+        if let (Some(start), Some(g)) = (grad_start, style.background_gradient) {
+            self.fill_gradient_strips(
+                start,
+                &g,
+                border_box_left,
+                border_box_top,
+                border_box_w,
+                border_box_h,
+            );
+        }
         if let Some(i) = border_idx {
             let b = &style.border;
             self.rects[i] = rect(
@@ -957,6 +991,43 @@ impl Ctx<'_> {
             if dx != 0.0 || dy != 0.0 {
                 self.shift_display_list(ds_start, dx, dy);
             }
+        }
+    }
+
+    /// Fill the [`GRAD_STEPS`] reserved rect slots at `start` with stepped strips
+    /// approximating a two-stop linear gradient across the box.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_gradient_strips(&mut self, start: usize, g: &Gradient, x: f32, y: f32, w: f32, h: f32) {
+        let horizontal = matches!(g.dir, GradientDir::ToRight | GradientDir::ToLeft);
+        let reversed = matches!(g.dir, GradientDir::ToLeft | GradientDir::ToTop);
+        let n = GRAD_STEPS as f32;
+        for k in 0..GRAD_STEPS {
+            // Fractional position of this strip's center along the gradient axis.
+            let t_raw = (k as f32 + 0.5) / n;
+            let t = if reversed { 1.0 - t_raw } else { t_raw };
+            let color = lerp_color(g.from, g.to, t);
+            let rect = if horizontal {
+                let sw = w / n;
+                RectFill {
+                    x: x + k as f32 * sw,
+                    y,
+                    w: sw + 0.5, // slight overlap to avoid seams
+                    h,
+                    color,
+                    radius: 0.0,
+                }
+            } else {
+                let sh = h / n;
+                RectFill {
+                    x,
+                    y: y + k as f32 * sh,
+                    w,
+                    h: sh + 0.5,
+                    color,
+                    radius: 0.0,
+                }
+            };
+            self.rects[start + k] = rect;
         }
     }
 
@@ -2987,6 +3058,27 @@ mod tests {
         assert!(l.runs.iter().find(|r| r.text == "slanted").unwrap().italic, "<em> is italic");
         assert!(l.runs.iter().find(|r| r.text == "x").unwrap().italic, "font-style:italic");
         assert!(!l.runs.iter().find(|r| r.text == "plain").unwrap().italic, "plain not italic");
+    }
+
+    #[test]
+    fn linear_gradient_background_paints_stepped_strips() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A vertical red→blue gradient: many strips, the topmost reddish and the
+        // bottommost bluish.
+        let html = "<div style=\"width:40px; height:48px; background: linear-gradient(to bottom, #ff0000, #0000ff)\">x</div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        // Collect the gradient strips (thin, full-width ~40px).
+        let mut strips: Vec<&RectFill> = l.rects.iter().filter(|r| (r.w - 40.0).abs() < 2.0 && r.h < 4.0).collect();
+        assert!(strips.len() >= 10, "expected many gradient strips, got {}", strips.len());
+        strips.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap());
+        let top = strips.first().unwrap();
+        let bot = strips.last().unwrap();
+        assert!(top.color.r > 180 && top.color.b < 80, "top strip red, got {:?}", top.color);
+        assert!(bot.color.b > 180 && bot.color.r < 80, "bottom strip blue, got {:?}", bot.color);
     }
 
     #[test]

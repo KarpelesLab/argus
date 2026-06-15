@@ -96,6 +96,23 @@ pub enum FlexDirection {
     Column,
 }
 
+/// Direction of a (axis-aligned) linear gradient.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GradientDir {
+    ToRight,
+    ToLeft,
+    ToBottom,
+    ToTop,
+}
+
+/// A two-stop axis-aligned `linear-gradient` background.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Gradient {
+    pub dir: GradientDir,
+    pub from: Color,
+    pub to: Color,
+}
+
 /// `float` — take a box out of flow to the left/right, with content flowing past.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Float {
@@ -221,6 +238,8 @@ pub struct ComputedStyle {
     /// `box-shadow` as `(offset-x, offset-y, spread, color)` in px (outer only,
     /// blur ignored); not inherited.
     pub box_shadow: Option<(f32, f32, f32, Color)>,
+    /// A two-stop `linear-gradient` background (painted as stepped strips).
+    pub background_gradient: Option<Gradient>,
     /// Column count for a grid container (from `grid-template-columns`).
     pub grid_columns: u32,
     /// Per-column track sizes (parallel to `grid_columns`, capped at
@@ -342,6 +361,7 @@ impl ComputedStyle {
             accent_color: None,
             text_shadow: None,
             box_shadow: None,
+            background_gradient: None,
             grid_columns: 1,
             grid_tracks: [GridTrack::Auto; GRID_MAX_TRACKS],
             grid_column_span: 1,
@@ -737,6 +757,14 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     {
         if let Some(c) = resolve_color(v, cs.color, parent.background_color) {
             cs.background_color = c;
+        }
+    }
+    if let Some(v) = map
+        .get("background-image")
+        .or_else(|| map.get("background"))
+    {
+        if v.contains("linear-gradient(") {
+            cs.background_gradient = parse_linear_gradient(v);
         }
     }
     if let Some(v) = map.get("text-align") {
@@ -1315,6 +1343,76 @@ fn parse_text_shadow(v: &str, text_color: Color, fs: f32) -> Option<(f32, f32, C
     } else {
         None
     }
+}
+
+/// Parse a two-stop axis-aligned `linear-gradient(...)`. The direction is taken
+/// from a `to <side>` keyword or an angle (snapped to the nearest axis); the first
+/// and last color stops become the endpoints. Returns `None` if under two colors
+/// parse.
+fn parse_linear_gradient(v: &str) -> Option<Gradient> {
+    let start = v.find("linear-gradient(")? + "linear-gradient(".len();
+    let rest = &v[start..];
+    let inner = &rest[..rest.find(')').unwrap_or(rest.len())];
+    // Split top-level commas (none nested here beyond color funcs, which we keep
+    // whole by tracking parens).
+    let mut parts: Vec<String> = Vec::new();
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    for ch in inner.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            ',' if depth == 0 => {
+                parts.push(cur.trim().to_string());
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+    }
+    if !cur.trim().is_empty() {
+        parts.push(cur.trim().to_string());
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    // An optional leading direction (`to <side>` or `<angle>deg`).
+    let mut dir = GradientDir::ToBottom;
+    let mut color_parts = &parts[..];
+    let first = parts[0].as_str();
+    if first.starts_with("to ") {
+        dir = match first {
+            "to right" => GradientDir::ToRight,
+            "to left" => GradientDir::ToLeft,
+            "to top" => GradientDir::ToTop,
+            _ => GradientDir::ToBottom,
+        };
+        color_parts = &parts[1..];
+    } else if let Some(deg) = first.strip_suffix("deg").and_then(|d| d.trim().parse::<f32>().ok()) {
+        let a = ((deg % 360.0) + 360.0) % 360.0;
+        dir = if a < 45.0 || a >= 315.0 {
+            GradientDir::ToTop
+        } else if a < 135.0 {
+            GradientDir::ToRight
+        } else if a < 225.0 {
+            GradientDir::ToBottom
+        } else {
+            GradientDir::ToLeft
+        };
+        color_parts = &parts[1..];
+    }
+    // Each color stop may carry a trailing position; take the color token.
+    let color_of = |p: &str| -> Option<Color> {
+        p.split_whitespace().find_map(parse_color)
+    };
+    let from = color_of(color_parts.first()?)?;
+    let to = color_of(color_parts.last()?)?;
+    Some(Gradient { dir, from, to })
 }
 
 /// Parse a (single, outer) `box-shadow` into `(offset-x, offset-y, spread, color)`
