@@ -642,6 +642,19 @@ fn presentational_hints(doc: &Document, node: NodeId) -> Vec<(String, String)> {
         if let Some(c) = e.attr("color").and_then(legacy_color) {
             out.push(("color".into(), c));
         }
+        // `<font size=1..7>` maps to the legacy absolute font-size scale.
+        if let Some(px) = e.attr("size").and_then(|s| match s.trim() {
+            "1" => Some("10px"),
+            "2" => Some("13px"),
+            "3" => Some("16px"),
+            "4" => Some("18px"),
+            "5" => Some("24px"),
+            "6" => Some("32px"),
+            "7" => Some("48px"),
+            _ => None,
+        }) {
+            out.push(("font-size".into(), px.into()));
+        }
     }
     // `<table border=N>` (N>0) draws an N-px table border and a 1px border on
     // every cell; `border=0` (and no attr) draws nothing.
@@ -2233,6 +2246,16 @@ mod tests {
         let td = one(&mut doc, "td", vec![Attribute::new("nowrap", "")]);
         let cs5 = computed_style(&doc, td, &ComputedStyle::initial(), &Stylesheet::default());
         assert!(cs5.nowrap, "td nowrap → white-space: nowrap");
+
+        // <font size=5 color=red> maps to font-size + color.
+        let font = one(
+            &mut doc,
+            "font",
+            vec![Attribute::new("size", "5"), Attribute::new("color", "red")],
+        );
+        let cs6 = computed_style(&doc, font, &ComputedStyle::initial(), &Stylesheet::default());
+        assert_eq!(cs6.font_size, 24.0, "font size=5 → 24px");
+        assert_eq!(cs6.color, Color::rgb(255, 0, 0));
     }
 
     #[test]
