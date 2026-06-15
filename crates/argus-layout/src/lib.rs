@@ -2917,7 +2917,13 @@ impl Ctx<'_> {
         let col_explicit = self.collect_col_widths(id, cols, style.font_size, table_w);
         let explicit_total: f32 = col_explicit.iter().flatten().sum();
         let auto_cols = (0..cols).filter(|&c| col_explicit[c].is_none());
-        let auto_nat_total: f32 = auto_cols.clone().map(|c| col_nat[c]).sum();
+        // `table-layout: fixed` ignores cell content — auto columns split the
+        // leftover width equally (forced by zeroing the content totals).
+        let auto_nat_total: f32 = if style.table_layout_fixed {
+            0.0
+        } else {
+            auto_cols.clone().map(|c| col_nat[c]).sum()
+        };
         let auto_count = auto_cols.count();
         let remaining = (table_w - explicit_total - (cols as f32 + 1.0) * bs).max(0.0);
         let col_w: Vec<f32> = (0..cols)
@@ -5021,6 +5027,24 @@ mod tests {
                 .count()
         };
         assert!(vbars(true) < vbars(false), "collapse has fewer vbars: {} < {}", vbars(true), vbars(false));
+    }
+
+    #[test]
+    fn table_layout_fixed_equalizes_columns() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // With table-layout:fixed, the two columns split the width equally despite
+        // very different content lengths, so the second cell starts at ~half.
+        let html = "<table style=\"width:200px; table-layout:fixed\"><tr>\
+                      <td>aaaaaaaaaaaaaa</td><td>b</td>\
+                    </tr></table>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let a = l.runs.iter().find(|r| r.text == "aaaaaaaaaaaaaa").unwrap().x;
+        let b = l.runs.iter().find(|r| r.text == "b").unwrap().x;
+        assert!((b - a - 100.0).abs() < 8.0, "fixed → equal halves: a={a} b={b}");
     }
 
     #[test]

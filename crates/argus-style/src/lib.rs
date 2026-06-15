@@ -347,6 +347,9 @@ pub struct ComputedStyle {
     /// `border-collapse: collapse` — share adjacent table-cell borders into one
     /// (inherited; the table layout reads it). Defaults to separated borders.
     pub border_collapse: bool,
+    /// `table-layout: fixed` — size columns from `<col>`/explicit widths (and
+    /// equal shares), ignoring cell content (inherited; the table layout reads it).
+    pub table_layout_fixed: bool,
     /// `vertical-align` for inline content (not inherited).
     pub vertical_align: VerticalAlign,
     /// Column `gap` between flex/grid items in pixels (not inherited).
@@ -446,6 +449,7 @@ impl ComputedStyle {
             letter_spacing: 0.0,
             border_spacing: 0.0,
             border_collapse: false,
+            table_layout_fixed: false,
             vertical_align: VerticalAlign::Baseline,
             gap: 0.0,
             row_gap: 0.0,
@@ -871,6 +875,7 @@ pub fn computed_style(
         letter_spacing: parent.letter_spacing,   // letter-spacing inherits
         border_spacing: parent.border_spacing,   // border-spacing inherits
         border_collapse: parent.border_collapse, // border-collapse inherits
+        table_layout_fixed: parent.table_layout_fixed, // table-layout inherits
         hidden: parent.hidden,                   // visibility inherits
         ..ComputedStyle::initial()
     };
@@ -1399,6 +1404,9 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     }
     if let Some(v) = map.get("border-collapse") {
         cs.border_collapse = v.trim() == "collapse";
+    }
+    if let Some(v) = map.get("table-layout") {
+        cs.table_layout_fixed = v.trim() == "fixed";
     }
     // `border-spacing` (the first/horizontal value if two are given).
     if let Some(v) = map.get("border-spacing") {
