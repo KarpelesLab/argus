@@ -218,10 +218,11 @@ fn decode_bmp(bytes: &[u8]) -> Option<DecodedImage> {
     let height_raw = rd_i32(22)?;
     let bpp = rd_u16(28)?;
     let compression = rd_u32(30)?;
-    // RLE8 (compression 1, 8bpp) is decoded by its own path below; everything
-    // else must be uncompressed (BI_RGB).
+    // RLE8 (compression 1, 8bpp) and RLE4 (compression 2, 4bpp) are decoded by
+    // their own paths below; everything else must be uncompressed (BI_RGB).
     let rle8 = compression == 1 && bpp == 8;
-    if (compression != 0 && !rle8)
+    let rle4 = compression == 2 && bpp == 4;
+    if (compression != 0 && !rle8 && !rle4)
         || !matches!(bpp, 1 | 4 | 8 | 24 | 32)
         || width <= 0
         || height_raw == 0
@@ -257,8 +258,8 @@ fn decode_bmp(bytes: &[u8]) -> Option<DecodedImage> {
         Vec::new()
     };
 
-    if rle8 {
-        let rgba = decode_bmp_rle8(bytes, data_offset, width, height, &palette)?;
+    if rle8 || rle4 {
+        let rgba = decode_bmp_rle(bytes, data_offset, width, height, &palette, rle4)?;
         return Some(DecodedImage {
             width: width as u32,
             height: height as u32,
@@ -313,17 +314,20 @@ fn decode_bmp(bytes: &[u8]) -> Option<DecodedImage> {
     })
 }
 
-/// Decode an RLE8-compressed BMP bitmap (compression 1) into RGBA. RLE8 is a
-/// run/escape stream over palette indices, stored bottom-up: `(count>0, value)`
-/// emits a run; `count==0` introduces an escape — `0`=end of line, `1`=end of
-/// bitmap, `2`=delta `(dx,dy)`, `n>=3`=`n` literal indices padded to a word.
-/// All reads are bounded (`?`), so truncated/hostile streams fail closed.
-fn decode_bmp_rle8(
+/// Decode an RLE-compressed BMP bitmap into RGBA: RLE8 (compression 1, 8bpp) or,
+/// when `rle4`, RLE4 (compression 2, 4bpp). Both are run/escape streams over
+/// palette indices, stored bottom-up: `(count>0, value)` emits a run; `count==0`
+/// introduces an escape — `0`=end of line, `1`=end of bitmap, `2`=delta `(dx,dy)`,
+/// `n>=3`=`n` literal indices. RLE4 packs two 4-bit indices per byte (high nibble
+/// first) and pads absolute runs to a 2-byte word. All reads are bounded (`?`),
+/// so truncated/hostile streams fail closed.
+fn decode_bmp_rle(
     bytes: &[u8],
     offset: usize,
     width: usize,
     height: usize,
     palette: &[[u8; 3]],
+    rle4: bool,
 ) -> Option<Vec<u8>> {
     let mut rgba = vec![0u8; width * height * 4];
     fn put(rgba: &mut [u8], width: usize, height: usize, x: usize, y: usize, idx: u8, pal: &[[u8; 3]]) {
@@ -340,12 +344,22 @@ fn decode_bmp_rle8(
     let mut p = offset;
     let (mut x, mut y) = (0usize, 0usize);
     loop {
-        let count = *bytes.get(p)?;
+        let count = *bytes.get(p)? as usize;
         let value = *bytes.get(p + 1)?;
         p += 2;
         if count > 0 {
-            for _ in 0..count {
-                put(&mut rgba, width, height, x, y, value, palette);
+            // A run: RLE8 repeats one index; RLE4 alternates the two nibbles.
+            for i in 0..count {
+                let idx = if rle4 {
+                    if i & 1 == 0 {
+                        value >> 4
+                    } else {
+                        value & 0x0F
+                    }
+                } else {
+                    value
+                };
+                put(&mut rgba, width, height, x, y, idx, palette);
                 x += 1;
             }
         } else {
@@ -361,12 +375,25 @@ fn decode_bmp_rle8(
                     p += 2;
                 }
                 n => {
-                    // Absolute run of `n` literal indices, padded to an even count.
-                    for i in 0..n as usize {
-                        put(&mut rgba, width, height, x, y, *bytes.get(p + i)?, palette);
-                        x += 1;
+                    // Absolute run of `n` literal indices.
+                    let n = n as usize;
+                    if rle4 {
+                        for i in 0..n {
+                            let byte = *bytes.get(p + i / 2)?;
+                            let idx = if i & 1 == 0 { byte >> 4 } else { byte & 0x0F };
+                            put(&mut rgba, width, height, x, y, idx, palette);
+                            x += 1;
+                        }
+                        // Index bytes = ceil(n/2), padded to a 2-byte word boundary.
+                        let nbytes = n.div_ceil(2);
+                        p += nbytes + (nbytes & 1);
+                    } else {
+                        for i in 0..n {
+                            put(&mut rgba, width, height, x, y, *bytes.get(p + i)?, palette);
+                            x += 1;
+                        }
+                        p += n + (n & 1); // pad to a 2-byte word boundary
                     }
-                    p += n as usize + (n as usize & 1);
                 }
             }
         }
@@ -1152,6 +1179,38 @@ mod tests {
         // Bottom row (row 1) is all blue.
         assert_eq!(&img.rgba[16..20], &[0, 0, 255, 255], "(0,1) blue");
         assert_eq!(&img.rgba[28..32], &[0, 0, 255, 255], "(3,1) blue");
+    }
+
+    #[test]
+    fn decodes_an_rle4_bmp() {
+        // A 4x2 RLE4 BMP: top row all green; bottom row red,blue,red,blue.
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(b"BM");
+        b.extend_from_slice(&80u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&66u32.to_le_bytes()); // pixel offset = 14+40+3*4
+        b.extend_from_slice(&40u32.to_le_bytes());
+        b.extend_from_slice(&4i32.to_le_bytes()); // width
+        b.extend_from_slice(&2i32.to_le_bytes()); // height
+        b.extend_from_slice(&1u16.to_le_bytes()); // planes
+        b.extend_from_slice(&4u16.to_le_bytes()); // bpp
+        b.extend_from_slice(&2u32.to_le_bytes()); // compression = BI_RLE4
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&3u32.to_le_bytes()); // colors used = 3
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&[0, 0, 255, 0]); // 0 = red
+        b.extend_from_slice(&[0, 255, 0, 0]); // 1 = green
+        b.extend_from_slice(&[255, 0, 0, 0]); // 2 = blue
+        // bottom: run of 4 alternating red(0)/blue(2) = 0x02; EOL; top: 4×green = 0x11; EOB.
+        b.extend_from_slice(&[4, 0x02, 0, 0, 4, 0x11, 0, 1]);
+
+        let img = decode(&b).expect("decode rle4 bmp");
+        assert_eq!((img.width, img.height), (4, 2));
+        assert_eq!(&img.rgba[0..4], &[0, 255, 0, 255], "(0,0) green");
+        assert_eq!(&img.rgba[16..20], &[255, 0, 0, 255], "(0,1) red");
+        assert_eq!(&img.rgba[20..24], &[0, 0, 255, 255], "(1,1) blue");
     }
 
     // Build an 18-byte TGA header for a true-color image.
