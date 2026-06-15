@@ -198,6 +198,28 @@ fn roman_marker(n: u32, upper: bool) -> String {
     out
 }
 
+/// Resolve an image's rendered `(width, height)` from its specified `width`/
+/// `height` (CSS or attribute) and intrinsic size `iw`×`ih`, preserving the
+/// aspect ratio when only one axis is given, and shrinking proportionally when
+/// the result is wider than the content box `avail`.
+fn image_dims(w: Option<f32>, h: Option<f32>, iw: u32, ih: u32, avail: f32) -> (f32, f32) {
+    let (iwf, ihf) = (iw as f32, ih as f32);
+    let (mut w, mut h) = match (w, h) {
+        (Some(w), Some(h)) => (w, h),
+        (Some(w), None) if iw > 0 => (w, w * ihf / iwf),
+        (Some(w), None) => (w, ihf),
+        (None, Some(h)) if ih > 0 => (h * iwf / ihf, h),
+        (None, Some(h)) => (iwf, h),
+        (None, None) => (iwf, ihf),
+    };
+    // Shrink to fit the content box, scaling height to keep the aspect ratio.
+    if w > avail && w > 0.0 {
+        h *= avail / w;
+        w = avail;
+    }
+    (w, h)
+}
+
 /// Resolve a `position: relative` element's net `(dx, dy)` shift from its inset
 /// offsets. `left`/`top` win over `right`/`bottom`; lengths resolve against the
 /// containing block width `avail`.
@@ -1630,12 +1652,7 @@ impl Ctx<'_> {
             .height
             .map(|l| l.to_px(istyle.font_size, avail))
             .or_else(|| e.attr("height").and_then(|v| v.parse::<f32>().ok()));
-        let w = attr_w.unwrap_or(iw as f32).min(avail);
-        let h = match (attr_w, attr_h) {
-            (_, Some(h)) => h,
-            (Some(_), None) if iw > 0 => w * ih as f32 / iw as f32,
-            _ => ih as f32,
-        };
+        let (w, h) = image_dims(attr_w, attr_h, iw, ih, avail);
         if w > 0.0 && h > 0.0 {
             (w, h)
         } else {
@@ -1658,12 +1675,7 @@ impl Ctx<'_> {
             .height
             .map(|l| l.to_px(istyle.font_size, avail))
             .or_else(|| e.attr("height").and_then(|v| v.parse::<f32>().ok()));
-        let mut w = attr_w.unwrap_or(iw as f32).min(avail);
-        let mut h = match (attr_w, attr_h) {
-            (_, Some(h)) => h,
-            (Some(_), None) if iw > 0 => w * ih as f32 / iw as f32, // keep aspect
-            _ => ih as f32,
-        };
+        let (mut w, mut h) = image_dims(attr_w, attr_h, iw, ih, avail);
         if w <= 0.0 || h <= 0.0 {
             // Unresolved/broken image: reserve a small placeholder line.
             w = 0.0;
@@ -5128,6 +5140,17 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         assert!((before.baseline - after.baseline).abs() < 3.0, "one line");
         assert!(img.x > before.x, "image after 'before' text");
         assert!(after.x > img.x + 38.0, "'after' past the 40px image: img={} after={}", img.x, after.x);
+    }
+
+    #[test]
+    fn oversized_image_shrinks_keeping_aspect() {
+        // image_dims: a 2000x1000 intrinsic image with no explicit size, capped to
+        // an 800px content box, scales height to 400 (keeps 2:1), not 1000.
+        assert_eq!(image_dims(None, None, 2000, 1000, 800.0), (800.0, 400.0));
+        // Only width given → height follows aspect.
+        assert_eq!(image_dims(Some(300.0), None, 100, 50, 1000.0), (300.0, 150.0));
+        // Only height given → width follows aspect.
+        assert_eq!(image_dims(None, Some(80.0), 100, 50, 1000.0), (160.0, 80.0));
     }
 
     #[test]
