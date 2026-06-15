@@ -774,4 +774,31 @@ a</br>b
 |     <b>
 |       <i>
 |         "3"
+
+#data
+<h1>a<h2>b</h2>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <h1>
+|       "a"
+|     <h2>
+|       "b"
+
+#data
+<table><tr><th>h<td>d</table>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <table>
+|       <tbody>
+|         <tr>
+|           <th>
+|             "h"
+|           <td>
+|             "d"
 "####;
