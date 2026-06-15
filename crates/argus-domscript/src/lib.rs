@@ -37,6 +37,21 @@ use argus_dom::{Attribute, Document, NodeData, NodeId, QualName};
 /// The JS prelude defining `document`, `window`, and proxy element handles.
 /// `__SEED__` is replaced with a JSON object of `{ id: { textContent, ... } }`.
 const PRELUDE: &str = r##"
+// Round out `console`: alias the level methods to `log` if the host engine only
+// provides `log`, so `console.error`/`warn`/`info`/`debug` don't throw. Guarded in
+// case `console` is a read-only host object.
+try {
+  if (typeof console !== "undefined") {
+    if (!console.warn) console.warn = console.log;
+    if (!console.error) console.error = console.log;
+    if (!console.info) console.info = console.log;
+    if (!console.debug) console.debug = console.log;
+    if (!console.trace) console.trace = function() {};
+    if (!console.assert) console.assert = function() {};
+    if (!console.group) console.group = function() {};
+    if (!console.groupEnd) console.groupEnd = function() {};
+  }
+} catch (e) {}
 var __argus_ops = [];
 var __seed = __SEED__;
 // Full element tree in document order: each {i,t,id,c,p,tc} is index, tag, id,
@@ -2126,6 +2141,19 @@ mod tests {
             .collect();
         assert_eq!(kids, vec!["ab", "be"], "afterbegin first, beforeend last");
         assert_eq!(text_of(&doc, "t"), "ABmidBE");
+    }
+
+    #[test]
+    fn console_level_methods_do_not_throw() {
+        let mut doc = argus_html::parse(
+            "<div id=\"o\">x</div>\
+             <script>\
+               console.warn('w'); console.error('e'); console.info('i'); console.debug('d');\
+               document.getElementById('o').textContent = 'ran';\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        assert_eq!(text_of(&doc, "o"), "ran");
     }
 
     #[test]
