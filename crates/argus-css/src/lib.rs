@@ -307,12 +307,78 @@ fn font_face_from_block(block: &[Token]) -> Option<FontFace> {
     let src_url = decls
         .iter()
         .find(|d| d.name == "src")
-        .and_then(|d| extract_first_url(&d.value))?;
+        .and_then(|d| choose_font_src(&d.value))?;
     Some(FontFace { family, src_url })
 }
 
+/// Choose the best downloadable `url()` from an `@font-face` `src` list. `local()`
+/// sources are skipped (no local-font access in the sandbox). Among `url()`
+/// entries the most-decodable format wins — raw sfnt (ttf/otf) over WOFF (which we
+/// decompress); WOFF2/EOT/SVG are skipped (undecodable). Format is read from a
+/// `format(...)` hint, falling back to the URL extension; ties keep source order.
+fn choose_font_src(value: &str) -> Option<String> {
+    let mut best: Option<(u8, String)> = None;
+    for entry in split_top_commas(value) {
+        let entry = entry.trim();
+        let Some(url) = extract_first_url(entry) else {
+            continue; // local(...) or a malformed entry
+        };
+        // Format hint, else the URL's extension.
+        let fmt = entry
+            .find("format(")
+            .map(|p| {
+                let r = &entry[p + 7..];
+                r[..r.find(')').unwrap_or(r.len())]
+                    .trim()
+                    .trim_matches(|c| c == '"' || c == '\'')
+                    .to_ascii_lowercase()
+            })
+            .filter(|f| !f.is_empty())
+            .unwrap_or_else(|| {
+                url.rsplit('.').next().unwrap_or("").split(['?', '#']).next().unwrap_or("")
+                    .to_ascii_lowercase()
+            });
+        let rank = match fmt.as_str() {
+            "truetype" | "opentype" | "ttf" | "otf" | "sfnt" => 0,
+            "woff" => 1,
+            // woff2/eot/svg or unknown: skip (can't decode).
+            _ => continue,
+        };
+        if best.as_ref().is_none_or(|(r, _)| rank < *r) {
+            best = Some((rank, url));
+        }
+    }
+    best.map(|(_, u)| u)
+}
+
+/// Split a CSS value on commas that sit at paren depth zero (keeping `url(...)`,
+/// `format(...)`, and `local(...)` arguments intact).
+fn split_top_commas(value: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    for ch in value.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            ',' if depth == 0 => out.push(std::mem::take(&mut cur)),
+            _ => cur.push(ch),
+        }
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
 /// Extract the first `url(...)` target from a CSS value, stripping quotes and
-/// surrounding whitespace.
+/// surrounding whitespace. Returns `None` if there is no `url(...)`.
 fn extract_first_url(value: &str) -> Option<String> {
     let start = value.find("url(")? + 4;
     let rest = &value[start..];
@@ -621,7 +687,7 @@ mod tests {
     fn nested_brace_at_rules_are_skipped_cleanly() {
         // `@font-face` (one block) and `@keyframes` (nested from/to blocks) must be
         // skipped without swallowing the following real rule.
-        let css = "@font-face { font-family: X; src: url(x.woff2) } \
+        let css = "@font-face { font-family: X; src: url(x.ttf) } \
                    @keyframes spin { from { opacity: 0 } to { opacity: 1 } } \
                    p { color: green }";
         let sheet = parse_stylesheet(css);
@@ -630,7 +696,7 @@ mod tests {
         // The @font-face rule is now captured (family + url), not just skipped.
         assert_eq!(sheet.font_faces.len(), 1);
         assert_eq!(sheet.font_faces[0].family, "x");
-        assert_eq!(sheet.font_faces[0].src_url, "x.woff2");
+        assert_eq!(sheet.font_faces[0].src_url, "x.ttf");
     }
 
     #[test]
@@ -646,16 +712,26 @@ mod tests {
     }
 
     #[test]
-    fn font_face_extracts_family_and_first_url() {
+    fn font_face_picks_a_decodable_src() {
+        // Real-world src list: local() and woff2 are skipped; the ttf wins over the
+        // woff fallback (both decodable, ttf ranks higher).
         let css = "@font-face { font-family: \"Inter\"; \
-                   src: url('/fonts/inter.woff2') format('woff2'), url(inter.ttf) }";
+                   src: local('Inter'), url('/f/inter.woff2') format('woff2'), \
+                        url(inter.woff) format('woff'), url(inter.ttf) format('truetype') }";
         let sheet = parse_stylesheet(css);
         assert_eq!(sheet.font_faces.len(), 1);
         assert_eq!(sheet.font_faces[0].family, "inter", "quotes stripped, lowercased");
-        assert_eq!(sheet.font_faces[0].src_url, "/fonts/inter.woff2", "first url, quotes stripped");
-        // A face missing src is dropped.
-        let none = parse_stylesheet("@font-face { font-family: NoSrc }");
+        assert_eq!(sheet.font_faces[0].src_url, "inter.ttf", "ttf preferred over woff/woff2");
+        // woff is chosen when no raw sfnt is offered.
+        let woff = parse_stylesheet(
+            "@font-face { font-family: A; src: url(a.woff2), url(a.woff) format('woff') }",
+        );
+        assert_eq!(woff.font_faces[0].src_url, "a.woff");
+        // A face with only undecodable sources (woff2-only) is dropped.
+        let none = parse_stylesheet("@font-face { font-family: B; src: url(b.woff2) format('woff2') }");
         assert!(none.font_faces.is_empty());
+        // A face missing src entirely is dropped.
+        assert!(parse_stylesheet("@font-face { font-family: NoSrc }").font_faces.is_empty());
     }
 
     #[test]

@@ -1120,6 +1120,73 @@ fn packbits_decode(src: &[u8], out: &mut Vec<u8>) {
     }
 }
 
+/// Convert a WOFF (v1) font to a bare sfnt (TTF/OTF) byte stream that a plain
+/// TrueType/OpenType parser can read. Each table is zlib-decompressed when stored
+/// compressed and the sfnt offset table + directory are rebuilt. Returns `None` if
+/// the bytes aren't WOFF (e.g. WOFF2, which is Brotli-compressed and unsupported,
+/// or already a raw sfnt) or are malformed.
+pub fn woff_to_sfnt(bytes: &[u8]) -> Option<Vec<u8>> {
+    use compcol::vec::decompress_to_vec_capped;
+    use compcol::zlib::Zlib;
+    if bytes.len() < 44 || &bytes[0..4] != b"wOFF" {
+        return None;
+    }
+    let be32 = |o: usize| u32::from_be_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+    let be16 = |o: usize| u16::from_be_bytes([bytes[o], bytes[o + 1]]);
+    let flavor = be32(4);
+    let num_tables = be16(12) as usize;
+    let dir_start = 44;
+    if num_tables == 0 || bytes.len() < dir_start + num_tables * 20 {
+        return None;
+    }
+    // Read the WOFF table directory, decompressing each table to its sfnt form.
+    let mut tables: Vec<(u32, u32, Vec<u8>)> = Vec::with_capacity(num_tables); // tag, checksum, data
+    for i in 0..num_tables {
+        let e = dir_start + i * 20;
+        let (tag, offset, comp, orig, checksum) =
+            (be32(e), be32(e + 4) as usize, be32(e + 8) as usize, be32(e + 12) as usize, be32(e + 16));
+        if offset.checked_add(comp)? > bytes.len() || orig > (1 << 28) {
+            return None;
+        }
+        let raw = &bytes[offset..offset + comp];
+        let data = if comp != orig {
+            decompress_to_vec_capped::<Zlib>(raw, orig as u64).ok()?
+        } else {
+            raw.to_vec()
+        };
+        tables.push((tag, checksum, data));
+    }
+    // The sfnt table directory must be sorted by tag.
+    tables.sort_by_key(|t| t.0);
+    let n = tables.len() as u16;
+    let entry_selector = (15 - n.leading_zeros()) as u16;
+    let search_range = (1u16 << entry_selector).saturating_mul(16);
+    let range_shift = n.wrapping_mul(16).wrapping_sub(search_range);
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&flavor.to_be_bytes());
+    out.extend_from_slice(&n.to_be_bytes());
+    out.extend_from_slice(&search_range.to_be_bytes());
+    out.extend_from_slice(&entry_selector.to_be_bytes());
+    out.extend_from_slice(&range_shift.to_be_bytes());
+
+    // Lay out table data 4-byte aligned after the directory; fill the directory.
+    let mut offset = 12 + tables.len() * 16;
+    let mut body = Vec::new();
+    for (tag, checksum, data) in &tables {
+        out.extend_from_slice(&tag.to_be_bytes());
+        out.extend_from_slice(&checksum.to_be_bytes());
+        out.extend_from_slice(&(offset as u32).to_be_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        body.extend_from_slice(data);
+        let padded = (data.len() + 3) & !3;
+        body.resize(body.len() + (padded - data.len()), 0);
+        offset += padded;
+    }
+    out.extend_from_slice(&body);
+    Some(out)
+}
+
 /// Decode a `data:` URL (`data:[<mime>][;base64],<payload>`).
 pub fn decode_data_url(url: &str) -> Option<DecodedImage> {
     decode(&decode_data_url_bytes(url)?)
@@ -1871,6 +1938,44 @@ mod tests {
         assert_eq!(base64_decode("TWFu").unwrap(), b"Man");
         // "hello" → "aGVsbG8="
         assert_eq!(base64_decode("aGVsbG8=").unwrap(), b"hello");
+    }
+
+    #[test]
+    fn woff_unwraps_to_sfnt() {
+        // Hand-build a minimal WOFF: flavor 0x00010000, one uncompressed table
+        // `test` = b"DATA" at offset 64.
+        let mut w = Vec::new();
+        w.extend_from_slice(b"wOFF");
+        w.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // flavor
+        w.extend_from_slice(&0u32.to_be_bytes()); // length (unused by decoder)
+        w.extend_from_slice(&1u16.to_be_bytes()); // numTables
+        w.extend_from_slice(&0u16.to_be_bytes()); // reserved
+        w.extend_from_slice(&0u32.to_be_bytes()); // totalSfntSize
+        w.extend_from_slice(&[0u8; 4]); // major/minor version
+        w.extend_from_slice(&[0u8; 12]); // meta off/len/origLen
+        w.extend_from_slice(&[0u8; 8]); // priv off/len  (header = 44 bytes)
+        // Table directory entry (20 bytes): tag, offset=64, comp=4, orig=4, checksum=0.
+        w.extend_from_slice(b"test");
+        w.extend_from_slice(&64u32.to_be_bytes());
+        w.extend_from_slice(&4u32.to_be_bytes());
+        w.extend_from_slice(&4u32.to_be_bytes());
+        w.extend_from_slice(&0u32.to_be_bytes());
+        assert_eq!(w.len(), 64);
+        w.extend_from_slice(b"DATA"); // table data at offset 64
+
+        let sfnt = woff_to_sfnt(&w).expect("valid WOFF");
+        // sfnt offset table: flavor, numTables=1, then searchRange/entrySel/rangeShift.
+        assert_eq!(&sfnt[0..4], &0x0001_0000u32.to_be_bytes());
+        assert_eq!(u16::from_be_bytes([sfnt[4], sfnt[5]]), 1, "numTables");
+        // Directory entry tag + length, and the table data placed at its offset.
+        assert_eq!(&sfnt[12..16], b"test", "table tag");
+        let off = u32::from_be_bytes([sfnt[20], sfnt[21], sfnt[22], sfnt[23]]) as usize;
+        let len = u32::from_be_bytes([sfnt[24], sfnt[25], sfnt[26], sfnt[27]]) as usize;
+        assert_eq!(len, 4);
+        assert_eq!(&sfnt[off..off + len], b"DATA", "table data reassembled");
+        // Non-WOFF input is rejected (raw sfnt / garbage pass through untouched).
+        assert!(woff_to_sfnt(b"\x00\x01\x00\x00rest").is_none());
+        assert!(woff_to_sfnt(b"wOF2short").is_none());
     }
 
     #[test]

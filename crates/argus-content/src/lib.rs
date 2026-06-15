@@ -298,6 +298,9 @@ impl Content {
                 log!("web font '{}' fetch failed", face.family);
                 continue;
             }
+            // WOFF (v1) wraps an sfnt with zlib-compressed tables; unwrap it so the
+            // TTF/OTF parser can read it. Raw sfnt bytes pass through unchanged.
+            let bytes = argus_image::woff_to_sfnt(&bytes).unwrap_or(bytes);
             if let Some(font) = self.font.take() {
                 self.font = Some(font.with_web_font(key, bytes));
                 log!("loaded web font '{}' ({} bytes)", face.family, face.src_url.len());
