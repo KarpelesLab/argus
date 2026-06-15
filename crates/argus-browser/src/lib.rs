@@ -14,6 +14,8 @@ use argus_protocol::{self as proto, Msg};
 use argus_util::{log, Role};
 use std::io;
 
+mod tabbar;
+
 /// A small decorative image embedded as a `data:` URL, for the sample page.
 const SAMPLE_IMAGE: &str = include_str!("../sample_image.txt");
 
@@ -1957,14 +1959,15 @@ fn page_title(html: &str) -> String {
 }
 
 /// Load `target` (the sample when `None`/empty), provide it to content, reset its
-/// scroll, render a frame, and present it. Returns the page's content height.
+/// scroll, and render a frame. Returns the rendered frame and its content height
+/// (the caller composites the tab bar and presents).
 #[cfg(target_os = "macos")]
-fn load_and_present(
+fn load_page(
     content: &Child,
     net: &Child,
     window: &argus_platform::window::Window,
     target: Option<&str>,
-) -> io::Result<u32> {
+) -> io::Result<(Framebuffer, u32)> {
     let page = match target {
         Some(u) => fetch_html(net, u).unwrap_or_else(|e| error_page(u, &e.to_string())),
         None => sample_html(),
@@ -1973,9 +1976,39 @@ fn load_and_present(
     window.set_title(if title.is_empty() { "Argus" } else { &title });
     provide_page(content, &page)?;
     proto::send(content.channel(), Msg::SetScroll { y: 0 }, &[])?;
-    let (frame, h) = request_frame(content, net, target)?;
-    window.present(frame.pixels(), frame.size());
-    Ok(h)
+    request_frame(content, net, target)
+}
+
+/// Composite the page `content` frame beneath the tab strip and present the whole
+/// window. The window is `full`-sized; the content was rendered `TAB_BAR_H` px
+/// shorter, so it sits below the bar.
+#[cfg(target_os = "macos")]
+fn present_framed(
+    window: &argus_platform::window::Window,
+    content: &Framebuffer,
+    tabs: &Tabs,
+    full: Size,
+) -> io::Result<()> {
+    let (w, h) = (full.width, full.height);
+    let mut buf = vec![0u8; (w as usize) * (h as usize) * 4];
+    tabbar::draw(&mut buf, w, tabs.len(), tabs.active_index());
+    // Copy the content frame into the rows below the tab strip.
+    let csize = content.size();
+    let src = content.pixels();
+    let row_bytes = (csize.width.min(w) as usize) * 4;
+    for row in 0..csize.height {
+        let dst_y = tabbar::TAB_BAR_H + row;
+        if dst_y >= h {
+            break;
+        }
+        let s = (row as usize) * (csize.width as usize) * 4;
+        let d = (dst_y as usize) * (w as usize) * 4;
+        if s + row_bytes <= src.len() && d + row_bytes <= buf.len() {
+            buf[d..d + row_bytes].copy_from_slice(&src[s..s + row_bytes]);
+        }
+    }
+    window.present(&buf, full);
+    Ok(())
 }
 
 /// Run the browser in its default mode for this platform: a real window where one
@@ -2001,17 +2034,21 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
     use argus_platform::window::{Event, Window};
 
     log::set_role(Role::Browser);
-    let viewport = Size::new(800, 600);
+    // The window is 800×600; the page renders into the area below the tab strip.
+    let window_size = Size::new(800, 600);
+    let content_vp = Size::new(window_size.width, window_size.height - tabbar::TAB_BAR_H);
     log!(
-        "starting (windowed); viewport {}x{}",
-        viewport.width,
-        viewport.height
+        "starting (windowed); window {}x{}, content {}x{}",
+        window_size.width,
+        window_size.height,
+        content_vp.width,
+        content_vp.height
     );
 
     let mut content = spawn_child(Role::Content)?;
     let mut net = spawn_child(Role::NetService)?;
-    proto::parent_handshake(content.channel(), viewport)?;
-    proto::parent_handshake(net.channel(), viewport)?;
+    proto::parent_handshake(content.channel(), content_vp)?;
+    proto::parent_handshake(net.channel(), content_vp)?;
     // Per-tab navigation state. The single content process renders whichever tab
     // is active; switching re-navigates it to the active tab's URL.
     let mut tabs = Tabs::new(url.clone().unwrap_or_default());
@@ -2028,35 +2065,63 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
     // Present the first frame.
     let (frame, mut content_height) = request_frame(&content, &net, active_target(&tabs).as_deref())?;
     let title = page_title(&html);
-    let window = Window::open(if title.is_empty() { "Argus" } else { &title }, viewport);
-    window.present(frame.pixels(), frame.size());
-    log!("window open — click links, Cmd+T new tab, Cmd+W close, Cmd+Shift+[ ] switch");
+    let window = Window::open(if title.is_empty() { "Argus" } else { &title }, window_size);
+    present_framed(&window, &frame, &tabs, window_size)?;
+    log!("window open — tab bar: click a tab to switch, its right edge to close, + to open; Cmd+T/W/Shift+[ ]/1-9 too");
 
+    // Load the active tab's page and present it under the tab bar.
+    macro_rules! reload_active {
+        () => {{
+            let (frame, h) = load_page(&content, &net, &window, active_target(&tabs).as_deref())?;
+            content_height = h;
+            present_framed(&window, &frame, &tabs, window_size)?;
+        }};
+    }
     loop {
         match window.next_event() {
+            Event::MouseDown { x, y } if y < tabbar::TAB_BAR_H => {
+                // A click in the tab strip switches / closes / opens a tab.
+                match tabbar::hit_test(x, y, tabs.len(), window_size.width) {
+                    Some(tabbar::TabHit::New) => {
+                        tabs.open(String::new());
+                        reload_active!();
+                    }
+                    Some(tabbar::TabHit::Switch(i)) if i != tabs.active_index() => {
+                        tabs.switch_to(i);
+                        reload_active!();
+                    }
+                    Some(tabbar::TabHit::Close(i)) => {
+                        if !tabs.close(i) {
+                            break; // refused only for the last tab
+                        }
+                        reload_active!();
+                    }
+                    _ => {}
+                }
+            }
             Event::MouseDown { x, y } => {
+                // A click in the page area (offset past the tab strip).
+                let y = y - tabbar::TAB_BAR_H;
                 proto::send(content.channel(), Msg::InputClick { x, y }, &[])?;
-                // Content replies with the click result; navigate if a link was hit.
                 if let Msg::ClickResult { url } = proto::recv(content.channel())?.0 {
                     if !url.is_empty() {
                         let target = resolve_url(active_target(&tabs).as_deref(), &url);
                         log!("navigating to {target}");
                         tabs.active_mut().history.push(target);
                         tabs.active_mut().scroll_y = 0;
-                        content_height =
-                            load_and_present(&content, &net, &window, active_target(&tabs).as_deref())?;
+                        reload_active!();
                     } else {
-                        // Non-navigation click: the content process may have dispatched
-                        // a DOM event handler that changed the page — re-render.
+                        // Non-navigation click: a DOM handler may have changed the
+                        // page — re-render.
                         let (frame, h) =
                             request_frame(&content, &net, active_target(&tabs).as_deref())?;
                         content_height = h;
-                        window.present(frame.pixels(), frame.size());
+                        present_framed(&window, &frame, &tabs, window_size)?;
                     }
                 }
             }
             Event::Scroll { dy } => {
-                let max_scroll = content_height.saturating_sub(viewport.height);
+                let max_scroll = content_height.saturating_sub(content_vp.height);
                 let cur = tabs.active().scroll_y;
                 let next = (cur as i64 - dy as i64).clamp(0, max_scroll as i64) as u32;
                 if next != cur {
@@ -2065,64 +2130,52 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
                     let (frame, h) =
                         request_frame(&content, &net, active_target(&tabs).as_deref())?;
                     content_height = h;
-                    window.present(frame.pixels(), frame.size());
+                    present_framed(&window, &frame, &tabs, window_size)?;
                 }
             }
             Event::KeyChar { ch } => {
-                // Forward the keystroke to the focused field, then re-render.
                 proto::send(content.channel(), Msg::InputKey { ch }, &[])?;
                 let (frame, h) = request_frame(&content, &net, active_target(&tabs).as_deref())?;
                 content_height = h;
-                window.present(frame.pixels(), frame.size());
+                present_framed(&window, &frame, &tabs, window_size)?;
             }
             Event::Back => {
-                if let Some(prev) = tabs.active_mut().history.back().map(str::to_string) {
-                    log!("history back -> {prev:?}");
+                if tabs.active_mut().history.back().is_some() {
                     tabs.active_mut().scroll_y = 0;
-                    content_height =
-                        load_and_present(&content, &net, &window, active_target(&tabs).as_deref())?;
+                    reload_active!();
                 }
             }
             Event::Forward => {
-                if let Some(next) = tabs.active_mut().history.forward().map(str::to_string) {
-                    log!("history forward -> {next:?}");
+                if tabs.active_mut().history.forward().is_some() {
                     tabs.active_mut().scroll_y = 0;
-                    content_height =
-                        load_and_present(&content, &net, &window, active_target(&tabs).as_deref())?;
+                    reload_active!();
                 }
             }
             Event::NewTab => {
-                tabs.open(String::new()); // a fresh home tab, made active
+                tabs.open(String::new());
                 log!("opened tab {} of {}", tabs.active_index() + 1, tabs.len());
-                content_height =
-                    load_and_present(&content, &net, &window, active_target(&tabs).as_deref())?;
+                reload_active!();
             }
             Event::CloseTab => {
                 if !tabs.close(tabs.active_index()) {
                     log!("closing last tab; shutting down");
                     break;
                 }
-                log!("closed tab; {} left, active {}", tabs.len(), tabs.active_index() + 1);
-                content_height =
-                    load_and_present(&content, &net, &window, active_target(&tabs).as_deref())?;
+                reload_active!();
             }
             Event::NextTab => {
                 tabs.next();
-                content_height =
-                    load_and_present(&content, &net, &window, active_target(&tabs).as_deref())?;
+                reload_active!();
             }
             Event::PrevTab => {
                 tabs.prev();
-                content_height =
-                    load_and_present(&content, &net, &window, active_target(&tabs).as_deref())?;
+                reload_active!();
             }
             Event::SwitchTab { index } => {
-                // Cmd+9 jumps to the last tab (browser convention); others to index.
                 let target = if index == 8 { tabs.len() - 1 } else { index };
                 if target != tabs.active_index() && target < tabs.len() {
                     tabs.switch_to(target);
-                    content_height =
-                        load_and_present(&content, &net, &window, active_target(&tabs).as_deref())?;
+                    reload_active!();
                 }
             }
             Event::CloseRequested => {
