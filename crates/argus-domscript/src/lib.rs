@@ -30,7 +30,8 @@
 //! `classList`, scoped `querySelector`/`querySelectorAll`, `matches`/`closest`,
 //! `contains`, tree traversal (`parentNode`/`parentElement`, `children`, `childElementCount`,
 //! `first`/`lastElementChild`, `next`/`previousElementSibling`), `tagName`/
-//! `nodeName`, and `appendChild`/`append`/`insertBefore`/`insertAdjacentHTML`/`remove`.
+//! `nodeName`, and `appendChild`/`append`/`insertBefore`/`insertAdjacentHTML`/
+//! `before`/`after`/`replaceWith`/`remove`.
 
 use argus_dom::{Attribute, Document, NodeData, NodeId, QualName};
 
@@ -319,6 +320,35 @@ function __argus_el(tgt) {
       }
       if (k === "remove") {
         return function() { __argus_ops.push({op: "remove", tgt: tgt}); };
+      }
+      // el.before(node) / el.after(node) / el.replaceWith(node): insert an element
+      // relative to this one (resolved through its parent), and for replaceWith also
+      // detach this element. Only element arguments are handled (not text strings).
+      if (k === "before" || k === "after" || k === "replaceWith") {
+        return function(node) {
+          if (!node || !node.__tgt) return;
+          var meIx = __idxOf(tgt);
+          var me = __byIdx[meIx];
+          if (!me || me.p < 0) return;
+          var parentTgt = {kind: "idx", val: me.p};
+          var refTgt = tgt; // before/replaceWith: insert ahead of this element
+          if (k === "after") {
+            refTgt = null; // default: append to the parent (no next sibling)
+            var sibs = [];
+            for (var si = 0; si < __tree.length; si++) {
+              if (__tree[si].p === me.p) sibs.push(__tree[si]);
+            }
+            for (var sj = 0; sj < sibs.length; sj++) {
+              if (sibs[sj].i === meIx) {
+                var nb = sibs[sj + 1];
+                if (nb) refTgt = {kind: "idx", val: nb.i};
+                break;
+              }
+            }
+          }
+          __argus_ops.push({op: "insertBefore", tgt: parentTgt, child: node.__tgt, ref: refTgt});
+          if (k === "replaceWith") { __argus_ops.push({op: "remove", tgt: tgt}); }
+        };
       }
       // Programmatic activation: el.click() fires registered click handlers.
       if (k === "click") {
@@ -2209,6 +2239,45 @@ mod tests {
         apply_scripts(&mut doc);
         assert_eq!(attr_of(&doc, "card", "data-found").as_deref(), Some("yes"));
         assert_eq!(attr_of(&doc, "card", "data-self").as_deref(), Some("y"));
+    }
+
+    #[test]
+    fn before_after_replace_with_insert_relative_to_element() {
+        // before/after place a new element on either side of a reference; replaceWith
+        // swaps an element out for a new one. We mark each new node and read back the
+        // resulting sibling order via textContent on a container.
+        let mut doc = argus_html::parse(
+            "<ul id=\"l\"><li id=\"ref\">ref</li></ul>\
+             <script>\
+               var ref = document.getElementById('ref');\
+               var b = document.createElement('li'); b.textContent = 'B';\
+               var a = document.createElement('li'); a.textContent = 'A';\
+               ref.before(b);\
+               ref.after(a);\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        // Order should be B, ref, A inside the list.
+        let text = text_of(&doc, "l");
+        let bpos = text.find('B');
+        let rpos = text.find("ref");
+        let apos = text.find('A');
+        assert!(bpos.is_some() && rpos.is_some() && apos.is_some(), "got {text:?}");
+        assert!(bpos < rpos && rpos < apos, "order B<ref<A, got {text:?}");
+    }
+
+    #[test]
+    fn replace_with_swaps_element() {
+        let mut doc = argus_html::parse(
+            "<div id=\"box\"><span id=\"old\">OLD</span></div>\
+             <script>\
+               var n = document.createElement('span'); n.textContent = 'NEW';\
+               document.getElementById('old').replaceWith(n);\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        let text = text_of(&doc, "box");
+        assert!(text.contains("NEW") && !text.contains("OLD"), "got {text:?}");
     }
 
     #[test]
