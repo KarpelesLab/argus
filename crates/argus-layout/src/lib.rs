@@ -161,6 +161,7 @@ fn border_box_to_content(style: &ComputedStyle, width: f32) -> f32 {
 
 /// A word in an inline formatting context, carrying its own style so spans, links,
 /// and emphasis keep their color/size within a paragraph.
+#[derive(Clone)]
 struct InlineWord {
     text: String,
     font_size: f32,
@@ -953,6 +954,25 @@ impl Ctx<'_> {
         }
         out.push(cur); // keep a trailing/only line even when empty
         out
+    }
+
+    /// Split a word into the largest character chunks that each fit `width` (for
+    /// `overflow-wrap: break-word`). Always keeps at least one char per chunk.
+    fn split_word(&self, word: &str, fs: f32, width: f32) -> Vec<String> {
+        let mut chunks = Vec::new();
+        let mut cur = String::new();
+        for ch in word.chars() {
+            cur.push(ch);
+            if self.font.measure(&cur, fs) > width && cur.chars().count() > 1 {
+                cur.pop();
+                chunks.push(std::mem::take(&mut cur));
+                cur.push(ch);
+            }
+        }
+        if !cur.is_empty() {
+            chunks.push(cur);
+        }
+        chunks
     }
 
     /// The inline region `[lx, rx]` left after subtracting any floats overlapping
@@ -1974,7 +1994,28 @@ impl Ctx<'_> {
         if words.is_empty() {
             return;
         }
-        let taken = std::mem::take(words);
+        let mut taken = std::mem::take(words);
+        // `overflow-wrap: break-word`: pre-split any word wider than the content box
+        // into chunks that fit, so it wraps instead of overflowing. Each later chunk
+        // loses its leading space so it can break onto its own line.
+        if block.break_word && width > 0.0 {
+            let mut expanded: Vec<InlineWord> = Vec::with_capacity(taken.len());
+            for w in taken {
+                if !w.text.is_empty() && self.font.measure(&w.text, w.font_size) > width {
+                    for (k, chunk) in self.split_word(&w.text, w.font_size, width).into_iter().enumerate() {
+                        let mut nw = w.clone();
+                        nw.text = chunk;
+                        if k > 0 {
+                            nw.space_before = false;
+                        }
+                        expanded.push(nw);
+                    }
+                } else {
+                    expanded.push(w);
+                }
+            }
+            taken = expanded;
+        }
         let content_right = x + width;
 
         // Greedily assign words to lines. Each line's inline region is narrowed by
@@ -2437,6 +2478,32 @@ mod tests {
             line_count("white-space: nowrap"),
             1,
             "nowrap stays on one line"
+        );
+    }
+
+    #[test]
+    fn overflow_wrap_break_word_splits_long_words() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A single very long word in a narrow box. Without break-word it stays one
+        // run (overflows); with break-word it splits across multiple lines.
+        let line_count = |css: &str| -> usize {
+            let html = format!(
+                "<p style=\"width:80px; {css}\">supercalifragilisticexpialidocioussupercalifragilistic</p>"
+            );
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+            let mut ys: Vec<i32> = l.runs.iter().map(|r| r.baseline as i32).collect();
+            ys.sort_unstable();
+            ys.dedup();
+            ys.len()
+        };
+        assert_eq!(line_count(""), 1, "default: the long word stays on one line");
+        assert!(
+            line_count("overflow-wrap: break-word") > 1,
+            "break-word splits the long word across lines"
         );
     }
 
