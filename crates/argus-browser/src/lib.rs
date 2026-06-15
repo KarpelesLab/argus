@@ -17,6 +17,54 @@ use std::io;
 /// A small decorative image embedded as a `data:` URL, for the sample page.
 const SAMPLE_IMAGE: &str = include_str!("../sample_image.txt");
 
+/// Back/forward navigation history: a stack of visited URLs plus the current
+/// index. Navigating to a new URL truncates any forward entries (standard
+/// browser semantics).
+#[derive(Debug, Default)]
+struct History {
+    stack: Vec<String>,
+    index: usize,
+}
+
+impl History {
+    fn new(url: String) -> History {
+        History {
+            stack: vec![url],
+            index: 0,
+        }
+    }
+
+    /// Record a navigation to `url` (dropping any forward history).
+    fn push(&mut self, url: String) {
+        if self.stack.get(self.index) == Some(&url) {
+            return; // no-op navigation to the same URL
+        }
+        self.stack.truncate(self.index + 1);
+        self.stack.push(url);
+        self.index = self.stack.len() - 1;
+    }
+
+    /// Move back one entry and return its URL, if possible.
+    fn back(&mut self) -> Option<&str> {
+        if self.index > 0 {
+            self.index -= 1;
+            Some(&self.stack[self.index])
+        } else {
+            None
+        }
+    }
+
+    /// Move forward one entry and return its URL, if possible.
+    fn forward(&mut self) -> Option<&str> {
+        if self.index + 1 < self.stack.len() {
+            self.index += 1;
+            Some(&self.stack[self.index])
+        } else {
+            None
+        }
+    }
+}
+
 /// The built-in sample document rendered by the windowed shell and page dumper.
 pub fn sample_html() -> String {
     format!(
@@ -626,6 +674,26 @@ fn request_frame(
     Ok((Framebuffer::from_fd(fd, size)?, content_height))
 }
 
+/// Load `target` (the sample when `None`/empty), provide it to content, reset its
+/// scroll, render a frame, and present it. Returns the page's content height.
+#[cfg(target_os = "macos")]
+fn load_and_present(
+    content: &Child,
+    net: &Child,
+    window: &argus_platform::window::Window,
+    target: Option<&str>,
+) -> io::Result<u32> {
+    let page = match target {
+        Some(u) => fetch_html(net, u).unwrap_or_else(|e| error_page(u, &e.to_string())),
+        None => sample_html(),
+    };
+    provide_page(content, &page)?;
+    proto::send(content.channel(), Msg::SetScroll { y: 0 }, &[])?;
+    let (frame, h) = request_frame(content, net, target)?;
+    window.present(frame.pixels(), frame.size());
+    Ok(h)
+}
+
 /// Run the browser in its default mode for this platform: a real window where one
 /// is available, the headless verifier otherwise. `url` selects the page (the
 /// built-in sample when `None`).
@@ -661,6 +729,7 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
     proto::parent_handshake(content.channel(), viewport)?;
     proto::parent_handshake(net.channel(), viewport)?;
     let mut current_url = url.clone();
+    let mut history = History::new(current_url.clone().unwrap_or_default());
     let html = resolve_html(&net, current_url.as_deref());
     provide_page(&content, &html)?;
     log!("children handshook; page sent; opening window");
@@ -681,15 +750,11 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
                     if !url.is_empty() {
                         let target = resolve_url(current_url.as_deref(), &url);
                         log!("navigating to {target}");
-                        let page = fetch_html(&net, &target)
-                            .unwrap_or_else(|e| error_page(&target, &e.to_string()));
-                        provide_page(&content, &page)?;
+                        history.push(target.clone());
                         current_url = Some(target);
                         scroll_y = 0;
-                        proto::send(content.channel(), Msg::SetScroll { y: 0 }, &[])?;
-                        let (frame, h) = request_frame(&content, &net, current_url.as_deref())?;
-                        content_height = h;
-                        window.present(frame.pixels(), frame.size());
+                        content_height =
+                            load_and_present(&content, &net, &window, current_url.as_deref())?;
                     } else {
                         // Non-navigation click: the content process may have dispatched
                         // a DOM event handler that changed the page — re-render.
@@ -716,6 +781,24 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
                 let (frame, h) = request_frame(&content, &net, current_url.as_deref())?;
                 content_height = h;
                 window.present(frame.pixels(), frame.size());
+            }
+            Event::Back => {
+                if let Some(prev) = history.back().map(str::to_string) {
+                    log!("history back -> {prev:?}");
+                    current_url = (!prev.is_empty()).then_some(prev);
+                    scroll_y = 0;
+                    content_height =
+                        load_and_present(&content, &net, &window, current_url.as_deref())?;
+                }
+            }
+            Event::Forward => {
+                if let Some(next) = history.forward().map(str::to_string) {
+                    log!("history forward -> {next:?}");
+                    current_url = (!next.is_empty()).then_some(next);
+                    scroll_y = 0;
+                    content_height =
+                        load_and_present(&content, &net, &window, current_url.as_deref())?;
+                }
             }
             Event::CloseRequested => {
                 log!("window closed; shutting down");
@@ -761,7 +844,26 @@ fn verify_uniform(fb: &Framebuffer) -> io::Result<Color> {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_text, resolve_url};
+    use super::{render_text, resolve_url, History};
+
+    #[test]
+    fn history_back_forward_and_truncation() {
+        let mut h = History::new("a".into());
+        assert_eq!(h.back(), None); // nothing before the first page
+        h.push("b".into());
+        h.push("c".into()); // a, b, [c]
+        assert_eq!(h.back(), Some("b")); // a, [b], c
+        assert_eq!(h.back(), Some("a")); // [a], b, c
+        assert_eq!(h.back(), None);
+        assert_eq!(h.forward(), Some("b"));
+        // Navigating from the middle drops the forward entries (b -> d).
+        h.push("d".into()); // a, b, [d]
+        assert_eq!(h.forward(), None);
+        assert_eq!(h.back(), Some("b"));
+        // Re-navigating to the current URL is a no-op.
+        h.push("b".into());
+        assert_eq!(h.forward(), Some("d"));
+    }
 
     #[test]
     fn rendered_text_structure() {

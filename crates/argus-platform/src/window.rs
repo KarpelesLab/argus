@@ -14,8 +14,8 @@ use objc2::rc::Retained;
 use objc2::{AllocAnyThread, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBitmapImageRep,
-    NSDeviceRGBColorSpace, NSEvent, NSEventMask, NSEventType, NSImage, NSImageScaling, NSImageView,
-    NSWindow, NSWindowStyleMask,
+    NSDeviceRGBColorSpace, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSImage,
+    NSImageScaling, NSImageView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSSize};
 
@@ -29,6 +29,10 @@ pub enum Event {
     Scroll { dy: i32 },
     /// A typed character (Unicode scalar; `0x08` = backspace).
     KeyChar { ch: u32 },
+    /// Navigate back (Cmd+`[`).
+    Back,
+    /// Navigate forward (Cmd+`]`).
+    Forward,
     /// The user asked to close the window.
     CloseRequested,
 }
@@ -196,11 +200,22 @@ impl Window {
         })
     }
 
-    /// Map a key-down event to its first typed character (macOS delete → backspace).
+    /// Map a key-down event to a typed character, or a Cmd+`[`/`]` back/forward.
     fn map_key_down(&self, event: &NSEvent) -> Option<Event> {
         let chars = event.characters()?;
         let s = chars.to_string();
         let ch = s.chars().next()? as u32;
+        // Cmd+[ / Cmd+] navigate history (the macOS browser convention).
+        let cmd = event
+            .modifierFlags()
+            .contains(NSEventModifierFlags::Command);
+        if cmd {
+            return match ch {
+                0x5B => Some(Event::Back),    // '['
+                0x5D => Some(Event::Forward), // ']'
+                _ => None,                    // other Cmd shortcuts aren't ours
+            };
+        }
         // macOS sends DEL (0x7F) for the backspace key; normalize to BS (0x08).
         let ch = if ch == 0x7F { 0x08 } else { ch };
         Some(Event::KeyChar { ch })
