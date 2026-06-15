@@ -22,7 +22,7 @@ use argus_gfx::{Font, RectFill, TextRun};
 use argus_style::{
     author_stylesheet, computed_style, AlignItems, AuthorStylesheet, BoxSizing, Clear,
     ComputedStyle, Display, FlexDirection, Float, Gradient, GradientDir, GridTrack, JustifyContent,
-    Length, ListStyle, Position, PseudoElement, TextAlign, TextTransform, VerticalAlign,
+    Length, ListStyle, ObjectFit, Position, PseudoElement, TextAlign, TextTransform, VerticalAlign,
     GRID_MAX_TRACKS,
 };
 use std::collections::HashMap;
@@ -480,6 +480,10 @@ pub struct ImageBox {
     pub w: f32,
     pub h: f32,
     pub src: String,
+    /// Source sub-rect to sample, as fractions of the intrinsic image in
+    /// `(x, y, w, h)` (whole image = `(0, 0, 1, 1)`). `object-fit: cover` crops
+    /// the overflow by narrowing this window; other fits leave it full.
+    pub crop: (f32, f32, f32, f32),
 }
 
 /// The border-box of an element that carries an `id`, for click hit-testing.
@@ -1722,6 +1726,7 @@ impl Ctx<'_> {
                             w,
                             h,
                             src: poster.to_string(),
+                            crop: (0.0, 0.0, 1.0, 1.0),
                         });
                         self.cursor_y += h;
                         return;
@@ -1893,19 +1898,37 @@ impl Ctx<'_> {
             h = if iw == 0 { 0.0 } else { ih as f32 };
         }
         if w > 0.0 && h > 0.0 {
-            // `object-fit: contain` scales the image to fit the w×h box preserving
-            // its intrinsic aspect ratio, centered (the box still reserves w×h).
-            let (ix, iy, dw, dh) = if istyle.object_fit_contain
-                && iw > 0
-                && ih > 0
-                && attr_w.is_some()
-                && attr_h.is_some()
-            {
-                let scale = (w / iw as f32).min(h / ih as f32);
-                let (fw, fh) = (iw as f32 * scale, ih as f32 * scale);
-                (x + (w - fw) / 2.0, self.cursor_y + (h - fh) / 2.0, fw, fh)
-            } else {
-                (x, self.cursor_y, w, h)
+            // `object-fit` adjusts how the intrinsic image maps into the w×h box.
+            // `contain` letterboxes (shrinks the painted rect, full source);
+            // `cover` fills the box and crops the source overflow; `fill` (default)
+            // stretches the whole source to the box.
+            let fit_known = iw > 0 && ih > 0 && attr_w.is_some() && attr_h.is_some();
+            let (ix, iy, dw, dh, crop) = match istyle.object_fit {
+                ObjectFit::Contain if fit_known => {
+                    let scale = (w / iw as f32).min(h / ih as f32);
+                    let (fw, fh) = (iw as f32 * scale, ih as f32 * scale);
+                    (
+                        x + (w - fw) / 2.0,
+                        self.cursor_y + (h - fh) / 2.0,
+                        fw,
+                        fh,
+                        (0.0, 0.0, 1.0, 1.0),
+                    )
+                }
+                ObjectFit::Cover if fit_known => {
+                    // Crop the source to the box's aspect (centered), painting the
+                    // full box. box-aspect vs image-aspect decides which axis crops.
+                    let (iwf, ihf) = (iw as f32, ih as f32);
+                    let crop = if iwf / ihf > w / h {
+                        let cw = ihf * (w / h) / iwf; // narrow horizontally
+                        ((1.0 - cw) / 2.0, 0.0, cw, 1.0)
+                    } else {
+                        let ch = iwf * (h / w) / ihf; // narrow vertically
+                        (0.0, (1.0 - ch) / 2.0, 1.0, ch)
+                    };
+                    (x, self.cursor_y, w, h, crop)
+                }
+                _ => (x, self.cursor_y, w, h, (0.0, 0.0, 1.0, 1.0)),
             };
             // `visibility: hidden` reserves the box but paints nothing; an empty
             // `src` (no usable source) reserves space without a fetchable image.
@@ -1916,6 +1939,7 @@ impl Ctx<'_> {
                     w: dw,
                     h: dh,
                     src: src.to_string(),
+                    crop,
                 });
             }
             self.cursor_y += h;
@@ -5619,20 +5643,27 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         // stretches to fill 100x100.
         let mut sizes = ImageSizes::new();
         sizes.insert("a.png".to_string(), (100, 50));
-        let render = |css: &str| -> (f32, f32, f32) {
+        let render = |css: &str| -> ImageBox {
             let html = format!(
                 "<img src=\"a.png\" width=\"100\" height=\"100\" style=\"{css}\">"
             );
             let doc = parse(&html);
             let l = layout(&doc, &font, 400.0, &sizes);
-            let im = &l.images[0];
-            (im.w, im.h, im.y)
+            l.images[0].clone()
         };
-        let (sw, sh, _) = render("");
-        assert!((sw - 100.0).abs() < 1.0 && (sh - 100.0).abs() < 1.0, "stretched fill {sw}x{sh}");
-        let (cw, ch, cy) = render("object-fit: contain");
-        assert!((cw - 100.0).abs() < 1.0 && (ch - 50.0).abs() < 1.0, "contained {cw}x{ch}");
-        assert!(cy > 10.0, "letterboxed (centered vertically), y={cy}");
+        let fill = render("");
+        assert!((fill.w - 100.0).abs() < 1.0 && (fill.h - 100.0).abs() < 1.0, "stretched fill");
+        assert_eq!(fill.crop, (0.0, 0.0, 1.0, 1.0), "fill uses whole source");
+        let contain = render("object-fit: contain");
+        assert!((contain.w - 100.0).abs() < 1.0 && (contain.h - 50.0).abs() < 1.0, "contained");
+        assert!(contain.y > 10.0, "letterboxed (centered vertically), y={}", contain.y);
+        // cover: paints the full 100x100 box, cropping the wide (2:1) source
+        // horizontally to the box's 1:1 aspect — half the width, centered.
+        let cover = render("object-fit: cover");
+        assert!((cover.w - 100.0).abs() < 1.0 && (cover.h - 100.0).abs() < 1.0, "cover fills box");
+        assert!((cover.crop.2 - 0.5).abs() < 0.02, "cover crops width to ~half, got {}", cover.crop.2);
+        assert!((cover.crop.0 - 0.25).abs() < 0.02, "crop centered, x0 ~0.25");
+        assert!((cover.crop.3 - 1.0).abs() < 0.01, "full height retained");
     }
 
     #[test]

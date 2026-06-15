@@ -61,6 +61,17 @@ pub enum ListStyle {
     None,
 }
 
+/// `object-fit` — how a replaced element's image fills its content box.
+/// `Fill` (the default) stretches to the box; `Contain` fits inside preserving
+/// aspect (letterboxed); `Cover` fills and crops the overflow.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ObjectFit {
+    #[default]
+    Fill,
+    Contain,
+    Cover,
+}
+
 /// `text-decoration-style` — how underline/line-through/overline lines are drawn.
 /// `Wavy` has no curve primitive available, so it renders like `Solid`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -398,8 +409,8 @@ pub struct ComputedStyle {
     pub box_sizing: BoxSizing,
     /// `caption-side: bottom` — render a table `<caption>` below the rows.
     pub caption_side_bottom: bool,
-    /// `object-fit: contain` — scale an image to fit its box preserving aspect.
-    pub object_fit_contain: bool,
+    /// `object-fit` — how a replaced element's image is fitted into its box.
+    pub object_fit: ObjectFit,
     /// `line-height` as a multiple of `font-size` (inherited).
     pub line_height: f32,
     /// `text-indent` for the first line, in pixels (inherited).
@@ -513,7 +524,7 @@ impl ComputedStyle {
             text_transform: TextTransform::None,
             box_sizing: BoxSizing::ContentBox,
             caption_side_bottom: false,
-            object_fit_contain: false,
+            object_fit: ObjectFit::Fill,
             line_height: 1.2,
             text_indent: 0.0,
             word_spacing: 0.0,
@@ -1366,7 +1377,11 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         cs.caption_side_bottom = v.trim() == "bottom";
     }
     if let Some(v) = map.get("object-fit") {
-        cs.object_fit_contain = matches!(v.trim(), "contain" | "scale-down");
+        cs.object_fit = match v.trim() {
+            "contain" | "scale-down" => ObjectFit::Contain,
+            "cover" => ObjectFit::Cover,
+            _ => ObjectFit::Fill,
+        };
     }
     // `gap` shorthand: `<row-gap> [<column-gap>]` (column defaults to row).
     if let Some(v) = map.get("gap").or_else(|| map.get("grid-gap")) {

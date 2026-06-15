@@ -227,7 +227,8 @@ impl Content {
         let (vw, vh) = (self.viewport.width, self.viewport.height);
         for ib in &layout.images {
             if let Some(img) = images.get(&ib.src) {
-                argus_gfx::blit_rgba(
+                let (cx, cy, cw, ch) = ib.crop;
+                argus_gfx::blit_rgba_cropped(
                     fb.pixels_mut(),
                     vw,
                     vh,
@@ -238,6 +239,10 @@ impl Content {
                     &img.rgba,
                     img.width,
                     img.height,
+                    (cx * img.width as f32) as u32,
+                    (cy * img.height as f32) as u32,
+                    (cw * img.width as f32).max(1.0) as u32,
+                    (ch * img.height as f32).max(1.0) as u32,
                 );
             }
         }

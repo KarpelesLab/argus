@@ -230,7 +230,8 @@ pub fn render_text(
 
 /// Blit a source RGBA image into `dst` (a `dst_w`×`dst_h` RGBA buffer) at the
 /// destination rect, nearest-neighbor scaled, source-over. Pixels outside `dst`
-/// are clipped.
+/// are clipped. The whole source is used; see [`blit_rgba_cropped`] to sample a
+/// sub-rect (e.g. `object-fit: cover`).
 #[allow(clippy::too_many_arguments)]
 pub fn blit_rgba(
     dst: &mut [u8],
@@ -244,7 +245,32 @@ pub fn blit_rgba(
     src_w: u32,
     src_h: u32,
 ) {
-    if dest_w == 0 || dest_h == 0 || src_w == 0 || src_h == 0 {
+    blit_rgba_cropped(
+        dst, dst_w, dst_h, dest_x, dest_y, dest_w, dest_h, src, src_w, src_h, 0, 0, src_w, src_h,
+    );
+}
+
+/// Like [`blit_rgba`], but samples only the source sub-rect
+/// `(src_x, src_y, src_cw, src_ch)` (clamped to the image), scaled to fill the
+/// destination rect. Used for `object-fit: cover`, which crops the overflow.
+#[allow(clippy::too_many_arguments)]
+pub fn blit_rgba_cropped(
+    dst: &mut [u8],
+    dst_w: u32,
+    dst_h: u32,
+    dest_x: i32,
+    dest_y: i32,
+    dest_w: u32,
+    dest_h: u32,
+    src: &[u8],
+    src_w: u32,
+    src_h: u32,
+    src_x: u32,
+    src_y: u32,
+    src_cw: u32,
+    src_ch: u32,
+) {
+    if dest_w == 0 || dest_h == 0 || src_cw == 0 || src_ch == 0 || src_w == 0 || src_h == 0 {
         return;
     }
     for dy in 0..dest_h as i32 {
@@ -252,13 +278,13 @@ pub fn blit_rgba(
         if py < 0 || py >= dst_h as i32 {
             continue;
         }
-        let sy = (dy as u32 * src_h / dest_h).min(src_h - 1);
+        let sy = (src_y + dy as u32 * src_ch / dest_h).min(src_h - 1);
         for dx in 0..dest_w as i32 {
             let px = dest_x + dx;
             if px < 0 || px >= dst_w as i32 {
                 continue;
             }
-            let sx = (dx as u32 * src_w / dest_w).min(src_w - 1);
+            let sx = (src_x + dx as u32 * src_cw / dest_w).min(src_w - 1);
             let s = (sy * src_w + sx) as usize * 4;
             let d = (py as u32 * dst_w + px as u32) as usize * 4;
             let a = src[s + 3] as u32;
@@ -400,6 +426,20 @@ fn build_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cropped_blit_samples_only_the_source_subrect() {
+        // 2x1 source: left pixel red, right pixel blue.
+        let src = [255u8, 0, 0, 255, 0, 0, 255, 255];
+        // Blit only the right half (src_x=1, src_cw=1) into a 1x1 dest → blue.
+        let mut dst = [0u8; 4];
+        blit_rgba_cropped(&mut dst, 1, 1, 0, 0, 1, 1, &src, 2, 1, 1, 0, 1, 1);
+        assert_eq!(&dst[..3], &[0, 0, 255], "right-half crop yields blue");
+        // The full-image wrapper samples the left (first) pixel → red.
+        let mut dst2 = [0u8; 4];
+        blit_rgba(&mut dst2, 1, 1, 0, 0, 1, 1, &src, 2, 1);
+        assert_eq!(&dst2[..3], &[255, 0, 0], "full blit yields red");
+    }
 
     /// First available plain-TTF system font (present on macOS dev + CI).
     fn system_font() -> Option<Font> {
