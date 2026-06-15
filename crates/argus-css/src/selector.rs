@@ -1,7 +1,8 @@
 //! Selector parsing, specificity, and matching against the DOM.
 //!
 //! Supports type, universal, class, id, and attribute (`[a]`/`[a=v]`/`~=`/`^=`/
-//! `$=`/`*=`) selectors in compound selectors, joined by descendant (whitespace)
+//! `$=`/`*=`, plus the `[a=v i]` ASCII case-insensitive flag) selectors in compound
+//! selectors, joined by descendant (whitespace)
 //! and child (`>`) combinators. Evaluated pseudo-classes: `:first-child`,
 //! `:last-child`, `:only-child`, `:nth-child(an+b)`, `:nth-last-child`,
 //! `:first/last/only-of-type`, `:nth-of-type`, `:nth-last-of-type`, `:not(...)`,
@@ -42,6 +43,8 @@ pub enum AttrMatch {
 pub struct AttrSel {
     pub name: String,
     pub op: AttrMatch,
+    /// ASCII case-insensitive value match (the `i` flag: `[a=v i]`).
+    pub ci: bool,
 }
 
 /// A structural pseudo-class we evaluate (others are parsed and ignored).
@@ -390,6 +393,7 @@ fn parse_attr(tokens: &[Token], i: &mut usize) -> Option<AttrSel> {
         return Some(AttrSel {
             name,
             op: AttrMatch::Exists,
+            ci: false,
         });
     }
     let op_char = match tokens.get(*i) {
@@ -417,10 +421,18 @@ fn parse_attr(tokens: &[Token], i: &mut usize) -> Option<AttrSel> {
         _ => return None,
     };
     skip_ws(tokens, i);
-    // Optional case-sensitivity flag (i/s), then the closing bracket.
-    if matches!(tokens.get(*i), Some(Token::Ident(f)) if f == "i" || f == "s") {
-        *i += 1;
-        skip_ws(tokens, i);
+    // Optional case-sensitivity flag (i = ASCII case-insensitive, s = sensitive),
+    // then the closing bracket.
+    let mut ci = false;
+    if let Some(Token::Ident(f)) = tokens.get(*i) {
+        if f.eq_ignore_ascii_case("i") {
+            ci = true;
+            *i += 1;
+            skip_ws(tokens, i);
+        } else if f.eq_ignore_ascii_case("s") {
+            *i += 1;
+            skip_ws(tokens, i);
+        }
     }
     if tokens.get(*i) == Some(&Token::RBracket) {
         *i += 1;
@@ -435,7 +447,7 @@ fn parse_attr(tokens: &[Token], i: &mut usize) -> Option<AttrSel> {
         '*' => AttrMatch::Substring(value),
         _ => return None,
     };
-    Some(AttrSel { name, op })
+    Some(AttrSel { name, op, ci })
 }
 
 fn skip_ws(tokens: &[Token], i: &mut usize) {
@@ -534,13 +546,20 @@ fn attr_matches(e: &argus_dom::ElementData, sel: &AttrSel) -> bool {
     let Some(val) = e.attr(&sel.name) else {
         return false;
     };
+    // For the `i` flag, compare ASCII-lowercased copies of both sides.
+    let (val, fold): (String, fn(&str) -> String) = if sel.ci {
+        (val.to_ascii_lowercase(), |s| s.to_ascii_lowercase())
+    } else {
+        (val.to_string(), |s| s.to_string())
+    };
+    let val = val.as_str();
     match &sel.op {
         AttrMatch::Exists => true,
-        AttrMatch::Exact(v) => val == v,
-        AttrMatch::Includes(v) => !v.is_empty() && val.split_whitespace().any(|w| w == v),
-        AttrMatch::Prefix(v) => !v.is_empty() && val.starts_with(v.as_str()),
-        AttrMatch::Suffix(v) => !v.is_empty() && val.ends_with(v.as_str()),
-        AttrMatch::Substring(v) => !v.is_empty() && val.contains(v.as_str()),
+        AttrMatch::Exact(v) => val == fold(v),
+        AttrMatch::Includes(v) => !v.is_empty() && val.split_whitespace().any(|w| w == fold(v)),
+        AttrMatch::Prefix(v) => !v.is_empty() && val.starts_with(&fold(v)),
+        AttrMatch::Suffix(v) => !v.is_empty() && val.ends_with(&fold(v)),
+        AttrMatch::Substring(v) => !v.is_empty() && val.contains(&fold(v)),
     }
 }
 
@@ -902,6 +921,29 @@ mod tests {
         assert!(!matches(&doc, p1, &sel("p:only-of-type")));
         // :only-child fails for everything here (div has 5 children).
         assert!(!matches(&doc, h, &sel(":only-child")));
+    }
+
+    #[test]
+    fn case_insensitive_attribute_flag() {
+        // <input type="TEXT"><input type="text">
+        let mut doc = Document::new();
+        let root = doc.root();
+        let a = doc.create_element(QualName::html("input"), vec![Attribute::new("type", "TEXT")]);
+        doc.append(root, a);
+        let b = doc.create_element(QualName::html("input"), vec![Attribute::new("type", "text")]);
+        doc.append(root, b);
+
+        // Default match is case-sensitive.
+        assert!(!matches(&doc, a, &sel("[type=text]")));
+        assert!(matches(&doc, b, &sel("[type=text]")));
+        // The `i` flag folds ASCII case on both sides.
+        assert!(matches(&doc, a, &sel("[type=text i]")));
+        assert!(matches(&doc, b, &sel("[type=TEXT i]")));
+        // Works with substring/prefix operators too.
+        assert!(matches(&doc, a, &sel("[type^=te i]")));
+        assert!(matches(&doc, a, &sel("[type*=EX i]")));
+        // An explicit `s` flag keeps it case-sensitive.
+        assert!(!matches(&doc, a, &sel("[type=text s]")));
     }
 
     #[test]
