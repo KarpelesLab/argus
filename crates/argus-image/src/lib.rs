@@ -6,8 +6,9 @@
 //! (`oxideav-webp`, lossless), **QOI** (`oxideav-qoi`), and **ICO/CUR favicons**
 //! (`oxideav-ico`, largest sub-image) — plus uncompressed 24/32-bit BMP, **TGA**
 //! (Truevision true-color + grayscale, uncompressed + RLE), **Netpbm** (PPM/PGM,
-//! ASCII + binary), **PCX** (RLE 24-bit + 8-bit palette), all built in, and
-//! `data:` URLs. AVIF, TIFF, and lossy-WebP
+//! ASCII + binary), **PCX** (RLE 24-bit + 8-bit palette), **TIFF** (baseline
+//! uncompressed RGB/grayscale, both byte orders), all built in, and `data:` URLs.
+//! AVIF and lossy-WebP
 //! (VP8) decode here once that glue lands. See `docs/subsystems/media.md`.
 
 /// A decoded image: `width * height * 4` straight-alpha RGBA bytes.
@@ -64,6 +65,10 @@ pub fn decode(bytes: &[u8]) -> Option<DecodedImage> {
     // PCX: manufacturer byte 0x0A, version byte 0..=5.
     if bytes.len() > 1 && bytes[0] == 0x0A && bytes[1] <= 5 {
         return decode_pcx(bytes);
+    }
+    // TIFF: "II*\0" (little-endian) or "MM\0*" (big-endian).
+    if bytes.starts_with(b"II\x2A\x00") || bytes.starts_with(b"MM\x00\x2A") {
+        return decode_tiff(bytes);
     }
     // TGA has no leading signature; try it last (it validates structurally).
     decode_tga(bytes)
@@ -562,6 +567,127 @@ fn decode_pcx(bytes: &[u8]) -> Option<DecodedImage> {
     })
 }
 
+/// Decode a baseline TIFF: uncompressed (compression 1), 8 bits/sample, either
+/// RGB (3 samples, photometric 2) or grayscale (1 sample, photometric 0/1). Both
+/// byte orders are handled; multiple strips are concatenated row-major.
+fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
+    if bytes.len() < 8 {
+        return None;
+    }
+    let le = match &bytes[0..2] {
+        b"II" => true,
+        b"MM" => false,
+        _ => return None,
+    };
+    let u16a = |o: usize| -> Option<u16> {
+        let b = [*bytes.get(o)?, *bytes.get(o + 1)?];
+        Some(if le {
+            u16::from_le_bytes(b)
+        } else {
+            u16::from_be_bytes(b)
+        })
+    };
+    let u32a = |o: usize| -> Option<u32> {
+        let b = [
+            *bytes.get(o)?,
+            *bytes.get(o + 1)?,
+            *bytes.get(o + 2)?,
+            *bytes.get(o + 3)?,
+        ];
+        Some(if le {
+            u32::from_le_bytes(b)
+        } else {
+            u32::from_be_bytes(b)
+        })
+    };
+    if u16a(2)? != 42 {
+        return None;
+    }
+    let ifd = u32a(4)? as usize;
+    let count = u16a(ifd)? as usize;
+    // Collect the tags we care about; arrays (strip offsets/counts) deref via offset.
+    let mut width = 0u32;
+    let mut height = 0u32;
+    let mut bits = 8u32;
+    let mut compression = 1u32;
+    let mut photometric = 1u32;
+    let mut samples = 1u32;
+    let mut strip_offsets: Vec<u32> = Vec::new();
+    let mut strip_counts: Vec<u32> = Vec::new();
+    for i in 0..count {
+        let e = ifd + 2 + i * 12;
+        let tag = u16a(e)?;
+        let ty = u16a(e + 2)?;
+        let n = u32a(e + 4)? as usize;
+        // Read the n values of this entry (SHORT=3 / LONG=4), inline or via offset.
+        let read_vals = |size: usize, reader: &dyn Fn(usize) -> Option<u32>| -> Option<Vec<u32>> {
+            let total = n * size;
+            let base = if total <= 4 { e + 8 } else { u32a(e + 8)? as usize };
+            (0..n).map(|k| reader(base + k * size)).collect()
+        };
+        let vals: Vec<u32> = match ty {
+            3 => read_vals(2, &|o| u16a(o).map(|v| v as u32))?,
+            4 => read_vals(4, &u32a)?,
+            _ => continue,
+        };
+        let first = vals.first().copied().unwrap_or(0);
+        match tag {
+            256 => width = first,
+            257 => height = first,
+            258 => bits = first,
+            259 => compression = first,
+            262 => photometric = first,
+            277 => samples = first,
+            273 => strip_offsets = vals,
+            279 => strip_counts = vals,
+            _ => {}
+        }
+    }
+    if compression != 1 || bits != 8 || width == 0 || height == 0 {
+        return None;
+    }
+    if !matches!((samples, photometric), (3, 2) | (1, 0) | (1, 1)) {
+        return None;
+    }
+    if (width as u64) * (height as u64) > 64_000_000 || strip_offsets.is_empty() {
+        return None;
+    }
+    let (w, h) = (width as usize, height as usize);
+    let spp = samples as usize;
+    let white_is_zero = photometric == 0;
+    let mut rgba = vec![0u8; w * h * 4];
+    let mut px = 0usize; // running pixel index across strips
+    for (so, &off) in strip_offsets.iter().enumerate() {
+        let bc = *strip_counts.get(so).unwrap_or(&0) as usize;
+        let mut p = off as usize;
+        let endp = p + bc;
+        while p + spp <= endp && px < w * h {
+            let d = px * 4;
+            if spp == 3 {
+                rgba[d] = *bytes.get(p)?;
+                rgba[d + 1] = *bytes.get(p + 1)?;
+                rgba[d + 2] = *bytes.get(p + 2)?;
+            } else {
+                let mut g = *bytes.get(p)?;
+                if white_is_zero {
+                    g = 255 - g;
+                }
+                rgba[d] = g;
+                rgba[d + 1] = g;
+                rgba[d + 2] = g;
+            }
+            rgba[d + 3] = 0xFF;
+            p += spp;
+            px += 1;
+        }
+    }
+    Some(DecodedImage {
+        width,
+        height,
+        rgba,
+    })
+}
+
 /// Decode a `data:` URL (`data:[<mime>][;base64],<payload>`).
 pub fn decode_data_url(url: &str) -> Option<DecodedImage> {
     let rest = url.strip_prefix("data:")?;
@@ -667,6 +793,38 @@ mod tests {
         assert_eq!(&img.rgba[4..8], &[255, 255, 255, 255], "(1,0) white");
         assert_eq!(&img.rgba[8..12], &[255, 0, 0, 255], "(0,1) red");
         assert_eq!(&img.rgba[12..16], &[0, 255, 0, 255], "(1,1) green");
+    }
+
+    #[test]
+    fn decodes_uncompressed_rgb_tiff() {
+        // 2x1 little-endian RGB TIFF: pixel data at offset 8, IFD at 14.
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(b"II"); // little-endian
+        b.extend_from_slice(&42u16.to_le_bytes());
+        b.extend_from_slice(&14u32.to_le_bytes()); // IFD offset
+        b.extend_from_slice(&[255, 0, 0, 0, 255, 0]); // red, green (6 bytes) at offset 8
+        // IFD at offset 14.
+        let entry = |b: &mut Vec<u8>, tag: u16, ty: u16, val: u32| {
+            b.extend_from_slice(&tag.to_le_bytes());
+            b.extend_from_slice(&ty.to_le_bytes());
+            b.extend_from_slice(&1u32.to_le_bytes()); // count
+            b.extend_from_slice(&val.to_le_bytes());
+        };
+        b.extend_from_slice(&9u16.to_le_bytes()); // entry count
+        entry(&mut b, 256, 3, 2); // width
+        entry(&mut b, 257, 3, 1); // height
+        entry(&mut b, 258, 3, 8); // bits
+        entry(&mut b, 259, 3, 1); // compression = none
+        entry(&mut b, 262, 3, 2); // photometric = RGB
+        entry(&mut b, 273, 4, 8); // strip offset
+        entry(&mut b, 277, 3, 3); // samples per pixel
+        entry(&mut b, 278, 3, 1); // rows per strip
+        entry(&mut b, 279, 4, 6); // strip byte count
+        b.extend_from_slice(&0u32.to_le_bytes()); // next IFD = 0
+        let img = decode(&b).expect("decode tiff");
+        assert_eq!((img.width, img.height), (2, 1));
+        assert_eq!(&img.rgba[0..4], &[255, 0, 0, 255], "red");
+        assert_eq!(&img.rgba[4..8], &[0, 255, 0, 255], "green");
     }
 
     #[test]
