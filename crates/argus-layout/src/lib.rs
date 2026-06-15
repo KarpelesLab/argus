@@ -198,6 +198,16 @@ fn roman_marker(n: u32, upper: bool) -> String {
     out
 }
 
+/// The effective width cap for an image: the content box `avail`, further limited
+/// by `max-width` if it is set (so `img { max-width: 400px }` caps the image and,
+/// via [`image_dims`], scales its height to keep the aspect ratio).
+fn image_width_cap(istyle: &ComputedStyle, avail: f32) -> f32 {
+    istyle
+        .max_width
+        .map(|l| l.to_px(istyle.font_size, avail))
+        .map_or(avail, |m| m.min(avail))
+}
+
 /// Resolve an image's rendered `(width, height)` from its specified `width`/
 /// `height` (CSS or attribute) and intrinsic size `iw`×`ih`, preserving the
 /// aspect ratio when only one axis is given, and shrinking proportionally when
@@ -1652,7 +1662,8 @@ impl Ctx<'_> {
             .height
             .map(|l| l.to_px(istyle.font_size, avail))
             .or_else(|| e.attr("height").and_then(|v| v.parse::<f32>().ok()));
-        let (w, h) = image_dims(attr_w, attr_h, iw, ih, avail);
+        let cap = image_width_cap(istyle, avail);
+        let (w, h) = image_dims(attr_w, attr_h, iw, ih, cap);
         if w > 0.0 && h > 0.0 {
             (w, h)
         } else {
@@ -1675,7 +1686,8 @@ impl Ctx<'_> {
             .height
             .map(|l| l.to_px(istyle.font_size, avail))
             .or_else(|| e.attr("height").and_then(|v| v.parse::<f32>().ok()));
-        let (mut w, mut h) = image_dims(attr_w, attr_h, iw, ih, avail);
+        let cap = image_width_cap(istyle, avail);
+        let (mut w, mut h) = image_dims(attr_w, attr_h, iw, ih, cap);
         if w <= 0.0 || h <= 0.0 {
             // Unresolved/broken image: reserve a small placeholder line.
             w = 0.0;
@@ -5169,6 +5181,23 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         let img = &l.images[0];
         assert!((img.w - 200.0).abs() < 1.0, "CSS width wins: {}", img.w);
         assert!((img.h - 100.0).abs() < 1.0, "height keeps aspect: {}", img.h);
+    }
+
+    #[test]
+    fn max_width_caps_image_keeping_aspect() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Intrinsic 400x200; max-width:100px caps it and scales height to 50.
+        let mut sizes = ImageSizes::new();
+        sizes.insert("a.png".to_string(), (400, 200));
+        let html = "<img src=\"a.png\" style=\"max-width:100px\">";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 600.0, &sizes);
+        let img = &l.images[0];
+        assert!((img.w - 100.0).abs() < 1.0, "max-width caps: {}", img.w);
+        assert!((img.h - 50.0).abs() < 1.0, "height scaled to aspect: {}", img.h);
     }
 
     #[test]
