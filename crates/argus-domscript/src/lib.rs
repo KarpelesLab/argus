@@ -20,6 +20,7 @@
 //! the content process via [`apply_scripts_session`]) / `sessionStorage`
 //! (per-page). The DOM API surface includes:
 //! `document.getElementById` / `querySelector` (full CSS selector engine) /
+//! `createElement` / `createTextNode` /
 //! `querySelectorAll` / `getElementsByTagName` / `getElementsByClassName` (live
 //! collections resolved in JS against a seeded document-order element tree, simple
 //! selectors) / `createElement` / `body` / `write`, and on elements
@@ -384,6 +385,11 @@ var document = {
   createElement: function(tag) {
     var nid = "n" + (__newCount++);
     __argus_ops.push({op: "create", nid: nid, tag: "" + tag});
+    return __argus_el({kind: "new", val: nid});
+  },
+  createTextNode: function(text) {
+    var nid = "n" + (__newCount++);
+    __argus_ops.push({op: "createtext", nid: nid, value: "" + text});
     return __argus_el({kind: "new", val: nid});
   },
   querySelectorAll: function(sel) { return __collectAll("" + sel, -1); },
@@ -828,6 +834,14 @@ fn apply_ops(
             let nid = get("nid").and_then(Json::as_str).unwrap_or("");
             let tag = get("tag").and_then(Json::as_str).unwrap_or("div");
             let node = doc.create_element(QualName::html(tag.to_ascii_lowercase()), vec![]);
+            if !nid.is_empty() {
+                created.insert(nid.to_string(), node);
+            }
+            continue;
+        }
+        if op_kind == "createtext" {
+            let nid = get("nid").and_then(Json::as_str).unwrap_or("");
+            let node = doc.create_text(value.clone());
             if !nid.is_empty() {
                 created.insert(nid.to_string(), node);
             }
@@ -1482,6 +1496,20 @@ mod tests {
         assert!(e.name.is_html("p"));
         assert_eq!(e.attr("class"), Some("made"));
         assert_eq!(text_content(&doc, child), "created node");
+    }
+
+    #[test]
+    fn create_text_node_and_append() {
+        let mut doc = argus_html::parse(
+            "<div id=\"root\">old</div>\
+             <script>\
+               var t = document.createTextNode('hello world');\
+               document.getElementById('root').appendChild(t);\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        // The new text is appended after the existing content.
+        assert_eq!(text_of(&doc, "root"), "oldhello world");
     }
 
     #[test]
