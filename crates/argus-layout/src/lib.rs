@@ -206,8 +206,9 @@ struct InlineWord {
     /// Vertical baseline offset in pixels (negative = up), for sub/superscript.
     baseline_shift: f32,
     /// An `inline-block` atomic box: display-list range `[start, end)` (laid out at
-    /// the origin) and `(width, height)`; shifted into place at flush time.
-    atomic: Option<(DisplayListMark, DisplayListMark, f32, f32)>,
+    /// the origin), `(width, height)`, and its `vertical-align`; shifted into place
+    /// at flush time.
+    atomic: Option<(DisplayListMark, DisplayListMark, f32, f32, VerticalAlign)>,
 }
 
 /// A clickable hyperlink region in canvas pixels.
@@ -769,7 +770,7 @@ impl Ctx<'_> {
                                     href: None,
                                     hard_break: false,
                                     baseline_shift: 0.0,
-                                    atomic: Some((start, end, bw, bh)),
+                                    atomic: Some((start, end, bw, bh, cstyle.vertical_align)),
                                 });
                             }
                             Display::Block => {
@@ -2511,7 +2512,8 @@ impl Ctx<'_> {
                 let shift = match style.vertical_align {
                     VerticalAlign::Sub => style.font_size * 0.2,
                     VerticalAlign::Super => -style.font_size * 0.4,
-                    VerticalAlign::Baseline => 0.0,
+                    // top/middle/bottom apply to inline-block boxes, not text runs.
+                    _ => 0.0,
                 };
                 // `visibility: hidden` keeps the words' space but paints nothing.
                 let (color, background) = if style.hidden {
@@ -2707,7 +2709,7 @@ impl Ctx<'_> {
                     0.0
                 };
                 let ww = match w.atomic {
-                    Some((_, _, bw, _)) => bw,
+                    Some((_, _, bw, _, _)) => bw,
                     None => self.font.measure(&w.text, w.font_size),
                 };
                 if !block.nowrap && i > line_start && pen + space + ww > avail {
@@ -2740,7 +2742,7 @@ impl Ctx<'_> {
                     gaps += 1;
                 }
                 let ww = match w.atomic {
-                    Some((_, _, bw, bh)) => {
+                    Some((_, _, bw, bh, _)) => {
                         atomic_h = atomic_h.max(bh);
                         bw
                     }
@@ -2777,11 +2779,19 @@ impl Ctx<'_> {
             for (j, w) in line.iter().enumerate() {
                 // An inline-block atomic: advance by its width and shift its
                 // (origin-laid-out) display-list range to the line position.
-                if let Some((start, end, bw, _bh)) = w.atomic {
+                if let Some((start, end, bw, bh, valign)) = w.atomic {
                     if j > 0 && w.space_before {
                         pen_x += self.font.measure(" ", w.font_size) + block.word_spacing;
                     }
-                    self.shift_display_list_range(start, end, pen_x, line_top);
+                    // Vertical placement within the line box per `vertical-align`.
+                    let dy = match valign {
+                        VerticalAlign::Top | VerticalAlign::Sub => line_top,
+                        VerticalAlign::Bottom => line_top + line_h - bh,
+                        VerticalAlign::Middle => line_top + (line_h - bh) / 2.0,
+                        // baseline (default)/super: box bottom sits on the text baseline.
+                        _ => baseline - bh,
+                    };
+                    self.shift_display_list_range(start, end, pen_x, dy);
                     pen_x += bw;
                     continue;
                 }
@@ -4026,6 +4036,30 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         assert!(after.x > b.x + 75.0, "text flows after both boxes: b={} after={}", b.x, after.x);
         // The inline-block backgrounds (red, green) were shifted onto the line.
         assert!(l.rects.iter().any(|r| r.color.r > 200 && r.color.g < 60 && r.x > 0.0 && r.y > 0.0), "red box placed");
+    }
+
+    #[test]
+    fn inline_block_vertical_align() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A tall inline-block sets the line height; a short one aligns top vs bottom.
+        // Compare the short box's vertical position (its text run's baseline).
+        let pos = |va: &str| -> f32 {
+            let html = format!(
+                "<p><span style=\"display:inline-block;width:20px;height:60px\">T</span>\
+                 <span style=\"display:inline-block;width:20px;height:10px;vertical-align:{va}\">S</span></p>"
+            );
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+            l.runs.iter().find(|r| r.text == "S").unwrap().baseline
+        };
+        let top = pos("top");
+        let bottom = pos("bottom");
+        let middle = pos("middle");
+        assert!(bottom > top + 20.0, "bottom lower than top: {top} -> {bottom}");
+        assert!(middle > top + 5.0 && middle < bottom - 5.0, "middle between: {top} {middle} {bottom}");
     }
 
     #[test]

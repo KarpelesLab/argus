@@ -78,6 +78,9 @@ pub enum VerticalAlign {
     Baseline,
     Sub,
     Super,
+    Top,
+    Middle,
+    Bottom,
 }
 
 /// `position` (the subset layout honors: static flow, a relative offset, or
@@ -974,6 +977,9 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         cs.vertical_align = match v.as_str() {
             "sub" => VerticalAlign::Sub,
             "super" => VerticalAlign::Super,
+            "top" | "text-top" => VerticalAlign::Top,
+            "middle" => VerticalAlign::Middle,
+            "bottom" | "text-bottom" => VerticalAlign::Bottom,
             _ => VerticalAlign::Baseline,
         };
     }
