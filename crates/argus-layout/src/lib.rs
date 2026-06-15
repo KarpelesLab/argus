@@ -855,12 +855,18 @@ impl Ctx<'_> {
                         let hr = computed_style(self.doc, child, &style, self.author);
                         self.cursor_y += hr.margin.top;
                         let h = hr.border.top.max(1.0);
-                        // A narrowed `<hr width=…>` is centered in the content box.
+                        // A narrowed `<hr width=…>` is centered by default; the
+                        // legacy `align` attribute can left/right-align it instead.
                         let hw = hr
                             .width
                             .map(|l| l.to_px(hr.font_size, content_w).clamp(0.0, content_w))
                             .unwrap_or(content_w);
-                        let hx = content_left + (content_w - hw) / 2.0;
+                        let align = e.attr("align").unwrap_or("").trim().to_ascii_lowercase();
+                        let hx = match align.as_str() {
+                            "left" => content_left,
+                            "right" => content_left + content_w - hw,
+                            _ => content_left + (content_w - hw) / 2.0,
+                        };
                         self.rects.push(rect(hx, self.cursor_y, hw, h, hr.border_color));
                         self.cursor_y += h + hr.margin.bottom;
                     }
@@ -4662,6 +4668,12 @@ mod tests {
         let left_gap = hr.x - PAGE_MARGIN;
         let right_gap = (PAGE_MARGIN + content_w) - (hr.x + hr.w);
         assert!((left_gap - right_gap).abs() < 2.0, "centered: {left_gap} vs {right_gap}");
+
+        // align=left pins the narrowed rule to the left edge.
+        let doc_l = parse("<hr width=\"50%\" align=\"left\">");
+        let l_l = layout(&doc_l, &font, 400.0, &ImageSizes::new());
+        let hr_l = l_l.rects.iter().max_by(|a, b| a.h.partial_cmp(&b.h).unwrap()).unwrap();
+        assert!((hr_l.x - PAGE_MARGIN).abs() < 1.0, "align=left at the left edge: {}", hr_l.x);
     }
 
     #[test]
