@@ -335,7 +335,19 @@ fn implicit_role(tag: &str) -> Option<&'static str> {
         "main" => "main",
         "header" => "banner",
         "footer" => "contentinfo",
-        "input" | "textarea" => "textbox",
+        "aside" => "complementary",
+        "section" => "region",
+        "article" => "article",
+        "figure" => "figure",
+        "dialog" => "dialog",
+        "select" => "listbox",
+        "option" => "option",
+        "progress" => "progressbar",
+        "output" => "status",
+        "fieldset" => "group",
+        "details" => "group",
+        "summary" => "button",
+        "textarea" => "textbox",
         "p" => "paragraph",
         "table" => "table",
         "tr" => "row",
@@ -344,6 +356,46 @@ fn implicit_role(tag: &str) -> Option<&'static str> {
         "form" => "form",
         _ => return None,
     })
+}
+
+/// The role for an `<input>`, refined by its `type` (a checkbox/radio/button/etc.
+/// are distinct roles from a plain textbox). `hidden` inputs have no role.
+fn input_role(ty: &str) -> Option<&'static str> {
+    Some(match ty {
+        "checkbox" => "checkbox",
+        "radio" => "radio",
+        "button" | "submit" | "reset" | "image" => "button",
+        "search" => "searchbox",
+        "range" => "slider",
+        "hidden" => return None,
+        _ => "textbox",
+    })
+}
+
+/// ARIA/native state annotations appended after the role/name (e.g. `[disabled]`,
+/// `[checked]`, `[expanded=true]`), for richer a11y snapshots.
+fn aria_states(e: &argus_dom::ElementData) -> String {
+    let mut s = String::new();
+    let truthy = |v: Option<&str>| v == Some("true");
+    if e.attr("disabled").is_some() || truthy(e.attr("aria-disabled")) {
+        s.push_str(" [disabled]");
+    }
+    if e.attr("checked").is_some() || truthy(e.attr("aria-checked")) {
+        s.push_str(" [checked]");
+    }
+    if e.attr("required").is_some() || truthy(e.attr("aria-required")) {
+        s.push_str(" [required]");
+    }
+    if truthy(e.attr("aria-pressed")) {
+        s.push_str(" [pressed]");
+    }
+    if let Some(v) = e.attr("aria-expanded").filter(|v| *v == "true" || *v == "false") {
+        s.push_str(&format!(" [expanded={v}]"));
+    }
+    if let Some(v) = e.attr("aria-current").filter(|v| !v.is_empty()) {
+        s.push_str(&format!(" [current={v}]"));
+    }
+    s
 }
 
 /// Build the accessibility tree for a parsed document: each semantic element as an
@@ -387,11 +439,18 @@ fn a11y_tree(doc: &argus_dom::Document) -> String {
         if let NodeData::Element(e) = &doc.node(id).data {
             let tag = &*e.name.local;
             if !matches!(tag, "head" | "title" | "style" | "script" | "meta" | "link") {
-                // An explicit `role` attribute overrides the tag's implicit role.
+                // An explicit `role` attribute overrides the tag's implicit role;
+                // `<input>` refines its role by `type`.
                 let role: Option<&str> = e
                     .attr("role")
                     .filter(|r| !r.is_empty())
-                    .or_else(|| implicit_role(tag));
+                    .or_else(|| {
+                        if tag == "input" {
+                            input_role(e.attr("type").unwrap_or("text"))
+                        } else {
+                            implicit_role(tag)
+                        }
+                    });
                 if let Some(role) = role {
                     // Accessible name: `aria-label`, else `alt` for images, else text.
                     let name = if let Some(label) = e.attr("aria-label") {
@@ -410,6 +469,7 @@ fn a11y_tree(doc: &argus_dom::Document) -> String {
                     if !name.is_empty() {
                         out.push_str(&format!(" \"{name}\""));
                     }
+                    out.push_str(&aria_states(e));
                     out.push('\n');
                     next_depth = depth + 1;
                 }
@@ -1241,6 +1301,26 @@ mod tests {
         assert!(tree.contains("alert \"Heads up\""), "role attr:\n{tree}");
         // aria-hidden prunes the element.
         assert!(!tree.contains("secret"), "aria-hidden should prune:\n{tree}");
+    }
+
+    #[test]
+    fn a11y_tree_input_roles_and_states() {
+        let doc = argus_html::parse(
+            "<input type=\"checkbox\" checked aria-label=\"Agree\">\
+             <input type=\"text\" disabled aria-label=\"Name\">\
+             <input type=\"hidden\" name=\"tok\">\
+             <button aria-expanded=\"true\" aria-label=\"Menu\">M</button>\
+             <select aria-label=\"Country\"><option>US</option></select>",
+        );
+        let tree = super::a11y_tree(&doc);
+        // input type refines the role; native/ARIA states are annotated.
+        assert!(tree.contains("checkbox \"Agree\" [checked]"), "checkbox state:\n{tree}");
+        assert!(tree.contains("textbox \"Name\" [disabled]"), "disabled textbox:\n{tree}");
+        // hidden inputs have no role (not surfaced).
+        assert!(!tree.contains("\"tok\""), "hidden input pruned:\n{tree}");
+        assert!(tree.contains("button \"Menu\" [expanded=true]"), "expanded button:\n{tree}");
+        assert!(tree.contains("listbox \"Country\""), "select→listbox:\n{tree}");
+        assert!(tree.contains("option"), "option role:\n{tree}");
     }
 
     #[test]
