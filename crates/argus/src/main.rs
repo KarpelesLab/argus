@@ -128,6 +128,17 @@ fn main() {
             }
             return;
         }
+        // `--dump-tables`: print the page's tables as TSV and exit.
+        if has_flag("--dump-tables") {
+            match argus_browser::dump_tables(url.as_deref()) {
+                Ok(t) => print!("{t}"),
+                Err(err) => {
+                    eprintln!("[browser] dump-tables failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         // `--dump-domtree`: print the DOM as a nested JSON tree (CDP-style).
         if has_flag("--dump-domtree") {
             match argus_browser::dump_domtree(url.as_deref()) {

@@ -767,6 +767,87 @@ pub fn dump_forms(url: Option<&str>) -> io::Result<String> {
 /// Headless automation: fetch a page and return its **metadata** (title, lang,
 /// charset, description/keywords/author/robots, canonical URL, and `og:`/`twitter:`
 /// social tags) as `key: value` lines. Used by `--dump-meta` (SEO / scraping).
+/// Headless automation: fetch a page and return its `<table>`s as TSV — each row
+/// a line of tab-separated cell texts, tables separated by a blank line. Used by
+/// `--dump-tables` (data scraping).
+pub fn dump_tables(url: Option<&str>) -> io::Result<String> {
+    log::set_role(Role::Browser);
+    let mut net = spawn_child(Role::NetService)?;
+    proto::parent_handshake(net.channel(), Size::new(800, 600))?;
+    let html = resolve_html(&net, url);
+    proto::send(net.channel(), Msg::Shutdown, &[])?;
+    net.wait()?;
+    let mut doc = argus_html::parse(&html);
+    argus_domscript::apply_scripts_with_url(&mut doc, url);
+    Ok(extract_tables(&doc))
+}
+
+/// Collect each `<table>` as TSV rows (cells tab-separated, whitespace-collapsed);
+/// tables are separated by a blank line. Pure (no I/O), unit-testable.
+fn extract_tables(doc: &argus_dom::Document) -> String {
+    use argus_dom::{Document, NodeData, NodeId};
+
+    fn cell_text(doc: &Document, id: NodeId) -> String {
+        fn go(doc: &Document, id: NodeId, out: &mut String) {
+            match &doc.node(id).data {
+                NodeData::Text(t) => out.push_str(t),
+                _ => {
+                    for c in doc.children(id) {
+                        go(doc, c, out);
+                    }
+                }
+            }
+        }
+        let mut s = String::new();
+        go(doc, id, &mut s);
+        s.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+    // Rows of a table: each `<tr>` (anywhere under the table) → its `<td>`/`<th>`.
+    fn rows_of(doc: &Document, table: NodeId, out: &mut String) {
+        fn walk_rows(doc: &Document, id: NodeId, out: &mut String) {
+            if let NodeData::Element(e) = &doc.node(id).data {
+                if e.name.is_html("tr") {
+                    let cells: Vec<String> = doc
+                        .children(id)
+                        .filter(|&c| {
+                            matches!(&doc.node(c).data, NodeData::Element(e)
+                                if e.name.is_html("td") || e.name.is_html("th"))
+                        })
+                        .map(|c| cell_text(doc, c))
+                        .collect();
+                    out.push_str(&cells.join("\t"));
+                    out.push('\n');
+                    return; // don't descend into nested tables' rows here
+                }
+            }
+            for c in doc.children(id) {
+                walk_rows(doc, c, out);
+            }
+        }
+        walk_rows(doc, table, out);
+    }
+
+    let mut tables: Vec<NodeId> = Vec::new();
+    fn find_tables(doc: &Document, id: NodeId, out: &mut Vec<NodeId>) {
+        if matches!(&doc.node(id).data, NodeData::Element(e) if e.name.is_html("table")) {
+            out.push(id);
+        }
+        for c in doc.children(id) {
+            find_tables(doc, c, out);
+        }
+    }
+    find_tables(doc, doc.root(), &mut tables);
+
+    let mut out = String::new();
+    for (i, &t) in tables.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        rows_of(doc, t, &mut out);
+    }
+    out
+}
+
 pub fn dump_meta(url: Option<&str>) -> io::Result<String> {
     log::set_role(Role::Browser);
     let mut net = spawn_child(Role::NetService)?;
@@ -1449,8 +1530,8 @@ fn verify_uniform(fb: &Framebuffer) -> io::Result<Color> {
 #[cfg(test)]
 mod tests {
     use super::{
-        dom_node_json, extract_forms, extract_json, extract_links, extract_meta, page_title,
-        render_text, resolve_url, History,
+        dom_node_json, extract_forms, extract_json, extract_links, extract_meta, extract_tables,
+        page_title, render_text, resolve_url, History,
     };
 
     #[test]
@@ -1559,6 +1640,22 @@ mod tests {
             out.contains("{\"text\":\"Link\",\"href\":\"https://site.example/x\"}"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn extract_tables_emits_tsv() {
+        let doc = argus_html::parse(
+            "<table><tr><th>Name</th><th>Age</th></tr>\
+               <tr><td>Ann</td><td>30</td></tr></table>\
+             <table><tr><td>x</td></tr></table>",
+        );
+        let out = extract_tables(&doc);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "Name\tAge");
+        assert_eq!(lines[1], "Ann\t30");
+        // A blank line separates the two tables.
+        assert!(lines.contains(&""), "tables separated by blank line: {out:?}");
+        assert!(lines.contains(&"x"), "second table present: {out:?}");
     }
 
     #[test]
