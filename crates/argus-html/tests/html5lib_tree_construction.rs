@@ -676,4 +676,22 @@ a</br>b
 |           <svg text>
 |             "t"
 |       "after"
+
+#data
+<table><tr><td>a<td>b<tr><td>c</table>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <table>
+|       <tbody>
+|         <tr>
+|           <td>
+|             "a"
+|           <td>
+|             "b"
+|         <tr>
+|           <td>
+|             "c"
 "####;

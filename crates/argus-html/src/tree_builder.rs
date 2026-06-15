@@ -536,6 +536,18 @@ impl TreeBuilder {
                 self.pop_until(item);
             }
         }
+        // A new cell or row first closes any open cell (cells are siblings); a new
+        // row also closes the open row.
+        if matches!(name, "td" | "th" | "tr") {
+            while matches!(self.name_of(self.current()), Some("td" | "th")) {
+                self.open.pop();
+            }
+        }
+        if name == "tr" {
+            while self.is_named(self.current(), "tr") {
+                self.open.pop();
+            }
+        }
         // Simplified table fixups: a <tr> directly in a <table> gets an implicit
         // <tbody>; a <td>/<th> not already in a row gets an implicit <tr> (inserting
         // a <tbody> first if it sits straight inside the <table>).
