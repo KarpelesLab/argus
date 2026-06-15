@@ -2675,27 +2675,39 @@ impl Ctx<'_> {
                 };
                 let mut first = true;
                 for word in t.split_whitespace() {
-                    words.push(InlineWord {
-                        text: transform_text(word, style.text_transform),
-                        font_size: style.font_size,
-                        color,
-                        background,
-                        // Words within a text node are separated by whitespace.
-                        space_before: *pending_space || !first,
-                        underline: style.underline && !style.hidden,
-                        strike: style.strike && !style.hidden,
-                        overline: style.overline && !style.hidden,
-                        bold: style.bold,
-                        italic: style.italic,
-                        shadow: style.text_shadow,
-                        decoration_color: style.fade(style.decoration_color.unwrap_or(style.color)),
-                        href: if style.hidden { None } else { link.clone() },
-                        hard_break: false,
-                        baseline_shift: shift,
-                        atomic: None,
-                    });
-                    *pending_space = false;
-                    first = false;
+                    // A soft hyphen (U+00AD) is a break opportunity: split the word
+                    // into adjacent sub-words there (the soft hyphen itself is not
+                    // rendered), so long words can wrap at those points.
+                    let mut first_sub = true;
+                    for sub in word.split('\u{00AD}') {
+                        if sub.is_empty() {
+                            continue;
+                        }
+                        words.push(InlineWord {
+                            text: transform_text(sub, style.text_transform),
+                            font_size: style.font_size,
+                            color,
+                            background,
+                            // Words are separated by whitespace; sub-words (split at a
+                            // soft hyphen) abut with no space.
+                            space_before: first_sub && (*pending_space || !first),
+                            underline: style.underline && !style.hidden,
+                            strike: style.strike && !style.hidden,
+                            overline: style.overline && !style.hidden,
+                            bold: style.bold,
+                            italic: style.italic,
+                            shadow: style.text_shadow,
+                            decoration_color: style
+                                .fade(style.decoration_color.unwrap_or(style.color)),
+                            href: if style.hidden { None } else { link.clone() },
+                            hard_break: false,
+                            baseline_shift: shift,
+                            atomic: None,
+                        });
+                        *pending_space = false;
+                        first = false;
+                        first_sub = false;
+                    }
                 }
                 if t.ends_with(char::is_whitespace) {
                     *pending_space = true;
@@ -3397,6 +3409,27 @@ mod tests {
         let without = render("");
         assert!(without.iter().any(|t| t == "jumps"), "full text kept: {without:?}");
         assert!(without.iter().all(|t| !t.ends_with('…')), "no ellipsis: {without:?}");
+    }
+
+    #[test]
+    fn wbr_and_soft_hyphen_create_break_opportunities() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let line_count = |html: &str| -> usize {
+            let doc = parse(html);
+            let l = layout(&doc, &font, 70.0, &ImageSizes::new());
+            let mut ys: Vec<i32> = l.runs.iter().map(|r| r.baseline as i32).collect();
+            ys.sort_unstable();
+            ys.dedup();
+            ys.len()
+        };
+        // Without a break point a long word stays on one line; <wbr> and &shy; both
+        // let it wrap in the narrow box.
+        assert_eq!(line_count("<p>supercalifragilisticexpialidocious</p>"), 1, "no break point");
+        assert!(line_count("<p>super<wbr>cali<wbr>fragilistic<wbr>expialidocious</p>") > 1, "<wbr> wraps");
+        assert!(line_count("<p>super&shy;cali&shy;fragilistic&shy;expialidocious</p>") > 1, "soft hyphen wraps");
     }
 
     #[test]

@@ -155,6 +155,22 @@ fn named(name: &str) -> Option<&'static str> {
         "para" => "¶",
         "middot" => "·",
         "bull" => "•",
+        "shy" => "\u{00AD}",   // soft hyphen (a break opportunity)
+        "ensp" => "\u{2002}",
+        "emsp" => "\u{2003}",
+        "thinsp" => "\u{2009}",
+        "zwnj" => "\u{200C}",
+        "zwj" => "\u{200D}",
+        "dagger" => "†",
+        "Dagger" => "‡",
+        "permil" => "‰",
+        "prime" => "′",
+        "Prime" => "″",
+        "infin" => "∞",
+        "ne" => "≠",
+        "le" => "≤",
+        "ge" => "≥",
+        "micro" => "µ",
         _ => return None,
     })
 }
