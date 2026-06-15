@@ -7,7 +7,7 @@
 //! (`oxideav-ico`, largest sub-image) — plus uncompressed 24/32-bit BMP, **TGA**
 //! (Truevision true-color + grayscale, uncompressed + RLE), **Netpbm** (PPM/PGM,
 //! ASCII + binary), **PCX** (RLE 24-bit + 8-bit palette), **TIFF** (baseline
-//! uncompressed + PackBits + LZW + Deflate RGB/grayscale, horizontal predictor, both byte orders), all built in, and `data:` URLs.
+//! uncompressed + PackBits + LZW + Deflate RGB/RGBA/grayscale, horizontal predictor, both byte orders), all built in, and `data:` URLs.
 //! AVIF and lossy-WebP
 //! (VP8) decode here once that glue lands. See `docs/subsystems/media.md`.
 
@@ -650,7 +650,7 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
     {
         return None;
     }
-    if !matches!((samples, photometric), (3, 2) | (1, 0) | (1, 1)) {
+    if !matches!((samples, photometric), (4, 2) | (3, 2) | (1, 0) | (1, 1)) {
         return None;
     }
     // Predictor: 1 = none, 2 = horizontal differencing (undone after decompress).
@@ -700,16 +700,18 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
             break;
         }
         let d = px * 4;
-        if spp == 3 {
+        if spp >= 3 {
             rgba[d] = data[p];
             rgba[d + 1] = data[p + 1];
             rgba[d + 2] = data[p + 2];
-        } else {
-            let g = if white_is_zero { 255 - data[p] } else { data[p] };
-            rgba[d] = g;
-            rgba[d + 1] = g;
-            rgba[d + 2] = g;
+            // A 4th sample is the associated alpha channel (photometric RGB).
+            rgba[d + 3] = if spp == 4 { data[p + 3] } else { 0xFF };
+            continue;
         }
+        let g = if white_is_zero { 255 - data[p] } else { data[p] };
+        rgba[d] = g;
+        rgba[d + 1] = g;
+        rgba[d + 2] = g;
         rgba[d + 3] = 0xFF;
     }
     Some(DecodedImage {
@@ -1088,6 +1090,37 @@ mod tests {
         assert_eq!(&img.rgba[0..4], &[100, 100, 100, 255]);
         assert_eq!(&img.rgba[8..12], &[100, 100, 100, 255]);
         assert_eq!(&img.rgba[12..16], &[200, 200, 200, 255]);
+    }
+
+    #[test]
+    fn decodes_rgba_tiff() {
+        // 2x1 little-endian RGBA TIFF (4 samples/pixel, associated alpha).
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(b"II");
+        b.extend_from_slice(&42u16.to_le_bytes());
+        b.extend_from_slice(&16u32.to_le_bytes()); // IFD offset
+        b.extend_from_slice(&[255, 0, 0, 128, 0, 255, 0, 64]); // red@50%, green@25% (8 bytes) at 8
+        let entry = |b: &mut Vec<u8>, tag: u16, ty: u16, val: u32| {
+            b.extend_from_slice(&tag.to_le_bytes());
+            b.extend_from_slice(&ty.to_le_bytes());
+            b.extend_from_slice(&1u32.to_le_bytes());
+            b.extend_from_slice(&val.to_le_bytes());
+        };
+        b.extend_from_slice(&9u16.to_le_bytes());
+        entry(&mut b, 256, 3, 2); // width
+        entry(&mut b, 257, 3, 1); // height
+        entry(&mut b, 258, 3, 8); // bits
+        entry(&mut b, 259, 3, 1); // none
+        entry(&mut b, 262, 3, 2); // RGB
+        entry(&mut b, 273, 4, 8); // strip offset
+        entry(&mut b, 277, 3, 4); // 4 samples/pixel
+        entry(&mut b, 278, 3, 1); // rows/strip
+        entry(&mut b, 279, 4, 8); // strip byte count
+        b.extend_from_slice(&0u32.to_le_bytes());
+        let img = decode(&b).expect("decode rgba tiff");
+        assert_eq!((img.width, img.height), (2, 1));
+        assert_eq!(&img.rgba[0..4], &[255, 0, 0, 128], "red @50% alpha");
+        assert_eq!(&img.rgba[4..8], &[0, 255, 0, 64], "green @25% alpha");
     }
 
     #[test]
