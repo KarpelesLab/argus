@@ -416,6 +416,36 @@ impl TreeBuilder {
             self.generate_implied_end_tags(Some("li"));
             self.pop_until("li");
         }
+        // A new <dd>/<dt> closes an open one (definition-list items are siblings).
+        // `except` must name the item we pop_until, so implied-end-tag generation
+        // doesn't pop it out from under us first.
+        if matches!(name, "dd" | "dt") {
+            let item = if self.has_in_scope("dd", false) {
+                Some("dd")
+            } else if self.has_in_scope("dt", false) {
+                Some("dt")
+            } else {
+                None
+            };
+            if let Some(item) = item {
+                self.generate_implied_end_tags(Some(item));
+                self.pop_until(item);
+            }
+        }
+        // Simplified table fixups: a <tr> directly in a <table> gets an implicit
+        // <tbody>; a <td>/<th> not already in a row gets an implicit <tr> (inserting
+        // a <tbody> first if it sits straight inside the <table>).
+        if name == "tr" && self.is_named(self.current(), "table") {
+            self.insert_and_push("tbody", &[]);
+        }
+        if matches!(name, "td" | "th") {
+            if self.is_named(self.current(), "table") {
+                self.insert_and_push("tbody", &[]);
+            }
+            if matches!(self.name_of(self.current()), Some("tbody" | "thead" | "tfoot")) {
+                self.insert_and_push("tr", &[]);
+            }
+        }
         if HEADINGS.contains(&name) {
             if let Some(n) = self.name_of(self.current()) {
                 if HEADINGS.contains(&n) {
