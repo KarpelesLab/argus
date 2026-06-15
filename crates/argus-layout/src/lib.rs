@@ -493,7 +493,8 @@ pub struct ImageBox {
     pub clip: Option<[f32; 4]>,
 }
 
-/// The border-box of an element that carries an `id`, for click hit-testing.
+/// The border-box of an element that carries an `id`, for click hit-testing,
+/// plus a handful of resolved CSS properties (for `getComputedStyle` read-back).
 #[derive(Clone, Debug)]
 pub struct ElementBound {
     pub id: String,
@@ -501,6 +502,53 @@ pub struct ElementBound {
     pub y: f32,
     pub w: f32,
     pub h: f32,
+    /// Resolved CSS `(property, value)` pairs (common properties only).
+    pub computed: Vec<(String, String)>,
+}
+
+/// Resolved values of common CSS properties for `getComputedStyle` read-back.
+fn computed_css_props(s: &ComputedStyle) -> Vec<(String, String)> {
+    let color = |c: argus_geometry::Color| -> String {
+        if c.a == 255 {
+            format!("rgb({}, {}, {})", c.r, c.g, c.b)
+        } else {
+            format!("rgba({}, {}, {}, {})", c.r, c.g, c.b, c.a as f32 / 255.0)
+        }
+    };
+    let display = match s.display {
+        Display::Block => "block",
+        Display::Inline => "inline",
+        Display::InlineBlock => "inline-block",
+        Display::Flex => "flex",
+        Display::Grid => "grid",
+        Display::None => "none",
+    };
+    let text_align = match s.text_align {
+        TextAlign::Left => "left",
+        TextAlign::Center => "center",
+        TextAlign::Right => "right",
+        TextAlign::Justify => "justify",
+    };
+    vec![
+        ("color".into(), color(s.color)),
+        ("background-color".into(), color(s.background_color)),
+        ("display".into(), display.into()),
+        ("font-size".into(), format!("{}px", s.font_size)),
+        (
+            "font-weight".into(),
+            if s.bold { "700" } else { "400" }.into(),
+        ),
+        (
+            "font-style".into(),
+            if s.italic { "italic" } else { "normal" }.into(),
+        ),
+        ("text-align".into(), text_align.into()),
+        ("opacity".into(), format!("{}", s.opacity)),
+        (
+            "visibility".into(),
+            if s.hidden { "hidden" } else { "visible" }.into(),
+        ),
+    ]
 }
 
 /// The result of laying a document out at a given viewport width.
@@ -1465,6 +1513,7 @@ impl Ctx<'_> {
                 y: border_box_top,
                 w: border_box_w,
                 h: self.cursor_y - border_box_top,
+                computed: computed_css_props(&style),
             });
         }
 

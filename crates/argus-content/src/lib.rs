@@ -86,12 +86,14 @@ pub fn run(channel: Channel) -> io::Result<()> {
                 // load) so getBoundingClientRect/offset* read back real boxes.
                 let geom = content.geometry();
                 let vp = content.window_metrics();
+                let cstyle = content.computed_styles();
                 if let Some(console) = argus_domscript::apply_scripts_session_geom(
                     &mut doc,
                     &[],
                     &mut content.storage,
                     &geom,
                     vp,
+                    &cstyle,
                 ) {
                     for line in console.lines() {
                         log!("console.log: {line}");
@@ -194,6 +196,14 @@ impl Content {
     /// scrollY]` — the content viewport and current page scroll.
     fn window_metrics(&self) -> [u32; 4] {
         [self.viewport.width, self.viewport.height, 0, self.scroll_y]
+    }
+
+    /// Resolved CSS per id'd element from the last layout, for `getComputedStyle`.
+    fn computed_styles(&self) -> Vec<(String, Vec<(String, String)>)> {
+        self.bounds
+            .iter()
+            .map(|b| (b.id.clone(), b.computed.clone()))
+            .collect()
     }
 
     /// Paint the current document (or the fallback color) into a fresh framebuffer.
@@ -365,12 +375,14 @@ impl Content {
         let mut doc = argus_html::parse(html);
         let geom = self.geometry();
         let vp = self.window_metrics();
+        let cstyle = self.computed_styles();
         if let Some(console) = argus_domscript::apply_scripts_session_geom(
             &mut doc,
             &self.events,
             &mut self.storage,
             &geom,
             vp,
+            &cstyle,
         ) {
             for line in console.lines() {
                 log!("console.log: {line}");

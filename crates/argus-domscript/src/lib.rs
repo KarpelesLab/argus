@@ -647,6 +647,21 @@ window.scrollX = window.pageXOffset = __vp.sx;
 window.scrollY = window.pageYOffset = __vp.sy;
 window.devicePixelRatio = 1;
 window.scroll = window.scrollTo = window.scrollBy = function() {};
+// getComputedStyle: resolved CSS for an id'd element from the last layout (a
+// curated property set; unknown properties read ""). One frame behind.
+var __argus_cstyle = __CSTYLE__;
+window.getComputedStyle = function(el) {
+  var id = (el && el.getAttribute) ? el.getAttribute("id") : null;
+  var p = (id != null && __argus_cstyle[id]) ? __argus_cstyle[id] : {};
+  return {
+    getPropertyValue: function(k) { var v = p[("" + k).toLowerCase()]; return v == null ? "" : v; },
+    color: p["color"] || "", backgroundColor: p["background-color"] || "",
+    display: p["display"] || "", fontSize: p["font-size"] || "",
+    fontWeight: p["font-weight"] || "", fontStyle: p["font-style"] || "",
+    textAlign: p["text-align"] || "", opacity: p["opacity"] || "",
+    visibility: p["visibility"] || ""
+  };
+};
 window.screen = {
   width: 800, height: 600, availWidth: 800, availHeight: 600, colorDepth: 24, pixelDepth: 24
 };
@@ -866,21 +881,21 @@ pub struct Interaction {
 /// Returns the console output (minus the internal ops line) for logging.
 pub fn apply_scripts(doc: &mut Document) -> Option<String> {
     let mut storage = std::collections::HashMap::new();
-    run_scripts(doc, &[], &mut storage, &[], None, &[], DEFAULT_VIEWPORT)
+    run_scripts(doc, &[], &mut storage, &[], None, &[], DEFAULT_VIEWPORT, &[])
 }
 
 /// Like [`apply_scripts`], but seeds `window.location` from `url` so scripts can
 /// read `location.href`/`pathname`/`search`/`hash`/etc.
 pub fn apply_scripts_with_url(doc: &mut Document, url: Option<&str>) -> Option<String> {
     let mut storage = std::collections::HashMap::new();
-    run_scripts(doc, &[], &mut storage, &[], url, &[], DEFAULT_VIEWPORT)
+    run_scripts(doc, &[], &mut storage, &[], url, &[], DEFAULT_VIEWPORT, &[])
 }
 
 /// Like [`apply_scripts`], but also replays `events` (deterministic event replay)
 /// with a throwaway storage (no cross-call persistence).
 pub fn apply_scripts_with_events(doc: &mut Document, events: &[Interaction]) -> Option<String> {
     let mut storage = std::collections::HashMap::new();
-    run_scripts(doc, events, &mut storage, &[], None, &[], DEFAULT_VIEWPORT)
+    run_scripts(doc, events, &mut storage, &[], None, &[], DEFAULT_VIEWPORT, &[])
 }
 
 /// Like [`apply_scripts`], but also honors **header-delivered** Content-Security-
@@ -889,7 +904,7 @@ pub fn apply_scripts_with_events(doc: &mut Document, events: &[Interaction]) -> 
 /// blocked if *any* meta or header policy forbids them.
 pub fn apply_scripts_with_csp(doc: &mut Document, header_csp: &[String]) -> Option<String> {
     let mut storage = std::collections::HashMap::new();
-    run_scripts(doc, &[], &mut storage, header_csp, None, &[], DEFAULT_VIEWPORT)
+    run_scripts(doc, &[], &mut storage, header_csp, None, &[], DEFAULT_VIEWPORT, &[])
 }
 
 /// The full session entry point: run scripts, replay `events`, and persist
@@ -900,7 +915,7 @@ pub fn apply_scripts_session(
     events: &[Interaction],
     storage: &mut std::collections::HashMap<String, String>,
 ) -> Option<String> {
-    run_scripts(doc, events, storage, &[], None, &[], DEFAULT_VIEWPORT)
+    run_scripts(doc, events, storage, &[], None, &[], DEFAULT_VIEWPORT, &[])
 }
 
 /// Like [`apply_scripts_session`], plus per-`id` element geometry (`[x, y, w, h]`)
@@ -912,8 +927,9 @@ pub fn apply_scripts_session_geom(
     storage: &mut std::collections::HashMap<String, String>,
     geometry: &[(String, [f32; 4])],
     viewport: [u32; 4],
+    computed: &[(String, Vec<(String, String)>)],
 ) -> Option<String> {
-    run_scripts(doc, events, storage, &[], None, geometry, viewport)
+    run_scripts(doc, events, storage, &[], None, geometry, viewport, computed)
 }
 
 /// Default window metrics (`[width, height, scrollX, scrollY]`) for callers that
@@ -928,6 +944,7 @@ fn run_scripts(
     url: Option<&str>,
     geometry: &[(String, [f32; 4])],
     viewport: [u32; 4],
+    computed: &[(String, Vec<(String, String)>)],
 ) -> Option<String> {
     let all_scripts = collect_scripts(doc);
     if all_scripts.is_empty() {
@@ -968,7 +985,8 @@ fn run_scripts(
                 "{{w:{},h:{},sx:{},sy:{}}}",
                 viewport[0], viewport[1], viewport[2], viewport[3]
             ),
-        );
+        )
+        .replace("__CSTYLE__", &cstyle_json(computed));
     for s in &scripts {
         src.push('\n');
         src.push_str(s);
@@ -1069,6 +1087,22 @@ fn geometry_json(geometry: &[(String, [f32; 4])]) -> String {
                 fmt_num(*w),
                 fmt_num(*h)
             )
+        })
+        .collect();
+    format!("{{{}}}", entries.join(","))
+}
+
+/// Build the `__argus_cstyle` seed: `{ "id": { "prop": "value", … }, … }` of
+/// resolved CSS for each id'd element, for `getComputedStyle`.
+fn cstyle_json(computed: &[(String, Vec<(String, String)>)]) -> String {
+    let entries: Vec<String> = computed
+        .iter()
+        .map(|(id, props)| {
+            let p: Vec<String> = props
+                .iter()
+                .map(|(k, v)| format!("{}:{}", json_string(k), json_string(v)))
+                .collect();
+            format!("{}:{{{}}}", json_string(id), p.join(","))
         })
         .collect();
     format!("{{{}}}", entries.join(","))
@@ -2573,7 +2607,7 @@ mod tests {
         );
         let mut storage = std::collections::HashMap::new();
         let geom = [("o".to_string(), [12.0, 34.0, 100.0, 20.0])];
-        apply_scripts_session_geom(&mut doc, &[], &mut storage, &geom, [800, 600, 0, 0]);
+        apply_scripts_session_geom(&mut doc, &[], &mut storage, &geom, [800, 600, 0, 0], &[]);
         assert_eq!(attr_of(&doc, "o", "data-w").as_deref(), Some("100"));
         assert_eq!(attr_of(&doc, "o", "data-h").as_deref(), Some("20"));
         assert_eq!(attr_of(&doc, "o", "data-x").as_deref(), Some("12"));
@@ -2588,7 +2622,7 @@ mod tests {
               '' + document.getElementById('q').getBoundingClientRect().width);</script>",
         );
         let mut s2 = std::collections::HashMap::new();
-        apply_scripts_session_geom(&mut doc2, &[], &mut s2, &geom, [800, 600, 0, 0]);
+        apply_scripts_session_geom(&mut doc2, &[], &mut s2, &geom, [800, 600, 0, 0], &[]);
         assert_eq!(attr_of(&doc2, "q", "data-w").as_deref(), Some("0"));
     }
 
@@ -2602,8 +2636,34 @@ mod tests {
               window.scrollY + ',' + window.pageYOffset);</script>",
         );
         let mut storage = std::collections::HashMap::new();
-        apply_scripts_session_geom(&mut doc, &[], &mut storage, &[], [800, 572, 0, 150]);
+        apply_scripts_session_geom(&mut doc, &[], &mut storage, &[], [800, 572, 0, 150], &[]);
         assert_eq!(attr_of(&doc, "o", "data-m").as_deref(), Some("800,572,150,150"));
+    }
+
+    #[test]
+    fn get_computed_style_reads_resolved_properties() {
+        let mut doc = argus_html::parse(
+            "<div id=\"o\">x</div>\
+             <script>\
+               var cs = window.getComputedStyle(document.getElementById('o'));\
+               document.getElementById('o').setAttribute('data-c', \
+                 cs.color + '|' + cs.display + '|' + cs.getPropertyValue('font-size'));\
+             </script>",
+        );
+        let mut storage = std::collections::HashMap::new();
+        let cstyle = vec![(
+            "o".to_string(),
+            vec![
+                ("color".to_string(), "rgb(255, 0, 0)".to_string()),
+                ("display".to_string(), "block".to_string()),
+                ("font-size".to_string(), "16px".to_string()),
+            ],
+        )];
+        apply_scripts_session_geom(&mut doc, &[], &mut storage, &[], [800, 600, 0, 0], &cstyle);
+        assert_eq!(
+            attr_of(&doc, "o", "data-c").as_deref(),
+            Some("rgb(255, 0, 0)|block|16px")
+        );
     }
 
     #[test]
