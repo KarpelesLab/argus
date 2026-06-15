@@ -182,7 +182,17 @@ fn dump_page(path: &str, url: Option<&str>) -> std::io::Result<()> {
     use argus_geometry::Size;
     use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
 
-    let viewport = Size::new(800, 1600);
+    // Viewport size is configurable via --width / --height (for responsive
+    // screenshots); the width also drives @media queries and layout.
+    let w = flag_value("--width=")
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&w| w > 0 && w <= 16384)
+        .unwrap_or(800);
+    let h = flag_value("--height=")
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&h| h > 0 && h <= 32768)
+        .unwrap_or(1600);
+    let viewport = Size::new(w, h);
     let (size, rgba) = argus_browser::render_once(url, viewport)?;
 
     let frame = VideoFrame {
