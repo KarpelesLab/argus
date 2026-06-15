@@ -1126,19 +1126,43 @@ impl Ctx<'_> {
             // the grow factors. Otherwise keep the equal-share model with
             // `justify-content` distributing any leftover among fixed-width items.
             let any_grow = istyles.iter().any(|s| s.flex_grow > 0.0);
-            let (sizes, lead, between_extra): (Vec<f32>, f32, f32) = if any_grow {
-                let base: Vec<f32> = istyles
+            // Base size of each item: explicit-width footprint, else shrink-to-content.
+            let base: Vec<f32> = istyles
+                .iter()
+                .enumerate()
+                .map(|(i, s)| {
+                    fixed[i].unwrap_or_else(|| {
+                        self.intrinsic_border_width(items[i], s) + s.margin.left + s.margin.right
+                    })
+                })
+                .collect();
+            let base_sum: f32 = base.iter().sum();
+            let overflow = base_sum + total_gap - content_w;
+            let any_shrink = istyles.iter().any(|s| s.flex_shrink > 0.0);
+
+            let (sizes, lead, between_extra): (Vec<f32>, f32, f32) = if overflow > 0.0 && any_shrink
+            {
+                // Items overflow the line: shrink each in proportion to
+                // `flex-shrink × base size` until they fit (clamped at zero).
+                let scaled: Vec<f32> = istyles
                     .iter()
                     .enumerate()
-                    .map(|(i, s)| {
-                        fixed[i].unwrap_or_else(|| {
-                            self.intrinsic_border_width(items[i], s)
-                                + s.margin.left
-                                + s.margin.right
-                        })
+                    .map(|(i, s)| s.flex_shrink * base[i])
+                    .collect();
+                let total_scaled: f32 = scaled.iter().sum();
+                let sizes: Vec<f32> = base
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &b)| {
+                        if total_scaled > 0.0 {
+                            (b - overflow * scaled[i] / total_scaled).max(0.0)
+                        } else {
+                            b
+                        }
                     })
                     .collect();
-                let base_sum: f32 = base.iter().sum();
+                (sizes, 0.0, 0.0)
+            } else if any_grow {
                 let free = (content_w - total_gap - base_sum).max(0.0);
                 let total_grow: f32 = istyles.iter().map(|s| s.flex_grow).sum();
                 let sizes: Vec<f32> = base
@@ -2606,6 +2630,45 @@ mod tests {
         let grow = l.runs.iter().find(|r| r.text == "grow").unwrap();
         // The grower starts just after the fixed 50px slot (plus page margin ~8).
         assert!(grow.x > 50.0 && grow.x < 80.0, "grower starts after fixed slot, got {}", grow.x);
+    }
+
+    #[test]
+    fn flex_shrink_compresses_overflowing_items_to_fit() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Two 250px items in a 300px no-wrap row overflow by 200px. With the default
+        // flex-shrink:1 they shrink proportionally to fit, so the second item's left
+        // edge lands well inside the container rather than at ~250px.
+        let html = "<div style=\"display:flex; width:300px\">\
+                      <div style=\"width:250px\">aa</div>\
+                      <div style=\"width:250px\">bb</div>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 600.0, &ImageSizes::new());
+        let b = l.runs.iter().find(|r| r.text == "bb").unwrap();
+        // Each shrinks from 250 to ~150, so the second starts near 150 (+page margin),
+        // not at its unshrunk 250px position.
+        assert!(b.x > 120.0 && b.x < 200.0, "second item shrunk to fit, got {}", b.x);
+    }
+
+    #[test]
+    fn flex_shrink_zero_prevents_shrinking() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // flex-shrink:0 on both items keeps them at full width even though they
+        // overflow: the second still starts at ~250px (its unshrunk position).
+        let html = "<div style=\"display:flex; width:300px\">\
+                      <div style=\"width:250px; flex-shrink:0\">aa</div>\
+                      <div style=\"width:250px; flex-shrink:0\">bb</div>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 600.0, &ImageSizes::new());
+        let b = l.runs.iter().find(|r| r.text == "bb").unwrap();
+        assert!(b.x > 240.0, "no-shrink item keeps full width, got {}", b.x);
     }
 
     #[test]

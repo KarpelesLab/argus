@@ -178,6 +178,8 @@ pub struct ComputedStyle {
     pub align_items: AlignItems,
     /// `flex-grow` factor for a flex item (0 = does not grow).
     pub flex_grow: f32,
+    /// `flex-shrink` factor for a flex item (default 1; 0 = does not shrink).
+    pub flex_shrink: f32,
     /// `flex-wrap: wrap` — allow flex items to break onto multiple lines.
     pub flex_wrap: bool,
     /// Uniform `border-radius` in pixels.
@@ -246,6 +248,7 @@ impl ComputedStyle {
             justify_content: JustifyContent::FlexStart,
             align_items: AlignItems::Stretch,
             flex_grow: 0.0,
+            flex_shrink: 1.0,
             flex_wrap: false,
             border_radius: 0.0,
             opacity: 1.0,
@@ -892,24 +895,47 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             _ => AlignItems::Stretch,
         };
     }
-    // `flex-grow`, or the grow component of the `flex` shorthand (its first
-    // numeric token). `flex: none` → 0; `flex: auto`/`flex: 1` → grow 1.
+    // The `flex` shorthand first: it sets grow + shrink together. Keywords:
+    // `none` → 0 0 auto, `auto` → 1 1 auto, `initial` → 0 1 auto. Numeric forms
+    // take the first two numbers as grow then shrink (shrink defaults to 1).
+    if let Some(v) = map.get("flex") {
+        let t = v.trim();
+        match t {
+            "none" => {
+                cs.flex_grow = 0.0;
+                cs.flex_shrink = 0.0;
+            }
+            "auto" => {
+                cs.flex_grow = 1.0;
+                cs.flex_shrink = 1.0;
+            }
+            "initial" => {
+                cs.flex_grow = 0.0;
+                cs.flex_shrink = 1.0;
+            }
+            _ => {
+                let nums: Vec<f32> = t
+                    .split_whitespace()
+                    .filter_map(|tok| tok.parse::<f32>().ok())
+                    .collect();
+                if let Some(&g) = nums.first() {
+                    cs.flex_grow = g.max(0.0);
+                    // A single number means `flex: <grow> 1 0`.
+                    cs.flex_shrink = nums.get(1).copied().unwrap_or(1.0).max(0.0);
+                }
+            }
+        }
+    }
+    // Longhands override the shorthand when both are present.
     if let Some(v) = map.get("flex-grow") {
         if let Ok(g) = v.trim().parse::<f32>() {
             cs.flex_grow = g.max(0.0);
         }
-    } else if let Some(v) = map.get("flex") {
-        let t = v.trim();
-        cs.flex_grow = match t {
-            "none" | "initial" => 0.0,
-            "auto" => 1.0,
-            _ => t
-                .split_whitespace()
-                .next()
-                .and_then(|first| first.parse::<f32>().ok())
-                .map(|g| g.max(0.0))
-                .unwrap_or(0.0),
-        };
+    }
+    if let Some(v) = map.get("flex-shrink") {
+        if let Ok(s) = v.trim().parse::<f32>() {
+            cs.flex_shrink = s.max(0.0);
+        }
     }
     // `flex-wrap` (also expressible as a token of the `flex-flow` shorthand).
     if let Some(v) = map.get("flex-wrap").or_else(|| map.get("flex-flow")) {
