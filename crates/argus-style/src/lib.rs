@@ -1991,6 +1991,13 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         cs.transform_translate = parse_transform_translate(v);
         cs.transform_scale = parse_transform_scale(v);
     }
+    // Fold the resolved weight/style into a web-font family key so a bold/italic
+    // run selects the matching `@font-face` face (the registry keys faces the same
+    // way). Generic/monospace keys (< 2) are left untouched. Done last, after
+    // `font-weight`/`font-style` are final.
+    if cs.font_key >= 2 {
+        cs.font_key = argus_css::style_variant(cs.font_key, cs.bold, cs.italic);
+    }
 }
 
 /// Count the columns named by a `grid-template-columns` value (a simplified read
@@ -3048,11 +3055,23 @@ mod tests {
         assert_eq!(key("div { font: 14px Menlo, monospace }"), FONT_KEY_MONOSPACE);
         // A proportional generic → the default face.
         assert_eq!(key("div { font-family: sans-serif }"), FONT_KEY_DEFAULT);
-        // A specific (web-font candidate) family → that family's stable hash key.
+        // A specific (web-font candidate) family → that family's style variant key
+        // (normal weight/style folded in). Bold/italic shift it to a distinct key.
+        use argus_css::style_variant;
         assert_eq!(
             key("div { font-family: 'Inter', sans-serif }"),
-            family_key("inter"),
-            "first specific family decides the key"
+            style_variant(family_key("inter"), false, false),
+            "first specific family decides the base key"
+        );
+        assert_eq!(
+            key("div { font-family: 'Inter'; font-weight: bold }"),
+            style_variant(family_key("inter"), true, false),
+            "bold selects the bold variant key"
+        );
+        assert_ne!(
+            key("div { font-family: 'Inter' }"),
+            key("div { font-family: 'Inter'; font-style: italic }"),
+            "italic is a distinct face key"
         );
     }
 

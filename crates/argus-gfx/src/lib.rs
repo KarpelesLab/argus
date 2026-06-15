@@ -97,6 +97,12 @@ impl Font {
         self
     }
 
+    /// Whether a web face is registered under `font_key` (a style-variant key). Used
+    /// to suppress faux bold/italic synthesis when a real styled face will be used.
+    fn has_face(&self, font_key: u32) -> bool {
+        font_key >= 2 && self.web_faces.contains_key(&font_key)
+    }
+
     /// The face chain to shape with for a run's `font_key`: a registered web face
     /// (key ≥ 2), the monospace face (key 1), else the primary chain. Any of these
     /// fall back to the primary chain when the requested face isn't loaded.
@@ -460,6 +466,13 @@ fn push_run_nodes(font: &Font, run: &TextRun, out: &mut Vec<Node>) {
 }
 
 fn push_run_nodes_unclipped(font: &Font, run: &TextRun, out: &mut Vec<Node>) {
+    // When a real styled web face is selected (its key is registered), it already
+    // carries the weight/slant, so skip faux bold/italic synthesis to avoid
+    // double-styling. Otherwise the run falls back to the primary face and we
+    // synthesize the requested style.
+    let real = font.has_face(run.font_key);
+    let faux_bold = run.bold && !real;
+    let faux_italic = run.italic && !real;
     // Paint the text-shadow copy first (behind the glyphs).
     if let Some((dx, dy, scolor)) = run.shadow {
         let spaint = Paint::Solid(rgba_of(scolor));
@@ -472,7 +485,7 @@ fn push_run_nodes_unclipped(font: &Font, run: &TextRun, out: &mut Vec<Node>) {
             run.letter_spacing,
             run.font_key,
         );
-        if run.italic {
+        if faux_italic {
             sgroup.transform = sgroup.transform.compose(&Transform2D::skew_x(-0.21));
         }
         for child in &mut sgroup.children {
@@ -481,7 +494,7 @@ fn push_run_nodes_unclipped(font: &Font, run: &TextRun, out: &mut Vec<Node>) {
         out.push(Node::Group(sgroup));
     }
     let paint = Paint::Solid(rgba_of(run.color));
-    let offsets: &[f32] = if run.bold { &[0.0, 0.6] } else { &[0.0] };
+    let offsets: &[f32] = if faux_bold { &[0.0, 0.6] } else { &[0.0] };
     for &dx in offsets {
         let mut group = build_run(
             font,
@@ -493,7 +506,7 @@ fn push_run_nodes_unclipped(font: &Font, run: &TextRun, out: &mut Vec<Node>) {
             run.font_key,
         );
         // Faux-italic: shear the run's baseline-local space so glyph tops lean right.
-        if run.italic {
+        if faux_italic {
             group.transform = group.transform.compose(&Transform2D::skew_x(-0.21));
         }
         for child in &mut group.children {

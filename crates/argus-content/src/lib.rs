@@ -286,7 +286,13 @@ impl Content {
         };
         let faces = argus_style::author_stylesheet(doc).font_faces;
         for face in faces {
-            let key = argus_css::family_key(&face.family);
+            // Key the face by family + its declared weight/style so a bold/italic
+            // run selects the matching face (the style engine keys runs the same).
+            let key = argus_css::style_variant(
+                argus_css::family_key(&face.family),
+                face.bold,
+                face.italic,
+            );
             if !self.loaded_web_fonts.insert(key) {
                 continue; // already attempted
             }

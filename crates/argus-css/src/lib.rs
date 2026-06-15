@@ -54,13 +54,38 @@ pub fn family_key(name: &str) -> u32 {
     }
 }
 
-/// An `@font-face` rule: a web-font `family` name bound to a downloadable `src`.
+/// Fold a face's bold/italic into a family [`family_key`] base so that each
+/// weight/style variant of a web family gets a distinct registry key. The style
+/// engine (using the run's resolved bold/italic) and the registry (using each
+/// `@font-face`'s declared weight/style) compute the same key, so a bold run
+/// selects the bold face when one exists. Always `>= 2` (clear of default/mono).
+pub fn style_variant(base: u32, bold: bool, italic: bool) -> u32 {
+    let mut v = base.rotate_left(2);
+    if bold {
+        v ^= 0x9e37_79b9;
+    }
+    if italic {
+        v ^= 0x85eb_ca6b;
+    }
+    if v < 2 {
+        v.wrapping_add(2)
+    } else {
+        v
+    }
+}
+
+/// An `@font-face` rule: a web-font `family` name bound to a downloadable `src`,
+/// with the face's declared weight/style (defaulting to normal 400).
 #[derive(Clone, PartialEq, Debug)]
 pub struct FontFace {
     /// The declared `font-family` name, lowercased (matched against used families).
     pub family: String,
     /// The first `url(...)` from `src` (relative to the stylesheet's base URL).
     pub src_url: String,
+    /// `font-weight: bold`/`>= 600` declared on the face.
+    pub bold: bool,
+    /// `font-style: italic`/`oblique` declared on the face.
+    pub italic: bool,
 }
 
 /// A parsed stylesheet.
@@ -308,7 +333,17 @@ fn font_face_from_block(block: &[Token]) -> Option<FontFace> {
         .iter()
         .find(|d| d.name == "src")
         .and_then(|d| choose_font_src(&d.value))?;
-    Some(FontFace { family, src_url })
+    // The face's weight/style (default normal). `font-weight: bold` or a numeric
+    // `>= 600` is treated as bold; a range like `400 700` takes its first value.
+    let bold = decls.iter().find(|d| d.name == "font-weight").is_some_and(|d| {
+        let first = d.value.split_whitespace().next().unwrap_or("");
+        first.eq_ignore_ascii_case("bold")
+            || first.parse::<u32>().map(|n| n >= 600).unwrap_or(false)
+    });
+    let italic = decls.iter().find(|d| d.name == "font-style").is_some_and(|d| {
+        matches!(d.value.trim(), "italic" | "oblique")
+    });
+    Some(FontFace { family, src_url, bold, italic })
 }
 
 /// Choose the best downloadable `url()` from an `@font-face` `src` list. `local()`
@@ -708,6 +743,34 @@ mod tests {
         assert_ne!(family_key("inter"), family_key("roboto"));
         for name in ["inter", "roboto", "a", "x", ""] {
             assert!(family_key(name) >= 2, "{name} key must be >= 2");
+        }
+    }
+
+    #[test]
+    fn font_face_parses_weight_and_style_into_distinct_keys() {
+        let sheet = parse_stylesheet(
+            "@font-face { font-family: Inter; src: url(a.ttf) } \
+             @font-face { font-family: Inter; font-weight: 700; src: url(b.ttf) } \
+             @font-face { font-family: Inter; font-style: italic; src: url(c.ttf) }",
+        );
+        assert_eq!(sheet.font_faces.len(), 3);
+        let by_url = |u: &str| sheet.font_faces.iter().find(|f| f.src_url == u).unwrap();
+        assert!(!by_url("a.ttf").bold && !by_url("a.ttf").italic, "regular");
+        assert!(by_url("b.ttf").bold, "weight 700 → bold");
+        assert!(by_url("c.ttf").italic, "italic");
+        // Each variant maps to a distinct registry key off the same family base.
+        let base = family_key("inter");
+        let keys = [
+            style_variant(base, false, false),
+            style_variant(base, true, false),
+            style_variant(base, false, true),
+            style_variant(base, true, true),
+        ];
+        for (i, a) in keys.iter().enumerate() {
+            assert!(*a >= 2, "key clear of reserved");
+            for b in &keys[i + 1..] {
+                assert_ne!(a, b, "weight/style variants are distinct");
+            }
         }
     }
 
