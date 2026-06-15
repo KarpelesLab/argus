@@ -718,6 +718,14 @@ impl Ctx<'_> {
                         }
                     }
                     NodeData::Element(e)
+                        if e.name.is_html("video") || e.name.is_html("audio") =>
+                    {
+                        self.flush_words(&mut words, &style, content_left, content_w);
+                        pending_space = false;
+                        let mstyle = computed_style(self.doc, child, &style, self.author);
+                        self.place_media(e, &mstyle, content_left, content_w);
+                    }
+                    NodeData::Element(e)
                         if e.name.is_html("progress") || e.name.is_html("meter") =>
                     {
                         self.flush_words(&mut words, &style, content_left, content_w);
@@ -1334,6 +1342,80 @@ impl Ctx<'_> {
     }
 
     /// Place an `<img>` as a block-level replaced box on its own line. A broken or
+    /// Render a `<video>`/`<audio>` as a placeholder: a dark media box (video, with
+    /// a lighter centered play square) or a thin control bar (audio), sized by the
+    /// `width`/`height` attributes or the HTML defaults. A `<video poster>` paints
+    /// the poster image instead when its size is known.
+    fn place_media(&mut self, e: &ElementData, istyle: &ComputedStyle, x: f32, avail: f32) {
+        if istyle.hidden {
+            return;
+        }
+        let is_audio = e.name.is_html("audio");
+        // A poster with a known size renders as the video frame.
+        if !is_audio {
+            if let Some(poster) = e.attr("poster") {
+                if let Some(&(iw, ih)) = self.image_sizes.get(poster) {
+                    let w = e
+                        .attr("width")
+                        .and_then(|v| v.parse::<f32>().ok())
+                        .unwrap_or(iw as f32)
+                        .min(avail);
+                    let h = e
+                        .attr("height")
+                        .and_then(|v| v.parse::<f32>().ok())
+                        .unwrap_or(if iw > 0 { w * ih as f32 / iw as f32 } else { ih as f32 });
+                    if w > 0.0 && h > 0.0 {
+                        self.images.push(ImageBox {
+                            x,
+                            y: self.cursor_y,
+                            w,
+                            h,
+                            src: poster.to_string(),
+                        });
+                        self.cursor_y += h;
+                        return;
+                    }
+                }
+            }
+        }
+        let (dw, dh) = if is_audio { (300.0, 40.0) } else { (300.0, 150.0) };
+        let w = e
+            .attr("width")
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(dw)
+            .min(avail);
+        let h = e
+            .attr("height")
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(dh);
+        // The media box.
+        self.rects.push(RectFill {
+            x,
+            y: self.cursor_y,
+            w,
+            h,
+            color: if is_audio {
+                argus_geometry::Color::rgb(0xe8, 0xe8, 0xe8)
+            } else {
+                argus_geometry::Color::rgb(0x20, 0x20, 0x20)
+            },
+            radius: if is_audio { h / 2.0 } else { 4.0 },
+        });
+        // A centered "play" square for video.
+        if !is_audio {
+            let s = (h * 0.3).min(w * 0.3);
+            self.rects.push(RectFill {
+                x: x + (w - s) / 2.0,
+                y: self.cursor_y + (h - s) / 2.0,
+                w: s,
+                h: s,
+                color: argus_geometry::Color::rgb(0xf0, 0xf0, 0xf0),
+                radius: 2.0,
+            });
+        }
+        self.cursor_y += h;
+    }
+
     /// The `(width, height)` an `<img>` would occupy (border box), or `(0, 0)` if
     /// unresolved (no usable size — then `alt`/placeholder handling applies).
     fn image_box_size(&self, e: &ElementData, avail: f32) -> (f32, f32) {
@@ -4300,6 +4382,29 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         let (cw, ch, cy) = render("object-fit: contain");
         assert!((cw - 100.0).abs() < 1.0 && (ch - 50.0).abs() < 1.0, "contained {cw}x{ch}");
         assert!(cy > 10.0, "letterboxed (centered vertically), y={cy}");
+    }
+
+    #[test]
+    fn video_and_audio_render_placeholders() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // <video> → a dark box (320x180 here) with a lighter centered play square.
+        let doc = parse("<video width=\"320\" height=\"180\"></video>");
+        let l = layout(&doc, &font, 600.0, &ImageSizes::new());
+        let dark = l.rects.iter().any(|r| (r.w - 320.0).abs() < 2.0 && r.color.r < 0x40);
+        let play = l.rects.iter().any(|r| r.color.r > 0xE0 && r.w < 80.0 && r.w > 20.0);
+        assert!(dark, "dark video box");
+        assert!(play, "play square");
+
+        // A poster with a known size renders as the frame image.
+        let mut sizes = ImageSizes::new();
+        sizes.insert("p.jpg".to_string(), (320, 180));
+        let doc2 = parse("<video poster=\"p.jpg\"></video>");
+        let l2 = layout(&doc2, &font, 600.0, &sizes);
+        assert_eq!(l2.images.len(), 1, "poster rendered as image");
+        assert_eq!(l2.images[0].src, "p.jpg");
     }
 
     #[test]
