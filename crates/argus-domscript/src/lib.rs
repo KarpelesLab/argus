@@ -205,7 +205,22 @@ function __argus_el(tgt) {
             __argus_ops.push({op: "style", tgt: tgt, key: k2, value: "" + v2});
             return true;
           },
-          get: function(t2, k2) { return ""; }
+          get: function(t2, k2) {
+            // CSSOM methods: setProperty(name, value) takes a kebab CSS name.
+            if (k2 === "setProperty") {
+              return function(name, val) {
+                __argus_ops.push({op: "style", tgt: tgt, key: "" + name, value: "" + val});
+              };
+            }
+            if (k2 === "removeProperty") {
+              return function(name) {
+                __argus_ops.push({op: "style", tgt: tgt, key: "" + name, value: ""});
+                return "";
+              };
+            }
+            if (k2 === "getPropertyValue") { return function() { return ""; }; }
+            return "";
+          }
         });
       }
       if (k === "dataset") {
@@ -2236,6 +2251,22 @@ mod tests {
         assert_eq!(text_of(&doc, "t"), "ABmidBE");
     }
 
+
+    #[test]
+    fn style_set_property_method() {
+        let mut doc = argus_html::parse(
+            "<div id=\"d\">x</div>\
+             <script>\
+               var s = document.getElementById('d').style;\
+               s.setProperty('background-color', 'rgb(1, 2, 3)');\
+               s.color = 'red';   /* camelCase property still works */\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        let style = attr_of(&doc, "d", "style").unwrap_or_default();
+        assert!(style.contains("background-color: rgb(1, 2, 3)"), "style: {style}");
+        assert!(style.contains("color: red"), "style: {style}");
+    }
 
     #[test]
     fn url_search_params_parses_query() {
