@@ -222,6 +222,8 @@ pub struct ComputedStyle {
     pub flex_grow: f32,
     /// `flex-shrink` factor for a flex item (default 1; 0 = does not shrink).
     pub flex_shrink: f32,
+    /// `order` for a flex item — visual ordering; lower comes first (default 0).
+    pub order: i32,
     /// `flex-wrap: wrap` — allow flex items to break onto multiple lines.
     pub flex_wrap: bool,
     /// Uniform `border-radius` in pixels.
@@ -304,6 +306,7 @@ impl ComputedStyle {
             align_items: AlignItems::Stretch,
             flex_grow: 0.0,
             flex_shrink: 1.0,
+            order: 0,
             flex_wrap: false,
             border_radius: 0.0,
             opacity: 1.0,
@@ -1042,6 +1045,11 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     if let Some(v) = map.get("flex-shrink") {
         if let Ok(s) = v.trim().parse::<f32>() {
             cs.flex_shrink = s.max(0.0);
+        }
+    }
+    if let Some(v) = map.get("order") {
+        if let Ok(o) = v.trim().parse::<i32>() {
+            cs.order = o;
         }
     }
     // `flex-wrap` (also expressible as a token of the `flex-flow` shorthand).

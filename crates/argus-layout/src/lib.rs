@@ -1150,7 +1150,7 @@ impl Ctx<'_> {
     /// fixed-width), and `align-items` cross-axis placement. No wrapping or
     /// `flex-grow` yet.
     fn layout_flex(&mut self, id: NodeId, style: ComputedStyle, x: f32, avail: f32) {
-        let items: Vec<NodeId> = self
+        let mut items: Vec<NodeId> = self
             .doc
             .children(id)
             .filter(|&c| match &self.doc.node(c).data {
@@ -1162,6 +1162,14 @@ impl Ctx<'_> {
             .collect();
         if items.is_empty() {
             return;
+        }
+        // `order` reorders items visually; a stable sort keeps document order among
+        // equal-order items (the default, order:0, leaves them in source order).
+        if items
+            .iter()
+            .any(|&c| computed_style(self.doc, c, &style, self.author).order != 0)
+        {
+            items.sort_by_key(|&c| computed_style(self.doc, c, &style, self.author).order);
         }
 
         let border_box_top = self.cursor_y;
@@ -3075,6 +3083,28 @@ borderdisplay0123floatleftrightclearbothfrgrowshrinkwrapspanabsolutefixedrelativ
         let end = first_baseline("flex-end");
         assert!(center > start + 80.0, "center pushes down: {start} -> {center}");
         assert!(end > center + 80.0, "flex-end further down: {center} -> {end}");
+    }
+
+    #[test]
+    fn flex_order_reorders_items() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Source order a,b,c but a has order:2, so visually it moves to the end:
+        // b, c, a left-to-right.
+        let html = "<div style=\"display:flex; width:300px\">\
+                      <div style=\"order:2\">a</div>\
+                      <div>b</div>\
+                      <div>c</div>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let x = |t: &str| l.runs.iter().find(|r| r.text == t).unwrap().x;
+        let (ax, bx, cx) = (x("a"), x("b"), x("c"));
+        // b and c come before a horizontally.
+        assert!(bx < ax && cx < ax, "a (order:2) moves last: a={ax} b={bx} c={cx}");
+        assert!(bx < cx, "b before c (equal order keeps source order)");
     }
 
     #[test]
