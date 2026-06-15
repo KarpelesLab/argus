@@ -122,6 +122,10 @@ pub struct Compound {
     pub is_groups: Vec<Vec<Compound>>,
     /// `:where(...)` groups — like `:is()`, but contribute **zero** specificity.
     pub where_groups: Vec<Vec<Compound>>,
+    /// `:lang(...)` groups — one per `:lang()`, each an OR-list of primary subtags
+    /// (lowercased). The compound matches only if the element's language (its own
+    /// or nearest ancestor `lang`) matches at least one tag in **every** group.
+    pub langs: Vec<Vec<String>>,
 }
 
 /// A complex selector: compounds left-to-right, with `combinators[k]` linking
@@ -150,7 +154,7 @@ impl Selector {
                 s.0 += 1;
             }
             // Classes, attribute selectors, and pseudo-classes share the b column.
-            s.1 += (c.classes.len() + c.attrs.len() + c.pseudos.len()) as u32;
+            s.1 += (c.classes.len() + c.attrs.len() + c.pseudos.len() + c.langs.len()) as u32;
             if c.tag.is_some() {
                 s.2 += 1;
             }
@@ -184,7 +188,7 @@ fn compound_specificity(c: &Compound) -> Specificity {
     if c.id.is_some() {
         s.0 += 1;
     }
-    s.1 += (c.classes.len() + c.attrs.len() + c.pseudos.len()) as u32;
+    s.1 += (c.classes.len() + c.attrs.len() + c.pseudos.len() + c.langs.len()) as u32;
     if c.tag.is_some() {
         s.2 += 1;
     }
@@ -373,6 +377,7 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                         let is_not = !double && fname.eq_ignore_ascii_case("not");
                         let is_is = !double && fname.eq_ignore_ascii_case("is");
                         let is_where = !double && fname.eq_ignore_ascii_case("where");
+                        let is_lang = !double && fname.eq_ignore_ascii_case("lang");
                         *i += 1;
                         // Capture the argument tokens up to the matching ')'.
                         let mut args = Vec::new();
@@ -432,6 +437,23 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                                 } else {
                                     c.where_groups.push(group);
                                 }
+                            }
+                        } else if is_lang {
+                            // `:lang(en, fr)` — an OR-list of primary language subtags.
+                            let group: Vec<String> = args
+                                .split(|t| *t == Token::Comma)
+                                .filter_map(|alt| {
+                                    alt.iter().find_map(|t| match t {
+                                        Token::Ident(s) | Token::Str(s) => {
+                                            let tag = s.split('-').next().unwrap_or(s);
+                                            (!tag.is_empty()).then(|| tag.to_ascii_lowercase())
+                                        }
+                                        _ => None,
+                                    })
+                                })
+                                .collect();
+                            if !group.is_empty() {
+                                c.langs.push(group);
                             }
                         }
                     }
@@ -641,7 +663,40 @@ fn matches_compound(doc: &Document, node: NodeId, compound: &Compound) -> bool {
             return false;
         }
     }
+    // `:lang(...)` — the element's language must match at least one tag per group.
+    if !compound.langs.is_empty() {
+        let lang = element_language(doc, node);
+        let primary = lang
+            .as_deref()
+            .map(|l| l.split('-').next().unwrap_or(l).to_ascii_lowercase());
+        for group in &compound.langs {
+            let ok = primary
+                .as_deref()
+                .is_some_and(|p| group.iter().any(|tag| tag == p));
+            if !ok {
+                return false;
+            }
+        }
+    }
     true
+}
+
+/// The effective language of `node`: the nearest `lang` (or `xml:lang`) attribute
+/// on the element or any ancestor, if any.
+fn element_language(doc: &Document, node: NodeId) -> Option<String> {
+    let mut cur = Some(node);
+    while let Some(id) = cur {
+        if let NodeData::Element(e) = &doc.node(id).data {
+            if let Some(l) = e.attr("lang").or_else(|| e.attr("xml:lang")) {
+                let l = l.trim();
+                if !l.is_empty() {
+                    return Some(l.to_string());
+                }
+            }
+        }
+        cur = doc.node(id).parent();
+    }
+    None
 }
 
 fn attr_matches(e: &argus_dom::ElementData, sel: &AttrSel) -> bool {
@@ -845,6 +900,23 @@ mod tests {
         assert_eq!(sel(":not(.a, #b)").specificity(), Specificity(1, 0, 0));
         // Two separate :not()s each contribute their arg.
         assert_eq!(sel(":not(.a):not(.b)").specificity(), Specificity(0, 2, 0));
+    }
+
+    #[test]
+    fn lang_pseudo_matches_inherited_language() {
+        // <html lang="en-US"><p/></html> — :lang(en) matches via the inherited lang.
+        let mut doc = Document::new();
+        let root = doc.root();
+        let html =
+            doc.create_element(QualName::html("html"), vec![Attribute::new("lang", "en-US")]);
+        doc.append(root, html);
+        let p = doc.create_element(QualName::html("p"), vec![]);
+        doc.append(html, p);
+        assert!(matches(&doc, p, &sel("p:lang(en)")), "primary subtag match");
+        assert!(matches(&doc, p, &sel(":lang(fr, en-US)")), "OR-list match");
+        assert!(!matches(&doc, p, &sel("p:lang(fr)")), "wrong language");
+        // `:lang()` counts as a pseudo-class for specificity.
+        assert_eq!(sel(":lang(en)").specificity(), Specificity(0, 1, 0));
     }
 
     #[test]
