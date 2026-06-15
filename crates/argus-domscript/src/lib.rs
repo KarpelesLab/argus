@@ -7,11 +7,15 @@
 //! id'd elements, run prelude + page scripts through kataan once, then read the
 //! recorded ops back and apply them to the real [`Document`] before layout.
 //!
-//! This is a pragmatic subset — synchronous only, no live reflow — but it makes a
-//! real chunk of the DOM API actually change the rendered page, plus discrete
-//! `click` handlers (via deterministic replay through [`apply_scripts_with_events`]),
-//! `setTimeout`/`setInterval` callbacks (drained synchronously, earliest delay
-//! first, no wall clock), and `localStorage` (persisted across navigations within
+//! This is a pragmatic subset — no live reflow — but it makes a real chunk of the
+//! DOM API actually change the rendered page, plus discrete `click` handlers (via
+//! deterministic replay through [`apply_scripts_with_events`]), `setTimeout`/
+//! `setInterval` callbacks (shim-queued, drained earliest-delay-first, no wall
+//! clock), **async DOM mutations** — writes inside `Promise.then`/`async`-`await`
+//! callbacks are reconciled too, because scripts run through
+//! [`argus_script::run_with_followup`], which drains the engine's event loop
+//! (promise microtasks + async tails) before the ops array is read back — and
+//! `localStorage` (persisted across navigations within
 //! the content process via [`apply_scripts_session`]) / `sessionStorage`
 //! (per-page). The DOM API surface includes:
 //! `document.getElementById` / `querySelector` (full CSS selector engine) /
@@ -285,25 +289,45 @@ fn run_scripts(
             json_string(&e.event)
         ));
     }
-    // Drain any scheduled timers (synchronously, no real delay).
+    // Drain shim-scheduled timers (synchronous, delay-ordered). Native promise
+    // microtasks and async tails are drained by the engine's own event loop
+    // between the two phases of `run_with_followup`, so ops recorded inside
+    // `.then`/`await`/async callbacks are visible to the followup read below.
     src.push_str("\n__argus_drain();");
-    // Emit the recorded ops on a sentinel line we can pick out of the console.
-    src.push_str("\nconsole.log(\"\\u0001ARGUSOPS\" + JSON.stringify(__argus_ops));\n");
 
-    let result = argus_script::run_script(&src).ok()?;
+    // Run the scripts, then — once the event loop has drained — read the recorded
+    // ops as the followup's value. If the tree-walker rejects a construct, fall
+    // back to the synchronous bytecode path so we never regress to running nothing.
+    let (console, ops_json) =
+        match argus_script::run_with_followup(&src, "JSON.stringify(__argus_ops)") {
+            Ok(pair) => pair,
+            Err(_) => run_sync_fallback(&src)?,
+        };
+    apply_ops(doc, &ops_json, storage);
+    Some(console)
+}
+
+/// Synchronous fallback: run the shim through the bytecode VM and recover the ops
+/// array from a sentinel console line. Used when the async tree-walker path errors
+/// on some construct, so async-free pages still execute.
+fn run_sync_fallback(src: &str) -> Option<(String, String)> {
+    let mut s = src.to_string();
+    s.push_str("\nconsole.log(\"\\u0001ARGUSOPS\" + JSON.stringify(__argus_ops));\n");
+    let result = argus_script::run_script(&s).ok()?;
     let mut console = String::new();
+    let mut ops = String::from("[]");
     for line in result.console.lines() {
         if let Some(json) = line
             .strip_prefix('\u{1}')
             .and_then(|l| l.strip_prefix("ARGUSOPS"))
         {
-            apply_ops(doc, json, storage);
+            ops = json.to_string();
         } else {
             console.push_str(line);
             console.push('\n');
         }
     }
-    Some(console)
+    Some((console, ops))
 }
 
 /// Serialize the storage map to a JSON object for the prelude seed.
@@ -1280,6 +1304,39 @@ mod tests {
         );
         apply_scripts(&mut doc);
         assert_eq!(text_of(&doc, "out"), "ABC");
+    }
+
+    #[test]
+    fn async_promise_mutations_are_reconciled() {
+        // A DOM write inside a Promise.then callback must land: the engine's event
+        // loop drains the microtask before the followup reads __argus_ops.
+        let mut doc = argus_html::parse(
+            "<div id=\"out\">start</div>\
+             <script>\
+               Promise.resolve('done').then(function(v){\
+                 document.getElementById('out').textContent = v;\
+               });\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        assert_eq!(text_of(&doc, "out"), "done");
+    }
+
+    #[test]
+    fn async_await_mutations_are_reconciled() {
+        // async/await: the write happens after an awaited promise resolves, in a
+        // continuation the native event loop runs.
+        let mut doc = argus_html::parse(
+            "<div id=\"out\">x</div>\
+             <script>\
+               (async function(){\
+                 var v = await Promise.resolve('async-ok');\
+                 document.getElementById('out').textContent = v;\
+               })();\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        assert_eq!(text_of(&doc, "out"), "async-ok");
     }
 
     #[test]
