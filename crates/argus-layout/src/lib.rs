@@ -770,28 +770,28 @@ impl Ctx<'_> {
                 border_box_top,
                 border_box_w,
                 b.top,
-                style.border_color,
+                style.border_top_color,
             );
             self.rects[i + 1] = rect(
                 border_box_left,
                 border_box_top + border_box_h - b.bottom,
                 border_box_w,
                 b.bottom,
-                style.border_color,
+                style.border_bottom_color,
             );
             self.rects[i + 2] = rect(
                 border_box_left,
                 border_box_top,
                 b.left,
                 border_box_h,
-                style.border_color,
+                style.border_left_color,
             );
             self.rects[i + 3] = rect(
                 border_box_left + border_box_w - b.right,
                 border_box_top,
                 b.right,
                 border_box_h,
-                style.border_color,
+                style.border_right_color,
             );
         }
 
@@ -2834,6 +2834,23 @@ mod tests {
             line_count("overflow-wrap: break-word") > 1,
             "break-word splits the long word across lines"
         );
+    }
+
+    #[test]
+    fn per_side_border_colors() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A box with a uniform border but a red top and blue left override. The four
+        // border rects should carry the per-side colors.
+        let html = "<div style=\"border:4px solid black; border-top-color:#ff0000; border-left-color:#0000ff; width:50px; height:30px\"></div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let red = l.rects.iter().any(|r| r.color.r > 200 && r.color.g < 60 && r.color.b < 60 && r.h < 6.0);
+        let blue = l.rects.iter().any(|r| r.color.b > 200 && r.color.r < 60 && r.w < 6.0);
+        assert!(red, "red top border present");
+        assert!(blue, "blue left border present");
     }
 
     #[test]

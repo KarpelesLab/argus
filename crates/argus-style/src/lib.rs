@@ -182,6 +182,11 @@ pub struct ComputedStyle {
     pub padding: Edges,
     pub border: Edges,
     pub border_color: Color,
+    /// Per-side border colors (each defaults to `border_color`).
+    pub border_top_color: Color,
+    pub border_right_color: Color,
+    pub border_bottom_color: Color,
+    pub border_left_color: Color,
     /// Specified width, resolved during layout (`None` = auto).
     pub width: Option<Length>,
     /// `min-width` / `max-width`, resolved during layout (`None` = no constraint).
@@ -307,6 +312,10 @@ impl ComputedStyle {
             padding: Edges::default(),
             border: Edges::default(),
             border_color: Color::BLACK,
+            border_top_color: Color::BLACK,
+            border_right_color: Color::BLACK,
+            border_bottom_color: Color::BLACK,
+            border_left_color: Color::BLACK,
             width: None,
             min_width: None,
             max_width: None,
@@ -944,6 +953,24 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     }
     if let Some(px) = map.get("border-left-width").and_then(|v| len_px(v, fs)) {
         cs.border.left = px;
+    }
+    // Per-side border colors default to the shorthand color, then per-side longhands
+    // override them.
+    cs.border_top_color = cs.border_color;
+    cs.border_right_color = cs.border_color;
+    cs.border_bottom_color = cs.border_color;
+    cs.border_left_color = cs.border_color;
+    if let Some(c) = map.get("border-top-color").and_then(|v| resolve_color(v, cs.color, parent.border_color)) {
+        cs.border_top_color = c;
+    }
+    if let Some(c) = map.get("border-right-color").and_then(|v| resolve_color(v, cs.color, parent.border_color)) {
+        cs.border_right_color = c;
+    }
+    if let Some(c) = map.get("border-bottom-color").and_then(|v| resolve_color(v, cs.color, parent.border_color)) {
+        cs.border_bottom_color = c;
+    }
+    if let Some(c) = map.get("border-left-color").and_then(|v| resolve_color(v, cs.color, parent.border_color)) {
+        cs.border_left_color = c;
     }
     // Outline (drawn outside the border box; reuses the border shorthand parser).
     if let Some(v) = map.get("outline") {
