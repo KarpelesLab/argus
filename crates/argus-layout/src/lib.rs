@@ -2904,6 +2904,10 @@ impl Ctx<'_> {
                 rows.push(cells);
             }
         };
+        // `<thead>` renders before, and `<tfoot>` after, the body regardless of
+        // their source position, so bucket by section and concatenate head → body
+        // → foot. Direct `<tr>` children and `<tbody>` rows are the body.
+        let (mut head_rows, mut foot_rows) = (Vec::new(), Vec::new());
         for child in self.doc.children(table) {
             match &self.doc.node(child).data {
                 NodeData::Element(e) if e.name.is_html("tr") => push_row(self, child, &mut rows),
@@ -2912,17 +2916,27 @@ impl Ctx<'_> {
                         || e.name.is_html("tbody")
                         || e.name.is_html("tfoot") =>
                 {
+                    let dst = if e.name.is_html("thead") {
+                        &mut head_rows
+                    } else if e.name.is_html("tfoot") {
+                        &mut foot_rows
+                    } else {
+                        &mut rows
+                    };
                     for tr in self.doc.children(child) {
                         if matches!(&self.doc.node(tr).data, NodeData::Element(e) if e.name.is_html("tr"))
                         {
-                            push_row(self, tr, &mut rows);
+                            push_row(self, tr, dst);
                         }
                     }
                 }
                 _ => {}
             }
         }
-        rows
+        // Prepend head, append foot.
+        head_rows.append(&mut rows);
+        head_rows.append(&mut foot_rows);
+        head_rows
     }
 
     /// Flatten an inline subtree into styled words, collapsing whitespace and
@@ -4572,6 +4586,25 @@ mod tests {
         // Three distinct column x-positions.
         let xs: std::collections::BTreeSet<i32> = cell_runs.iter().map(|r| r.x as i32).collect();
         assert_eq!(xs.len(), 3, "expected 3 columns, got {xs:?}");
+    }
+
+    #[test]
+    fn table_tfoot_renders_after_tbody_despite_source_order() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // <tfoot> appears before <tbody> in source, but must render below it.
+        let html = "<table>\
+                      <thead><tr><td>head</td></tr></thead>\
+                      <tfoot><tr><td>foot</td></tr></tfoot>\
+                      <tbody><tr><td>body</td></tr></tbody>\
+                    </table>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 300.0, &ImageSizes::new());
+        let y = |t: &str| l.runs.iter().find(|r| r.text == t).unwrap().baseline;
+        assert!(y("head") < y("body"), "head above body");
+        assert!(y("body") < y("foot"), "foot below body (after tbody)");
     }
 
     #[test]
