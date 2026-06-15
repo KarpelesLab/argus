@@ -34,6 +34,7 @@ pub fn run(channel: Channel) -> io::Result<()> {
         storage: std::collections::HashMap::new(),
         focused: None,
         input_values: std::collections::HashMap::new(),
+        checked: std::collections::HashMap::new(),
         links: Vec::new(),
         submits: Vec::new(),
         bounds: Vec::new(),
@@ -108,6 +109,7 @@ pub fn run(channel: Channel) -> io::Result<()> {
                 content.html = Some(html);
                 content.focused = None;
                 content.input_values.clear();
+                content.checked.clear();
                 content.doc = Some(doc);
                 // Report localStorage so the browser can persist it to disk.
                 if !content.storage.is_empty() {
@@ -161,8 +163,10 @@ pub fn run(channel: Channel) -> io::Result<()> {
                         &[],
                     )?;
                 } else {
-                    // Not navigation: dispatch a `click` to the deepest id'd element
-                    // and re-run the page's scripts with the full interaction history.
+                    // Not navigation: a checkbox/radio toggles, then (any element)
+                    // dispatches a `click` and re-runs the page's scripts with the
+                    // full interaction history.
+                    content.toggle_checkable(x as f32, y as f32);
                     content.dispatch_click(x as f32, y as f32);
                     content.apply_input_values();
                     content.set_focus(x as f32, y as f32);
@@ -215,6 +219,9 @@ struct Content {
     /// User-typed values by input id, re-applied after script runs so typing
     /// survives re-renders and event replays.
     input_values: std::collections::HashMap<String, String>,
+    /// User-toggled checkbox/radio state by input id, re-applied like
+    /// `input_values` so a checked box survives re-renders and feeds submission.
+    checked: std::collections::HashMap<String, bool>,
     /// Clickable link regions from the last render (in screen coords), for input.
     links: Vec<argus_layout::LinkBox>,
     /// `method=post` submit-button regions from the last render (screen coords) —
@@ -413,18 +420,89 @@ impl Content {
         Ok(())
     }
 
+    /// The id of the deepest (smallest) id'd element box under `(x, y)`.
+    fn hit_id(&self, x: f32, y: f32) -> Option<String> {
+        self.bounds
+            .iter()
+            .filter(|b| x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h)
+            .min_by(|a, b| (a.w * a.h).partial_cmp(&(b.w * b.h)).unwrap())
+            .map(|b| b.id.clone())
+    }
+
+    /// Whether the input `id` is currently checked: the user-toggled state if any,
+    /// else the document's `checked` attribute.
+    fn is_checked(&self, id: &str, el: &argus_dom::ElementData) -> bool {
+        self.checked
+            .get(id)
+            .copied()
+            .unwrap_or_else(|| el.attr("checked").is_some())
+    }
+
+    /// The ids of all id'd `input[type=radio]` controls with the given `name`
+    /// (a radio group), so selecting one can clear the rest.
+    fn radio_group_ids(&self, name: &str) -> Vec<String> {
+        let Some(doc) = &self.doc else { return Vec::new() };
+        fn walk(doc: &argus_dom::Document, id: argus_dom::NodeId, name: &str, out: &mut Vec<String>) {
+            if let Some(e) = doc.node(id).as_element() {
+                if e.name.is_html("input")
+                    && e.attr("type") == Some("radio")
+                    && e.attr("name") == Some(name)
+                {
+                    if let Some(eid) = e.attr("id") {
+                        out.push(eid.to_string());
+                    }
+                }
+            }
+            for c in doc.children(id) {
+                walk(doc, c, name, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(doc, doc.root(), name, &mut out);
+        out
+    }
+
+    /// If `(x, y)` hits an id'd checkbox or radio, toggle its checked state (a radio
+    /// also clears the rest of its name-group). Returns whether one was toggled.
+    /// The change persists via the `checked` map (re-applied each render) and feeds
+    /// both the visible mark and form submission.
+    fn toggle_checkable(&mut self, x: f32, y: f32) -> bool {
+        let Some(id) = self.hit_id(x, y) else {
+            return false;
+        };
+        let Some(doc) = &self.doc else { return false };
+        let Some(el) = find_element_by_id(doc, &id).and_then(|n| doc.node(n).as_element()) else {
+            return false;
+        };
+        if !el.name.is_html("input") {
+            return false;
+        }
+        match el.attr("type").unwrap_or("text") {
+            "checkbox" => {
+                let next = !self.is_checked(&id, el);
+                self.checked.insert(id, next);
+                true
+            }
+            "radio" => {
+                // Clear the rest of the group, then select this one.
+                if let Some(name) = el.attr("name").map(str::to_string) {
+                    for gid in self.radio_group_ids(&name) {
+                        self.checked.insert(gid, false);
+                    }
+                }
+                self.checked.insert(id, true);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Hit-test a click against id'd element boxes; if one is hit, append a `click`
     /// interaction and re-run the page's scripts with the full history (deterministic
     /// event replay), so handlers and accumulated state take effect on the next frame.
     fn dispatch_click(&mut self, x: f32, y: f32) {
         // Find the deepest (smallest) id'd box under the cursor.
-        let Some(id) = self
-            .bounds
-            .iter()
-            .filter(|b| x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h)
-            .min_by(|a, b| (a.w * a.h).partial_cmp(&(b.w * b.h)).unwrap())
-            .map(|b| b.id.clone())
-        else {
+        let Some(id) = self.hit_id(x, y) else {
             return;
         };
         let Some(html) = &self.html else { return };
@@ -526,6 +604,20 @@ impl Content {
                     } else {
                         e.attrs
                             .push(argus_dom::Attribute::new("value", val.clone()));
+                    }
+                }
+            }
+        }
+        // Re-apply user-toggled checkbox/radio state as the `checked` attribute,
+        // which both layout (the mark) and form submission read.
+        for (id, &on) in &self.checked {
+            if let Some(n) = find_element_by_id(doc, id) {
+                if let argus_dom::NodeData::Element(e) = doc.data_mut(n) {
+                    let has = e.attrs.iter().any(|a| &*a.name == "checked");
+                    if on && !has {
+                        e.attrs.push(argus_dom::Attribute::new("checked", ""));
+                    } else if !on && has {
+                        e.attrs.retain(|a| &*a.name != "checked");
                     }
                 }
             }
@@ -662,6 +754,92 @@ fn enter_sandbox() {
 #[cfg(test)]
 mod tests {
     use super::edit_value;
+    use super::{find_element_by_id, Content};
+    use argus_geometry::Size;
+
+    /// Build a headless `Content` over `html` with the given id'd hit-boxes (no
+    /// font/channel needed for the input-state logic).
+    fn headless(html: &str, bounds: Vec<argus_layout::ElementBound>) -> Content {
+        Content {
+            viewport: Size::new(800, 600),
+            font: None,
+            html: Some(html.to_string()),
+            doc: Some(argus_html::parse(html)),
+            events: Vec::new(),
+            storage: std::collections::HashMap::new(),
+            focused: None,
+            input_values: std::collections::HashMap::new(),
+            checked: std::collections::HashMap::new(),
+            links: Vec::new(),
+            submits: Vec::new(),
+            bounds,
+            loaded_web_fonts: std::collections::HashSet::new(),
+            scroll_y: 0,
+            content_height: 600,
+            _frame: None,
+        }
+    }
+
+    fn box_at(id: &str, x: f32, y: f32) -> argus_layout::ElementBound {
+        argus_layout::ElementBound {
+            id: id.to_string(),
+            x,
+            y,
+            w: 16.0,
+            h: 16.0,
+            computed: Vec::new(),
+        }
+    }
+
+    fn dom_checked(c: &Content, id: &str) -> bool {
+        let doc = c.doc.as_ref().unwrap();
+        find_element_by_id(doc, id)
+            .and_then(|n| doc.node(n).as_element())
+            .is_some_and(|e| e.attr("checked").is_some())
+    }
+
+    #[test]
+    fn clicking_a_checkbox_toggles_and_persists_checked_state() {
+        let mut c = headless(
+            "<input id=\"a\" type=\"checkbox\" name=\"a\">\
+             <input id=\"b\" type=\"checkbox\" name=\"b\" checked>",
+            vec![box_at("a", 10.0, 10.0), box_at("b", 40.0, 10.0)],
+        );
+        // Unchecked 'a' → checked after a click, and the DOM attr is applied.
+        assert!(c.toggle_checkable(12.0, 12.0));
+        c.apply_input_values();
+        assert!(dom_checked(&c, "a"), "checkbox a now checked");
+        // Click 'a' again → unchecked.
+        assert!(c.toggle_checkable(12.0, 12.0));
+        c.apply_input_values();
+        assert!(!dom_checked(&c, "a"), "checkbox a toggled back off");
+        // Pre-checked 'b' → clicking unchecks it (the attr is removed).
+        assert!(c.toggle_checkable(42.0, 12.0));
+        c.apply_input_values();
+        assert!(!dom_checked(&c, "b"), "pre-checked b unchecked");
+        // A click that hits nothing toggles nothing.
+        assert!(!c.toggle_checkable(500.0, 500.0));
+    }
+
+    #[test]
+    fn clicking_a_radio_selects_it_and_clears_the_group() {
+        let mut c = headless(
+            "<input id=\"x\" type=\"radio\" name=\"g\" checked>\
+             <input id=\"y\" type=\"radio\" name=\"g\">\
+             <input id=\"z\" type=\"radio\" name=\"other\">",
+            vec![
+                box_at("x", 10.0, 10.0),
+                box_at("y", 40.0, 10.0),
+                box_at("z", 70.0, 10.0),
+            ],
+        );
+        // Select 'y' → 'x' clears (same group 'g'), 'z' (other group) untouched.
+        assert!(c.toggle_checkable(42.0, 12.0));
+        c.apply_input_values();
+        assert!(dom_checked(&c, "y"), "y selected");
+        assert!(!dom_checked(&c, "x"), "x cleared in group g");
+        assert!(!dom_checked(&c, "z"), "z is a different group, stays off");
+    }
 
     #[test]
     fn woff2_decodes_to_a_parseable_font() {
