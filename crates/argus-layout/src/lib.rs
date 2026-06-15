@@ -163,6 +163,7 @@ fn list_marker(style: ListStyle, index: u32) -> Option<Marker> {
         ListStyle::Circle => Marker::Circle,
         ListStyle::Square => Marker::Square,
         ListStyle::Decimal => Marker::Text(format!("{index}.")),
+        ListStyle::DecimalLeadingZero => Marker::Text(format!("{index:02}.")),
         ListStyle::LowerAlpha => Marker::Text(format!("{}.", alpha_marker(index, false))),
         ListStyle::UpperAlpha => Marker::Text(format!("{}.", alpha_marker(index, true))),
         ListStyle::LowerRoman => Marker::Text(format!("{}.", roman_marker(index, false))),
@@ -4573,6 +4574,11 @@ mod tests {
         assert_eq!(
             markers("<ol style=\"list-style-type: upper-roman\"><li>a</li><li>b</li><li>c</li><li>d</li></ol>"),
             vec!["I.", "II.", "III.", "IV."]
+        );
+        // decimal-leading-zero pads single digits.
+        assert_eq!(
+            markers("<ol style=\"list-style-type: decimal-leading-zero\"><li>a</li><li>b</li></ol>"),
+            vec!["01.", "02."]
         );
     }
 

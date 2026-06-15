@@ -50,6 +50,8 @@ pub enum ListStyle {
     Circle,
     Square,
     Decimal,
+    /// `decimal-leading-zero` — `01`, `02`, … `09`, `10`.
+    DecimalLeadingZero,
     LowerAlpha,
     UpperAlpha,
     LowerRoman,
@@ -541,6 +543,7 @@ fn parse_list_style(token: &str) -> Option<ListStyle> {
         "circle" => ListStyle::Circle,
         "square" => ListStyle::Square,
         "decimal" => ListStyle::Decimal,
+        "decimal-leading-zero" => ListStyle::DecimalLeadingZero,
         "lower-alpha" | "lower-latin" => ListStyle::LowerAlpha,
         "upper-alpha" | "upper-latin" => ListStyle::UpperAlpha,
         "lower-roman" => ListStyle::LowerRoman,
