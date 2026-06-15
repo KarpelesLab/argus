@@ -1662,4 +1662,68 @@ hi</pre>
 |         "b"
 |       <dt>
 |         "c"
+
+#data
+<b>x<i>y</i>z</b>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <b>
+|       "x"
+|       <i>
+|         "y"
+|       "z"
+
+#data
+<button>a<button>b
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <button>
+|       "a"
+|     <button>
+|       "b"
+
+#data
+<table><tr><td>1</td><td>2</td></tr></table>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <table>
+|       <tbody>
+|         <tr>
+|           <td>
+|             "1"
+|           <td>
+|             "2"
+
+#data
+<div><p>a</div>b
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <div>
+|       <p>
+|         "a"
+|     "b"
+
+#data
+<head><title>T</title></head><body><p>hi</p></body>
+#errors
+#document
+| <html>
+|   <head>
+|     <title>
+|       "T"
+|   <body>
+|     <p>
+|       "hi"
 "####;
