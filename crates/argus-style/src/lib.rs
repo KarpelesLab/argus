@@ -204,6 +204,8 @@ pub struct ComputedStyle {
     pub strike: bool,
     /// `text-decoration: overline`.
     pub overline: bool,
+    /// `text-decoration-color` — color of the decoration lines (`None` = text color).
+    pub decoration_color: Option<Color>,
     /// Column count for a grid container (from `grid-template-columns`).
     pub grid_columns: u32,
     /// Per-column track sizes (parallel to `grid_columns`, capped at
@@ -314,6 +316,7 @@ impl ComputedStyle {
             underline: false,
             strike: false,
             overline: false,
+            decoration_color: None,
             grid_columns: 1,
             grid_tracks: [GridTrack::Auto; GRID_MAX_TRACKS],
             grid_column_span: 1,
@@ -716,6 +719,18 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         cs.underline = v.split_whitespace().any(|t| t == "underline");
         cs.strike = v.split_whitespace().any(|t| t == "line-through");
         cs.overline = v.split_whitespace().any(|t| t == "overline");
+        // A color token in the `text-decoration` shorthand also sets the line color.
+        for tok in v.split_whitespace() {
+            if let Some(c) = resolve_color(tok, cs.color, parent.color) {
+                cs.decoration_color = Some(c);
+            }
+        }
+    }
+    if let Some(c) = map
+        .get("text-decoration-color")
+        .and_then(|v| resolve_color(v, cs.color, parent.color))
+    {
+        cs.decoration_color = Some(c);
     }
     if let Some(v) = map
         .get("list-style-type")

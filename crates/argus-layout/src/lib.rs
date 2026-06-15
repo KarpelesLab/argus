@@ -176,6 +176,8 @@ struct InlineWord {
     strike: bool,
     /// Whether this word has an overline (`text-decoration: overline`).
     overline: bool,
+    /// Color of the decoration lines (`text-decoration-color`, else the text color).
+    decoration_color: argus_geometry::Color,
     /// The hyperlink target, if this word is inside an `<a href>`.
     href: Option<Rc<str>>,
     /// Force a line break before this word (an `<br>` element).
@@ -571,6 +573,7 @@ impl Ctx<'_> {
                         underline: false,
                         strike: false,
                         overline: false,
+                        decoration_color: argus_geometry::Color::TRANSPARENT,
                         href: None,
                         hard_break: false,
                         baseline_shift: 0.0,
@@ -2030,6 +2033,7 @@ impl Ctx<'_> {
                 underline: style.underline && !style.hidden,
                 strike: style.strike && !style.hidden,
                 overline: style.overline && !style.hidden,
+                decoration_color: style.fade(style.decoration_color.unwrap_or(style.color)),
                 href: None,
                 hard_break: false,
                 baseline_shift: 0.0,
@@ -2081,6 +2085,7 @@ impl Ctx<'_> {
                         underline: style.underline && !style.hidden,
                         strike: style.strike && !style.hidden,
                         overline: style.overline && !style.hidden,
+                        decoration_color: style.fade(style.decoration_color.unwrap_or(style.color)),
                         href: if style.hidden { None } else { link.clone() },
                         hard_break: false,
                         baseline_shift: shift,
@@ -2108,6 +2113,7 @@ impl Ctx<'_> {
                         underline: false,
                         strike: false,
                         overline: false,
+                        decoration_color: argus_geometry::Color::TRANSPARENT,
                         href: link.clone(),
                         hard_break: true,
                         baseline_shift: 0.0,
@@ -2317,18 +2323,18 @@ impl Ctx<'_> {
                 if w.underline {
                     let uy = wb + (w.font_size * 0.08).max(1.0);
                     let uh = (w.font_size / 16.0).max(1.0);
-                    self.rects.push(rect(pen_x, uy, word_w, uh, w.color));
+                    self.rects.push(rect(pen_x, uy, word_w, uh, w.decoration_color));
                 }
                 if w.strike {
                     let sy = wb - self.font.ascent_px(w.font_size) * 0.32;
                     let sh = (w.font_size / 16.0).max(1.0);
-                    self.rects.push(rect(pen_x, sy, word_w, sh, w.color));
+                    self.rects.push(rect(pen_x, sy, word_w, sh, w.decoration_color));
                 }
                 if w.overline {
                     // A line at the top of the glyph box (just above the ascent).
                     let oy = wb - self.font.ascent_px(w.font_size);
                     let oh = (w.font_size / 16.0).max(1.0);
-                    self.rects.push(rect(pen_x, oy, word_w, oh, w.color));
+                    self.rects.push(rect(pen_x, oy, word_w, oh, w.decoration_color));
                 }
                 if let Some(href) = &w.href {
                     self.links.push(LinkBox {
@@ -2687,6 +2693,28 @@ mod tests {
         };
         assert!(has_line_above("text-decoration: overline"), "overline drawn above text");
         assert!(!has_line_above(""), "no overline without the decoration");
+    }
+
+    #[test]
+    fn text_decoration_color_differs_from_text() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Black text with a red underline: the underline rect is red, the text run
+        // black.
+        let html = "<p style=\"color:#000; text-decoration: underline; text-decoration-color:#ff0000\">hi</p>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let run = l.runs.iter().find(|r| r.text == "hi").unwrap();
+        // The underline rect (thin, below the baseline) is red, not the text color.
+        let underline = l
+            .rects
+            .iter()
+            .find(|r| r.w > 0.0 && r.h < 3.0 && r.y > run.baseline)
+            .expect("underline rect");
+        assert!(underline.color.r > 200 && underline.color.g < 60, "underline is red, got {:?}", underline.color);
+        assert!(run.color.r < 40, "text stays black, got {:?}", run.color);
     }
 
     #[test]
