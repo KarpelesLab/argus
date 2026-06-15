@@ -524,4 +524,18 @@ hi</textarea>
 |       "a"
 |     <button>
 |       "b"
+
+#data
+<table>stray<tr><td>c</table>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     "stray"
+|     <table>
+|       <tbody>
+|         <tr>
+|           <td>
+|             "c"
 "####;

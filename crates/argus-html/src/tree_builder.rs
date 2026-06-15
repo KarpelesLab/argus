@@ -166,6 +166,22 @@ impl TreeBuilder {
     }
 
     fn insert_text(&mut self, s: &str) {
+        // Foster-parenting: non-whitespace text that lands in a table context (with
+        // no cell open) is moved to just before the enclosing <table>, rather than
+        // being inserted inside the table structure. (Whitespace is left in place.)
+        if !is_ws(s) && self.in_table_context() {
+            if let Some(&table) = self.open.iter().rev().find(|&&id| self.is_named(id, "table")) {
+                if let Some(prev) = self.doc.node(table).prev_sibling() {
+                    if let NodeData::Text(t) = self.doc.data_mut(prev) {
+                        t.push_str(s);
+                        return;
+                    }
+                }
+                let t = self.doc.create_text(s);
+                self.doc.insert_before(table, t);
+                return;
+            }
+        }
         let parent = self.current();
         if let Some(last) = self.doc.node(parent).last_child() {
             if let NodeData::Text(t) = self.doc.data_mut(last) {
@@ -175,6 +191,15 @@ impl TreeBuilder {
         }
         let t = self.doc.create_text(s);
         self.doc.append(parent, t);
+    }
+
+    /// Whether the current node is table structure that can't hold text/flow
+    /// content directly (triggering foster-parenting).
+    fn in_table_context(&self) -> bool {
+        matches!(
+            self.name_of(self.current()),
+            Some("table" | "tbody" | "thead" | "tfoot" | "tr")
+        )
     }
 
     fn insert_comment_in(&mut self, parent: NodeId, s: &str) {
