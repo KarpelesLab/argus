@@ -26,9 +26,9 @@
 //! `textContent`/`innerText`,
 //! `innerHTML`, `className`, `setAttribute`/`getAttribute`, `style.<camelCase>`,
 //! `classList`, scoped `querySelector`/`querySelectorAll`, `matches`/`closest`,
-//! tree traversal (`parentNode`/`parentElement`, `children`,
-//! `first`/`lastElementChild`, `next`/`previousElementSibling`), and
-//! `appendChild`/`append`/`remove`.
+//! tree traversal (`parentNode`/`parentElement`, `children`, `childElementCount`,
+//! `first`/`lastElementChild`, `next`/`previousElementSibling`), `tagName`/
+//! `nodeName`, and `appendChild`/`append`/`remove`.
 
 use argus_dom::{Attribute, Document, NodeData, NodeId, QualName};
 
@@ -293,6 +293,15 @@ function __argus_el(tgt) {
           }
         }
         return null;
+      }
+      if (k === "tagName" || k === "nodeName") {
+        var tn = __byIdx[__idxOf(tgt)];
+        return tn ? ("" + tn.t).toUpperCase() : "";
+      }
+      if (k === "childElementCount") {
+        var pix = __idxOf(tgt), cnt = 0;
+        for (var di = 0; di < __tree.length; di++) { if (__tree[di].p === pix) cnt++; }
+        return cnt;
       }
       var r = __read(tgt, seed, k);
       return r == null ? "" : r;
@@ -1679,6 +1688,21 @@ mod tests {
         apply_scripts(&mut doc);
         assert_eq!(attr_of(&doc, "card", "data-found").as_deref(), Some("yes"));
         assert_eq!(attr_of(&doc, "card", "data-self").as_deref(), Some("y"));
+    }
+
+    #[test]
+    fn tag_name_and_child_element_count() {
+        let mut doc = argus_html::parse(
+            "<ul id=\"l\"><li>a</li><li>b</li><li>c</li></ul>\
+             <script>\
+               var l = document.getElementById('l');\
+               l.setAttribute('data-tag', l.tagName);\
+               l.setAttribute('data-n', '' + l.childElementCount);\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        assert_eq!(attr_of(&doc, "l", "data-tag").as_deref(), Some("UL"));
+        assert_eq!(attr_of(&doc, "l", "data-n").as_deref(), Some("3"));
     }
 
     #[test]
