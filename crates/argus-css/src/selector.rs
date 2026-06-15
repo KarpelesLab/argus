@@ -396,10 +396,14 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                                 });
                             }
                         } else if is_not {
-                            // `:not(<compound>)` — parse the inner simple selector.
-                            let mut j = 0;
-                            if let Some(inner) = parse_compound(&args, &mut j) {
-                                c.negations.push(inner);
+                            // `:not(<list>)` — a comma-separated selector list (CSS4);
+                            // the compound fails if it matches any alternative.
+                            for alt in args.split(|t| *t == Token::Comma) {
+                                let mut j = 0;
+                                skip_ws(alt, &mut j);
+                                if let Some(inner) = parse_compound(alt, &mut j) {
+                                    c.negations.push(inner);
+                                }
                             }
                         } else if is_is || is_where {
                             // `:is(...)` / `:where(...)` — a comma-separated list of
@@ -888,6 +892,12 @@ mod tests {
         assert!(!matches(&doc, p, &sel("div > span"))); // p is not a span
         assert!(matches(&doc, p, &sel(".note")));
         assert!(!matches(&doc, p, &sel(".missing")));
+        // `:not(<compound>)` and the CSS4 `:not(<list>)`.
+        assert!(matches(&doc, span, &sel("span:not(.note)")), "span isn't .note");
+        assert!(!matches(&doc, p, &sel("p:not(.note)")), "p IS .note");
+        assert!(matches(&doc, span, &sel(":not(p, div)")), "span is neither p nor div");
+        assert!(!matches(&doc, p, &sel(":not(p, div)")), "p is excluded by the list");
+        assert!(!matches(&doc, div, &sel(":not(p, div)")), "div is excluded by the list");
     }
 
     #[test]
