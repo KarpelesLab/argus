@@ -483,8 +483,10 @@ impl Ctx<'_> {
 
         self.cursor_y += style.border.top + style.padding.top;
 
-        // A list-item marker sits on the first line, just left of the content.
-        if let Some(marker) = marker.as_ref().filter(|_| !style.hidden) {
+        // A list-item marker sits in the margin (`outside`) just left of the content;
+        // `inside` markers are gathered as the first inline word below instead.
+        if let Some(marker) = marker.as_ref().filter(|_| !style.hidden && !style.list_style_inside)
+        {
             let fs = style.font_size;
             match marker {
                 Marker::Text(s) => {
@@ -579,6 +581,38 @@ impl Ctx<'_> {
             // style); block-level children flush the line box and lay out separately.
             let mut words: Vec<InlineWord> = Vec::new();
             let mut pending_space = false;
+            // `list-style-position: inside`: the marker is the item's first inline
+            // word (a text marker, or a geometric bullet rendered as a small glyph).
+            if style.list_style_inside && !style.hidden {
+                if let Some(marker) = marker.as_ref() {
+                    let text = match marker {
+                        Marker::Text(s) => format!("{s} "),
+                        Marker::Disc | Marker::Square => "\u{25AA} ".to_string(),
+                        Marker::Circle => "\u{25E6} ".to_string(),
+                    };
+                    for word in text.split_whitespace() {
+                        words.push(InlineWord {
+                            text: word.to_string(),
+                            font_size: style.font_size,
+                            color: style.fade(style.color),
+                            background: argus_geometry::Color::TRANSPARENT,
+                            space_before: false,
+                            underline: false,
+                            strike: false,
+                            overline: false,
+                            bold: style.bold,
+                            italic: style.italic,
+                            shadow: style.text_shadow,
+                            decoration_color: style.fade(style.color),
+                            href: None,
+                            hard_break: false,
+                            baseline_shift: 0.0,
+                            atomic: None,
+                        });
+                        pending_space = true;
+                    }
+                }
+            }
             // Floats introduced while laying out this block's content are contained
             // by it: at the end we extend the cursor past them and drop them so they
             // don't leak to siblings.
@@ -3865,6 +3899,27 @@ mod tests {
         let y_after = l.runs.iter().find(|r| r.text == "after").unwrap().baseline;
         let y_shown = l.runs.iter().find(|r| r.text == "shown").unwrap().baseline;
         assert!(y_after > y_shown, "after should be below the hidden block");
+    }
+
+    #[test]
+    fn list_style_position_inside_marker_is_inline() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Default (outside): the "1." marker run sits left of the content origin.
+        // inside: the marker is the first inline word, at/after the content origin.
+        let marker_x = |css: &str| -> f32 {
+            let html = format!(
+                "<ol style=\"{css}\"><li>item</li></ol>"
+            );
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 300.0, &ImageSizes::new());
+            l.runs.iter().find(|r| r.text == "1.").map(|r| r.x).unwrap()
+        };
+        let outside = marker_x("");
+        let inside = marker_x("list-style-position: inside");
+        assert!(inside > outside, "inside marker is further right: {outside} -> {inside}");
     }
 
     #[test]

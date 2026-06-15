@@ -304,6 +304,8 @@ pub struct ComputedStyle {
     pub transform_scale: Option<(f32, f32)>,
     /// `list-style-type` for list items (inherited).
     pub list_style: ListStyle,
+    /// `list-style-position: inside` — the marker is inline content (inherited).
+    pub list_style_inside: bool,
     /// `text-transform` case mapping (inherited).
     pub text_transform: TextTransform,
     /// `box-sizing` — how `width` maps to the box model (not inherited).
@@ -400,6 +402,7 @@ impl ComputedStyle {
             transform_translate: None,
             transform_scale: None,
             list_style: ListStyle::Disc,
+            list_style_inside: false,
             text_transform: TextTransform::None,
             box_sizing: BoxSizing::ContentBox,
             caption_side_bottom: false,
@@ -614,6 +617,7 @@ pub fn computed_style(
         caption_side_bottom: parent.caption_side_bottom, // caption-side inherits
         text_shadow: parent.text_shadow,         // text-shadow inherits
         list_style: parent.list_style,           // list-style-type inherits
+        list_style_inside: parent.list_style_inside, // list-style-position inherits
         text_transform: parent.text_transform,   // text-transform inherits
         line_height: parent.line_height,         // line-height inherits
         text_indent: parent.text_indent,         // text-indent inherits
@@ -923,6 +927,16 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         .and_then(|v| v.split_whitespace().find_map(parse_list_style))
     {
         cs.list_style = v;
+    }
+    if let Some(v) = map
+        .get("list-style-position")
+        .or_else(|| map.get("list-style"))
+    {
+        if v.split_whitespace().any(|t| t == "inside") {
+            cs.list_style_inside = true;
+        } else if v.split_whitespace().any(|t| t == "outside") {
+            cs.list_style_inside = false;
+        }
     }
     if let Some(v) = map.get("text-transform") {
         cs.text_transform = match v.as_str() {
