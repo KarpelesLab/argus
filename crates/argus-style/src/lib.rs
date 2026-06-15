@@ -1157,6 +1157,25 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     if let Some(px) = map.get("border-left-width").and_then(|v| len_px(v, fs)) {
         cs.border.left = px;
     }
+    // `border-style: none|hidden` suppresses the border even when a width/color was
+    // set; per-side `border-<side>-style` zeroes just that edge. Other style
+    // keywords (solid/dashed/…) leave the width intact (all rendered solid).
+    let is_none_style = |v: &str| matches!(v.trim(), "none" | "hidden");
+    if map.get("border-style").is_some_and(|v| is_none_style(v)) {
+        cs.border = Edges::uniform(0.0);
+    }
+    if map.get("border-top-style").is_some_and(|v| is_none_style(v)) {
+        cs.border.top = 0.0;
+    }
+    if map.get("border-right-style").is_some_and(|v| is_none_style(v)) {
+        cs.border.right = 0.0;
+    }
+    if map.get("border-bottom-style").is_some_and(|v| is_none_style(v)) {
+        cs.border.bottom = 0.0;
+    }
+    if map.get("border-left-style").is_some_and(|v| is_none_style(v)) {
+        cs.border.left = 0.0;
+    }
     // Per-side border colors default to the shorthand color, then per-side longhands
     // override them.
     cs.border_top_color = cs.border_color;
@@ -1843,6 +1862,24 @@ mod tests {
         let cs = computed_style(&doc, el, &parent, &author);
         assert_eq!(cs.background_color, Color::rgb(1, 2, 3));
         assert_eq!(cs.border_color, Color::rgb(4, 5, 6));
+    }
+
+    #[test]
+    fn border_style_none_suppresses_border() {
+        let mut doc = Document::new();
+        let el = one(&mut doc, "div", vec![]);
+        // A width is set but `border-style: none` zeroes the whole border...
+        let author = parse_stylesheet("div { border-width: 4px; border-style: none }");
+        let cs = computed_style(&doc, el, &ComputedStyle::initial(), &author);
+        assert_eq!(cs.border, Edges::uniform(0.0), "border-style:none zeroes width");
+
+        // ...while a per-side `none` only zeroes that edge.
+        let el2 = one(&mut doc, "div", vec![]);
+        let author2 = parse_stylesheet("div { border: 3px solid black; border-left-style: none }");
+        let cs2 = computed_style(&doc, el2, &ComputedStyle::initial(), &author2);
+        assert_eq!(cs2.border.left, 0.0, "left edge suppressed");
+        assert_eq!(cs2.border.top, 3.0, "top edge kept");
+        assert_eq!(cs2.border.right, 3.0, "right edge kept");
     }
 
     #[test]
