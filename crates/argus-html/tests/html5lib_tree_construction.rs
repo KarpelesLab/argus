@@ -845,4 +845,29 @@ a</br>b
 |         <a>
 |           "3"
 |         "4"
+
+#data
+<font><p>x</font>y
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <font>
+|     <p>
+|       <font>
+|         "x"
+|       "y"
+
+#data
+<b><b>1</b>2
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <b>
+|       <b>
+|         "1"
+|       "2"
 "####;
