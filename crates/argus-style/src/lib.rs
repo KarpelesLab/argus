@@ -472,7 +472,7 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         .get("background-color")
         .or_else(|| map.get("background"))
     {
-        if let Some(c) = resolve_color(v, cs.color) {
+        if let Some(c) = resolve_color(v, cs.color, parent.background_color) {
             cs.background_color = c;
         }
     }
@@ -621,7 +621,7 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     }
     if let Some(v) = map
         .get("border-color")
-        .and_then(|v| resolve_color(v, cs.color))
+        .and_then(|v| resolve_color(v, cs.color, parent.border_color))
     {
         cs.border_color = v;
     }
@@ -652,7 +652,7 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     }
     if let Some(v) = map
         .get("outline-color")
-        .and_then(|v| resolve_color(v, cs.color))
+        .and_then(|v| resolve_color(v, cs.color, parent.outline_color))
     {
         cs.outline_color = v;
     }
@@ -834,10 +834,13 @@ fn mentions_current_color(v: &str) -> bool {
     v.split_whitespace().any(|t| t.eq_ignore_ascii_case("currentcolor"))
 }
 
-/// Resolve a color value, mapping the `currentColor` keyword to `cur` (the
-/// element's already-computed `color`). Used for properties where `currentColor`
-/// is common (background, border, outline).
-fn resolve_color(v: &str, cur: Color) -> Option<Color> {
+/// Resolve a color value, mapping `currentColor` to `cur` (the element's computed
+/// `color`) and the `inherit` keyword to `inherited` (the parent's value for this
+/// property). Used for background/border/outline colors.
+fn resolve_color(v: &str, cur: Color, inherited: Color) -> Option<Color> {
+    if v.trim().eq_ignore_ascii_case("inherit") {
+        return Some(inherited);
+    }
     if mentions_current_color(v) {
         return Some(cur);
     }
@@ -854,6 +857,21 @@ mod tests {
         let el = doc.create_element(QualName::html(tag), attrs);
         doc.append(root, el);
         el
+    }
+
+    #[test]
+    fn inherit_keyword_for_non_inherited_colors() {
+        // background/border colors don't inherit by default; `inherit` opts in.
+        let mut doc = Document::new();
+        let el = one(&mut doc, "div", vec![]);
+        let mut parent = ComputedStyle::initial();
+        parent.background_color = Color::rgb(1, 2, 3);
+        parent.border_color = Color::rgb(4, 5, 6);
+        let author =
+            parse_stylesheet("div { background-color: inherit; border-color: inherit }");
+        let cs = computed_style(&doc, el, &parent, &author);
+        assert_eq!(cs.background_color, Color::rgb(1, 2, 3));
+        assert_eq!(cs.border_color, Color::rgb(4, 5, 6));
     }
 
     #[test]
