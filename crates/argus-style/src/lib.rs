@@ -551,6 +551,22 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             Position::Static
         };
     }
+    // `inset` shorthand: 1–4 values → top/right/bottom/left (CSS edge order); each
+    // `auto` token clears that inset.
+    if let Some(v) = map.get("inset") {
+        let t: Vec<&str> = v.split_whitespace().collect();
+        if !t.is_empty() {
+            let set = |tok: &str| -> Option<Length> {
+                (!tok.eq_ignore_ascii_case("auto"))
+                    .then(|| parse_length(tok))
+                    .flatten()
+            };
+            cs.inset_top = set(t[0]);
+            cs.inset_right = set(t.get(1).copied().unwrap_or(t[0]));
+            cs.inset_bottom = set(t.get(2).copied().unwrap_or(t[0]));
+            cs.inset_left = set(t.get(3).or(t.get(1)).copied().unwrap_or(t[0]));
+        }
+    }
     if let Some(v) = map
         .get("top")
         .filter(|v| v.as_str() != "auto")
@@ -995,5 +1011,31 @@ mod tests {
         assert_eq!(cs.border, Edges::uniform(2.0));
         assert_eq!(cs.text_align, TextAlign::Center);
         assert_eq!(cs.width, Some(Length::Percent(50.0)));
+    }
+
+    #[test]
+    fn inset_shorthand_expands() {
+        let mut doc = Document::new();
+        let d = one(&mut doc, "div", vec![]);
+        // 4 values → top/right/bottom/left; `auto` clears.
+        let cs = computed_style(
+            &doc,
+            d,
+            &ComputedStyle::initial(),
+            &parse_stylesheet("div { inset: 1px 2px 3px auto }"),
+        );
+        assert_eq!(cs.inset_top, Some(Length::Px(1.0)));
+        assert_eq!(cs.inset_right, Some(Length::Px(2.0)));
+        assert_eq!(cs.inset_bottom, Some(Length::Px(3.0)));
+        assert_eq!(cs.inset_left, None);
+        // 1 value → all four.
+        let cs2 = computed_style(
+            &doc,
+            d,
+            &ComputedStyle::initial(),
+            &parse_stylesheet("div { inset: 5px }"),
+        );
+        assert_eq!(cs2.inset_top, Some(Length::Px(5.0)));
+        assert_eq!(cs2.inset_left, Some(Length::Px(5.0)));
     }
 }
