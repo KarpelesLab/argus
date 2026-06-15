@@ -1877,7 +1877,7 @@ mod tests {
     fn dom_node_json_serializes_tree() {
         let doc = argus_html::parse("<div id=\"a\" class=\"c\">hi <b>x</b></div>");
         // Find the <div> (under html>body).
-        fn find<'a>(doc: &'a argus_dom::Document, id: argus_dom::NodeId, tag: &str) -> Option<argus_dom::NodeId> {
+        fn find(doc: &argus_dom::Document, id: argus_dom::NodeId, tag: &str) -> Option<argus_dom::NodeId> {
             if matches!(&doc.node(id).data, argus_dom::NodeData::Element(e) if e.name.is_html(tag)) {
                 return Some(id);
             }
