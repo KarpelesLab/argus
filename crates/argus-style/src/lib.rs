@@ -329,6 +329,9 @@ pub struct ComputedStyle {
     /// `border-spacing` (or the `cellspacing` attr) between table cells, in pixels
     /// (inherited; the table layout reads it). Defaults to 0.
     pub border_spacing: f32,
+    /// `border-collapse: collapse` — share adjacent table-cell borders into one
+    /// (inherited; the table layout reads it). Defaults to separated borders.
+    pub border_collapse: bool,
     /// `vertical-align` for inline content (not inherited).
     pub vertical_align: VerticalAlign,
     /// Column `gap` between flex/grid items in pixels (not inherited).
@@ -422,6 +425,7 @@ impl ComputedStyle {
             word_spacing: 0.0,
             letter_spacing: 0.0,
             border_spacing: 0.0,
+            border_collapse: false,
             vertical_align: VerticalAlign::Baseline,
             gap: 0.0,
             row_gap: 0.0,
@@ -845,6 +849,7 @@ pub fn computed_style(
         word_spacing: parent.word_spacing,       // word-spacing inherits
         letter_spacing: parent.letter_spacing,   // letter-spacing inherits
         border_spacing: parent.border_spacing,   // border-spacing inherits
+        border_collapse: parent.border_collapse, // border-collapse inherits
         hidden: parent.hidden,                   // visibility inherits
         ..ComputedStyle::initial()
     };
@@ -1297,6 +1302,9 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         } else {
             parse_length(v).map_or(cs.letter_spacing, |l| l.to_px(cs.font_size, 0.0))
         };
+    }
+    if let Some(v) = map.get("border-collapse") {
+        cs.border_collapse = v.trim() == "collapse";
     }
     // `border-spacing` (the first/horizontal value if two are given).
     if let Some(v) = map.get("border-spacing") {
@@ -2168,6 +2176,20 @@ mod tests {
         let cs = computed_style(&doc, dd, &ComputedStyle::initial(), &Stylesheet::default());
         assert_eq!(cs.display, Display::Block);
         assert_eq!(cs.margin.left, 40.0, "dd is indented by the UA default");
+    }
+
+    #[test]
+    fn border_collapse_parses_and_inherits() {
+        let mut doc = Document::new();
+        let table = one(&mut doc, "table", vec![]);
+        let author = parse_stylesheet("table { border-collapse: collapse }");
+        let cs = computed_style(&doc, table, &ComputedStyle::initial(), &author);
+        assert!(cs.border_collapse);
+        let td = one(&mut doc, "td", vec![]);
+        assert!(
+            computed_style(&doc, td, &cs, &Stylesheet::default()).border_collapse,
+            "border-collapse inherits to cells"
+        );
     }
 
     #[test]

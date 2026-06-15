@@ -2767,6 +2767,22 @@ impl Ctx<'_> {
         }
         let nrows = occ.len();
 
+        // `border-collapse: collapse` shares adjacent cell borders: zero each
+        // cell's right/bottom border (the neighbor's left/top border draws the
+        // shared edge), keeping it only on the table's last column/row. The table
+        // is then gapless (no border-spacing).
+        let collapse = style.border_collapse;
+        if collapse {
+            for p in &mut placed {
+                if p.col + p.cspan < cols {
+                    p.style.border.right = 0.0;
+                }
+                if p.row + p.rspan < nrows {
+                    p.style.border.bottom = 0.0;
+                }
+            }
+        }
+
         // Content-based ("auto") column widths: each column's natural width is the
         // widest max-content of its single-column cells; columns are then scaled
         // proportionally to fill the table width.
@@ -2785,7 +2801,11 @@ impl Ctx<'_> {
         // declared this reduces exactly to content-proportional auto widths.
         // `border-spacing` (or `cellspacing`) inserts a gap before, between, and
         // after the columns/rows; with the default 0 the table is gapless.
-        let bs = style.border_spacing.max(0.0);
+        let bs = if collapse {
+            0.0
+        } else {
+            style.border_spacing.max(0.0)
+        };
         let col_explicit = self.collect_col_widths(id, cols, style.font_size, table_w);
         let explicit_total: f32 = col_explicit.iter().flatten().sum();
         let auto_cols = (0..cols).filter(|&c| col_explicit[c].is_none());
@@ -4827,6 +4847,34 @@ mod tests {
         let tall = l.runs.iter().find(|r| r.text == "tall").unwrap().baseline;
         let low = l.runs.iter().find(|r| r.text == "low").unwrap().baseline;
         assert!(low > tall + 30.0, "bottom-aligned content sits lower: {tall} vs {low}");
+    }
+
+    #[test]
+    fn border_collapse_suppresses_internal_borders() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Count visible vertical border segments (thin, tall, black). Collapsing
+        // shares adjacent borders, so there are fewer than in the separated model.
+        let vbars = |collapse: bool| -> usize {
+            let cs = if collapse { "border-collapse:collapse" } else { "border-collapse:separate" };
+            let cell = "border:1px solid black";
+            let html = format!(
+                "<table style=\"{cs}\">\
+                   <tr><td style=\"{cell}\">a</td><td style=\"{cell}\">b</td></tr>\
+                   <tr><td style=\"{cell}\">c</td><td style=\"{cell}\">d</td></tr>\
+                 </table>"
+            );
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+            l.rects
+                .iter()
+                .filter(|r| r.color.r == 0 && r.color.g == 0 && r.color.b == 0)
+                .filter(|r| r.w > 0.0 && r.w < 3.0 && r.h > 5.0)
+                .count()
+        };
+        assert!(vbars(true) < vbars(false), "collapse has fewer vbars: {} < {}", vbars(true), vbars(false));
     }
 
     #[test]
