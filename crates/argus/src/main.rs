@@ -106,6 +106,17 @@ fn main() {
             }
             return;
         }
+        // `--dump-meta`: print the page's metadata (title/lang/og/etc.) and exit.
+        if has_flag("--dump-meta") {
+            match argus_browser::dump_meta(url.as_deref()) {
+                Ok(m) => print!("{m}"),
+                Err(err) => {
+                    eprintln!("[browser] dump-meta failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
     }
 
     let result = match role {

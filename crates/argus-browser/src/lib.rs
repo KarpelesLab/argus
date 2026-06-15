@@ -534,6 +534,95 @@ pub fn dump_forms(url: Option<&str>) -> io::Result<String> {
     Ok(extract_forms(&doc, url))
 }
 
+/// Headless automation: fetch a page and return its **metadata** (title, lang,
+/// charset, description/keywords/author/robots, canonical URL, and `og:`/`twitter:`
+/// social tags) as `key: value` lines. Used by `--dump-meta` (SEO / scraping).
+pub fn dump_meta(url: Option<&str>) -> io::Result<String> {
+    log::set_role(Role::Browser);
+    let mut net = spawn_child(Role::NetService)?;
+    proto::parent_handshake(net.channel(), Size::new(800, 600))?;
+    let html = resolve_html(&net, url);
+    proto::send(net.channel(), Msg::Shutdown, &[])?;
+    net.wait()?;
+    let mut doc = argus_html::parse(&html);
+    argus_domscript::apply_scripts_with_url(&mut doc, url);
+    Ok(extract_meta(&doc, url))
+}
+
+/// Collect document metadata as `key: value` lines: `title`, `lang` (`<html lang>`),
+/// `charset`, `<meta name=…>` values (description/keywords/author/robots/viewport/
+/// theme-color), `<meta property=og:…>` / `name=twitter:…` social tags, and the
+/// `<link rel=canonical>` URL (resolved against `base`). Pure (no I/O), unit-testable.
+fn extract_meta(doc: &argus_dom::Document, base: Option<&str>) -> String {
+    use argus_dom::{Document, NodeData, NodeId};
+
+    fn text_of(doc: &Document, id: NodeId, out: &mut String) {
+        match &doc.node(id).data {
+            NodeData::Text(t) => out.push_str(t),
+            _ => {
+                for c in doc.children(id) {
+                    text_of(doc, c, out);
+                }
+            }
+        }
+    }
+    // Ordered (key, value) pairs; document order within each category.
+    let mut out: Vec<(String, String)> = Vec::new();
+    let collapse = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    fn walk(
+        doc: &Document,
+        id: NodeId,
+        base: Option<&str>,
+        out: &mut Vec<(String, String)>,
+        collapse: &dyn Fn(&str) -> String,
+        text_of: &dyn Fn(&Document, NodeId, &mut String),
+    ) {
+        if let NodeData::Element(e) = &doc.node(id).data {
+            if e.name.is_html("title") {
+                let mut t = String::new();
+                text_of(doc, id, &mut t);
+                out.push(("title".to_string(), collapse(&t)));
+            } else if e.name.is_html("html") {
+                if let Some(lang) = e.attr("lang") {
+                    out.push(("lang".to_string(), lang.to_string()));
+                }
+            } else if e.name.is_html("meta") {
+                if let Some(cs) = e.attr("charset") {
+                    out.push(("charset".to_string(), cs.to_string()));
+                }
+                let content = e.attr("content").unwrap_or("");
+                if let Some(name) = e.attr("name") {
+                    if !content.is_empty() {
+                        out.push((name.to_ascii_lowercase(), collapse(content)));
+                    }
+                } else if let Some(prop) = e.attr("property") {
+                    if !content.is_empty() {
+                        out.push((prop.to_ascii_lowercase(), collapse(content)));
+                    }
+                }
+            } else if e.name.is_html("link") {
+                let rel = e.attr("rel").unwrap_or("");
+                if rel.eq_ignore_ascii_case("canonical") {
+                    if let Some(href) = e.attr("href") {
+                        out.push(("canonical".to_string(), resolve_url(base, href)));
+                    }
+                }
+            }
+        }
+        for c in doc.children(id) {
+            walk(doc, c, base, out, collapse, text_of);
+        }
+    }
+    walk(doc, doc.root(), base, &mut out, &collapse, &text_of);
+
+    let mut s = String::new();
+    for (k, v) in out {
+        s.push_str(&format!("{k}: {v}\n"));
+    }
+    s
+}
+
 /// Render each `<form>` as a header line (`form[i] action=… method=…`) followed
 /// by indented control lines (`input name=… type=… value=…`, plus `checked` /
 /// `selected`). Controls outside any form are grouped under `form[-]`. Pure (no
@@ -1129,7 +1218,9 @@ fn verify_uniform(fb: &Framebuffer) -> io::Result<Color> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_forms, extract_links, page_title, render_text, resolve_url, History};
+    use super::{
+        extract_forms, extract_links, extract_meta, page_title, render_text, resolve_url, History,
+    };
 
     #[test]
     fn a11y_tree_roles_names_and_aria() {
@@ -1181,6 +1272,27 @@ mod tests {
         assert_eq!(lines[2], "External\thttps://other.example/x");
         assert_eq!(lines[3], "proto-relative\thttps://cdn.example/lib.js");
         assert_eq!(lines.len(), 4, "only <a href> elements are listed");
+    }
+
+    #[test]
+    fn extract_meta_collects_page_metadata() {
+        let doc = argus_html::parse(
+            "<html lang=\"en\"><head>\
+               <title>Hello   World</title>\
+               <meta charset=\"utf-8\">\
+               <meta name=\"description\" content=\"A   test   page\">\
+               <meta property=\"og:title\" content=\"OG Title\">\
+               <link rel=\"canonical\" href=\"/page\">\
+             </head><body>x</body></html>",
+        );
+        let out = extract_meta(&doc, Some("https://site.example/dir/"));
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines.contains(&"title: Hello World"), "{out}");
+        assert!(lines.contains(&"lang: en"), "{out}");
+        assert!(lines.contains(&"charset: utf-8"), "{out}");
+        assert!(lines.contains(&"description: A test page"), "{out}");
+        assert!(lines.contains(&"og:title: OG Title"), "{out}");
+        assert!(lines.contains(&"canonical: https://site.example/page"), "{out}");
     }
 
     #[test]
