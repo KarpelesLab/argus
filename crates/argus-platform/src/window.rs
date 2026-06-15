@@ -27,6 +27,8 @@ pub enum Event {
     /// A scroll-wheel movement; `dy` is the vertical delta in pixels (positive =
     /// content moves up, i.e. scroll down).
     Scroll { dy: i32 },
+    /// A typed character (Unicode scalar; `0x08` = backspace).
+    KeyChar { ch: u32 },
     /// The user asked to close the window.
     CloseRequested,
 }
@@ -165,6 +167,10 @@ impl Window {
                             dy: (dy * 3.0) as i32,
                         };
                     }
+                } else if kind == NSEventType::KeyDown {
+                    if let Some(mapped) = self.map_key_down(&event) {
+                        return mapped;
+                    }
                 }
             }
 
@@ -188,5 +194,15 @@ impl Window {
             x: x as u32,
             y: y as u32,
         })
+    }
+
+    /// Map a key-down event to its first typed character (macOS delete → backspace).
+    fn map_key_down(&self, event: &NSEvent) -> Option<Event> {
+        let chars = event.characters()?;
+        let s = chars.to_string();
+        let ch = s.chars().next()? as u32;
+        // macOS sends DEL (0x7F) for the backspace key; normalize to BS (0x08).
+        let ch = if ch == 0x7F { 0x08 } else { ch };
+        Some(Event::KeyChar { ch })
     }
 }

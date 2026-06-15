@@ -102,6 +102,9 @@ pub enum Msg {
     InputClick { x: u32, y: u32 },
     /// browser → content: set the vertical scroll offset for the next frame.
     SetScroll { y: u32 },
+    /// browser → content: a typed character for the focused field (`ch` is a
+    /// Unicode scalar; `0x08` = backspace).
+    InputKey { ch: u32 },
     /// browser → content: font file bytes for text rendering (the sandboxed content
     /// process cannot read fonts from disk itself).
     ProvideFont { bytes: Vec<u8> },
@@ -157,6 +160,7 @@ const TAG_FETCH_RESOURCE: u8 = 11;
 const TAG_RESOURCE_DATA: u8 = 12;
 const TAG_CLICK_RESULT: u8 = 13;
 const TAG_SET_SCROLL: u8 = 14;
+const TAG_INPUT_KEY: u8 = 15;
 
 impl Msg {
     /// Number of file descriptors that accompany this message out-of-band.
@@ -227,6 +231,10 @@ impl Msg {
                 buf.push(TAG_SET_SCROLL);
                 buf.extend_from_slice(&y.to_le_bytes());
             }
+            Msg::InputKey { ch } => {
+                buf.push(TAG_INPUT_KEY);
+                buf.extend_from_slice(&ch.to_le_bytes());
+            }
             Msg::Shutdown => buf.push(TAG_SHUTDOWN),
         }
         buf
@@ -274,6 +282,7 @@ impl Msg {
                 url: String::from_utf8_lossy(c.bytes()?).into_owned(),
             },
             TAG_SET_SCROLL => Msg::SetScroll { y: c.u32()? },
+            TAG_INPUT_KEY => Msg::InputKey { ch: c.u32()? },
             TAG_SHUTDOWN => Msg::Shutdown,
             other => return Err(DecodeError::BadTag(other)),
         };

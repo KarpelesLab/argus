@@ -710,6 +710,13 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
                     window.present(frame.pixels(), frame.size());
                 }
             }
+            Event::KeyChar { ch } => {
+                // Forward the keystroke to the focused field, then re-render.
+                proto::send(content.channel(), Msg::InputKey { ch }, &[])?;
+                let (frame, h) = request_frame(&content, &net, current_url.as_deref())?;
+                content_height = h;
+                window.present(frame.pixels(), frame.size());
+            }
             Event::CloseRequested => {
                 log!("window closed; shutting down");
                 break;
