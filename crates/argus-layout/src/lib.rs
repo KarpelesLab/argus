@@ -735,7 +735,12 @@ impl Ctx<'_> {
                     } else {
                         match e.attr("value").filter(|v| !v.is_empty()) {
                             Some(v) => (v.to_string(), false),
-                            None => (e.attr("placeholder").unwrap_or("").to_string(), true),
+                            // Submit/reset buttons show a default label when unvalued.
+                            None => match ty {
+                                "submit" => ("Submit".to_string(), false),
+                                "reset" => ("Reset".to_string(), false),
+                                _ => (e.attr("placeholder").unwrap_or("").to_string(), true),
+                            },
                         }
                     }
                 } else if e.name.is_html("select") {
@@ -3830,6 +3835,22 @@ mod tests {
             line_count("overflow-wrap: break-word") > 1,
             "break-word splits the long word across lines"
         );
+    }
+
+    #[test]
+    fn submit_reset_buttons_get_default_labels() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let doc = parse(
+            "<input type=\"submit\"><input type=\"reset\"><input type=\"submit\" value=\"Go\">",
+        );
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let texts: Vec<&str> = l.runs.iter().map(|r| r.text.as_str()).collect();
+        assert!(texts.contains(&"Submit"), "unvalued submit shows 'Submit': {texts:?}");
+        assert!(texts.contains(&"Reset"), "unvalued reset shows 'Reset': {texts:?}");
+        assert!(texts.contains(&"Go"), "explicit value still wins: {texts:?}");
     }
 
     #[test]
