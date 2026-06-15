@@ -3102,11 +3102,11 @@ impl Ctx<'_> {
                 let is_break_ws = |c: char| c.is_whitespace() && c != '\u{00A0}';
                 let mut first = true;
                 for word in t.split(is_break_ws).filter(|w| !w.is_empty()) {
-                    // A soft hyphen (U+00AD) is a break opportunity: split the word
-                    // into adjacent sub-words there (the soft hyphen itself is not
-                    // rendered), so long words can wrap at those points.
+                    // Soft hyphen (U+00AD) and zero-width space (U+200B) are break
+                    // opportunities: split the word into adjacent sub-words there
+                    // (neither character is rendered), so long words can wrap there.
                     let mut first_sub = true;
-                    for sub in word.split('\u{00AD}') {
+                    for sub in word.split(['\u{00AD}', '\u{200B}']) {
                         if sub.is_empty() {
                             continue;
                         }
@@ -4698,6 +4698,11 @@ mod tests {
         let with_nbsp = lines("<p>aaaaaaaaaa\u{00A0}bbbbbbbbbb</p>");
         assert!(with_space >= 2, "ordinary space wraps: {with_space}");
         assert_eq!(with_nbsp, 1, "nbsp stays on one line: {with_nbsp}");
+        // A zero-width space (U+200B) is a break opportunity inside a long token.
+        let no_break = lines("<p>aaaaaaaaaabbbbbbbbbb</p>");
+        let zwsp = lines("<p>aaaaaaaaaa\u{200B}bbbbbbbbbb</p>");
+        assert_eq!(no_break, 1, "unbroken token stays one line: {no_break}");
+        assert!(zwsp >= 2, "zero-width space lets the token wrap: {zwsp}");
     }
 
     #[test]
