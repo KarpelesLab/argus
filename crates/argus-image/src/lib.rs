@@ -7,7 +7,7 @@
 //! (`oxideav-ico`, largest sub-image) — plus uncompressed 24/32-bit BMP, **TGA**
 //! (Truevision true-color + grayscale, uncompressed + RLE), **Netpbm** (PPM/PGM,
 //! ASCII + binary), **PCX** (RLE 24-bit + 8-bit palette), **TIFF** (baseline
-//! uncompressed + PackBits RGB/grayscale, both byte orders), all built in, and `data:` URLs.
+//! uncompressed + PackBits + LZW RGB/grayscale, both byte orders), all built in, and `data:` URLs.
 //! AVIF and lossy-WebP
 //! (VP8) decode here once that glue lands. See `docs/subsystems/media.md`.
 
@@ -643,8 +643,8 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
             _ => {}
         }
     }
-    // Compression: 1 = none, 32773 = PackBits.
-    if !matches!(compression, 1 | 32773) || bits != 8 || width == 0 || height == 0 {
+    // Compression: 1 = none, 5 = LZW, 32773 = PackBits.
+    if !matches!(compression, 1 | 5 | 32773) || bits != 8 || width == 0 || height == 0 {
         return None;
     }
     if !matches!((samples, photometric), (3, 2) | (1, 0) | (1, 1)) {
@@ -663,6 +663,7 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
         let strip = bytes.get(off as usize..off as usize + bc)?;
         match compression {
             1 => data.extend_from_slice(strip),
+            5 => lzw_decode_tiff(strip, &mut data),
             32773 => packbits_decode(strip, &mut data),
             _ => return None,
         }
@@ -691,6 +692,71 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
         height,
         rgba,
     })
+}
+
+/// TIFF LZW (compression 5) decode `src` into `out`: variable-width (9–12 bit)
+/// MSB-first codes with TIFF "early change", `ClearCode`=256, `EndOfInfo`=257.
+fn lzw_decode_tiff(src: &[u8], out: &mut Vec<u8>) {
+    const CLEAR: usize = 256;
+    const EOI: usize = 257;
+    let mut table: Vec<Vec<u8>> = Vec::with_capacity(4096);
+    let reset = |t: &mut Vec<Vec<u8>>| {
+        t.clear();
+        for i in 0..256u16 {
+            t.push(vec![i as u8]);
+        }
+        t.push(Vec::new()); // 256 = clear
+        t.push(Vec::new()); // 257 = eoi
+    };
+    reset(&mut table);
+    let mut width = 9u32;
+    let mut acc = 0u32;
+    let mut nbits = 0u32;
+    let mut pos = 0usize;
+    let mut prev: Option<usize> = None;
+    loop {
+        while nbits < width && pos < src.len() {
+            acc = (acc << 8) | src[pos] as u32;
+            pos += 1;
+            nbits += 8;
+        }
+        if nbits < width {
+            break;
+        }
+        nbits -= width;
+        let code = ((acc >> nbits) & ((1u32 << width) - 1)) as usize;
+        if code == CLEAR {
+            reset(&mut table);
+            width = 9;
+            prev = None;
+            continue;
+        }
+        if code == EOI {
+            break;
+        }
+        let entry = if code < table.len() {
+            table[code].clone()
+        } else if let Some(p) = prev {
+            // KwKwK: the new code is `prev` + its own first byte.
+            let mut e = table[p].clone();
+            let f = e[0];
+            e.push(f);
+            e
+        } else {
+            break;
+        };
+        out.extend_from_slice(&entry);
+        if let Some(p) = prev {
+            let mut ne = table[p].clone();
+            ne.push(entry[0]);
+            table.push(ne);
+        }
+        prev = Some(code);
+        // TIFF early change: widen one code before the table fills the width.
+        if table.len() + 1 == (1usize << width) && width < 12 {
+            width += 1;
+        }
+    }
 }
 
 /// PackBits (TIFF compression 32773 / Macintosh RLE) decode `src` into `out`: a
@@ -857,6 +923,99 @@ mod tests {
         assert_eq!((img.width, img.height), (2, 1));
         assert_eq!(&img.rgba[0..4], &[255, 0, 0, 255], "red");
         assert_eq!(&img.rgba[4..8], &[0, 255, 0, 255], "green");
+    }
+
+    // A minimal fixed-9-bit TIFF-LZW encoder (valid while the table stays < 511,
+    // i.e. small inputs) for roundtrip-testing the decoder.
+    fn lzw_encode_tiff_small(data: &[u8]) -> Vec<u8> {
+        use std::collections::HashMap;
+        let mut table: HashMap<Vec<u8>, usize> = HashMap::new();
+        for i in 0..256usize {
+            table.insert(vec![i as u8], i);
+        }
+        let mut next = 258usize;
+        let mut out = Vec::new();
+        let (mut acc, mut nbits) = (0u32, 0u32);
+        let mut emit = |code: usize, acc: &mut u32, nbits: &mut u32, out: &mut Vec<u8>| {
+            *acc = (*acc << 9) | code as u32;
+            *nbits += 9;
+            while *nbits >= 8 {
+                *nbits -= 8;
+                out.push((*acc >> *nbits) as u8);
+            }
+        };
+        emit(256, &mut acc, &mut nbits, &mut out); // clear
+        let mut w: Vec<u8> = Vec::new();
+        for &b in data {
+            let mut wc = w.clone();
+            wc.push(b);
+            if table.contains_key(&wc) {
+                w = wc;
+            } else {
+                emit(table[&w], &mut acc, &mut nbits, &mut out);
+                table.insert(wc, next);
+                next += 1;
+                w = vec![b];
+            }
+        }
+        if !w.is_empty() {
+            emit(table[&w], &mut acc, &mut nbits, &mut out);
+        }
+        emit(257, &mut acc, &mut nbits, &mut out); // eoi
+        if nbits > 0 {
+            out.push((acc << (8 - nbits)) as u8);
+        }
+        out
+    }
+
+    #[test]
+    fn lzw_tiff_roundtrips() {
+        for data in [
+            vec![5u8, 5, 5, 5],
+            vec![10, 20, 10, 20, 10, 20],
+            (0..50u8).chain(0..50).collect::<Vec<_>>(),
+            vec![7; 200],
+        ] {
+            let enc = lzw_encode_tiff_small(&data);
+            let mut dec = Vec::new();
+            super::lzw_decode_tiff(&enc, &mut dec);
+            assert_eq!(dec, data, "lzw roundtrip for {} bytes", data.len());
+        }
+    }
+
+    #[test]
+    fn decodes_lzw_grayscale_tiff() {
+        // A 4x1 grayscale LZW TIFF built with the test encoder.
+        let strip = lzw_encode_tiff_small(&[10, 20, 30, 40]);
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(b"II");
+        b.extend_from_slice(&42u16.to_le_bytes());
+        let ifd_off = 8 + strip.len() as u32;
+        b.extend_from_slice(&ifd_off.to_le_bytes());
+        b.extend_from_slice(&strip);
+        let entry = |b: &mut Vec<u8>, tag: u16, ty: u16, val: u32| {
+            b.extend_from_slice(&tag.to_le_bytes());
+            b.extend_from_slice(&ty.to_le_bytes());
+            b.extend_from_slice(&1u32.to_le_bytes());
+            b.extend_from_slice(&val.to_le_bytes());
+        };
+        b.extend_from_slice(&9u16.to_le_bytes());
+        entry(&mut b, 256, 3, 4);
+        entry(&mut b, 257, 3, 1);
+        entry(&mut b, 258, 3, 8);
+        entry(&mut b, 259, 3, 5); // LZW
+        entry(&mut b, 262, 3, 1);
+        entry(&mut b, 273, 4, 8);
+        entry(&mut b, 277, 3, 1);
+        entry(&mut b, 278, 3, 1);
+        entry(&mut b, 279, 4, strip.len() as u32);
+        b.extend_from_slice(&0u32.to_le_bytes());
+        let img = decode(&b).expect("decode lzw tiff");
+        assert_eq!((img.width, img.height), (4, 1));
+        assert_eq!(img.rgba[0], 10);
+        assert_eq!(img.rgba[4], 20);
+        assert_eq!(img.rgba[8], 30);
+        assert_eq!(img.rgba[12], 40);
     }
 
     #[test]
