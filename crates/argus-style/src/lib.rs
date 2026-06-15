@@ -121,6 +121,9 @@ pub struct ComputedStyle {
     pub color: Color,
     pub background_color: Color,
     pub margin: Edges,
+    /// Both horizontal margins are `auto` — a block with a definite width centers
+    /// itself in its containing block.
+    pub margin_auto_lr: bool,
     pub padding: Edges,
     pub border: Edges,
     pub border_color: Color,
@@ -188,6 +191,7 @@ impl ComputedStyle {
             color: Color::BLACK,
             background_color: Color::TRANSPARENT,
             margin: Edges::default(),
+            margin_auto_lr: false,
             padding: Edges::default(),
             border: Edges::default(),
             border_color: Color::BLACK,
@@ -601,6 +605,30 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         cs.margin = edges_shorthand(v, fs);
     }
     side_edge(map, "margin", fs, &mut cs.margin);
+    // Detect `auto` left+right margins (block centering). The horizontal component
+    // of the `margin` shorthand is its 2nd token (1/2/3 values) or {2nd, 4th} for 4;
+    // explicit `margin-left`/`margin-right` longhands override.
+    {
+        let (mut left_auto, mut right_auto) = (false, false);
+        if let Some(v) = map.get("margin") {
+            let t: Vec<&str> = v.split_whitespace().collect();
+            let (l, r) = match t.len() {
+                1 => (t[0], t[0]),
+                2 | 3 => (t[1], t[1]),
+                n if n >= 4 => (t[3], t[1]),
+                _ => ("", ""),
+            };
+            left_auto = l.eq_ignore_ascii_case("auto");
+            right_auto = r.eq_ignore_ascii_case("auto");
+        }
+        if let Some(v) = map.get("margin-left") {
+            left_auto = v.trim().eq_ignore_ascii_case("auto");
+        }
+        if let Some(v) = map.get("margin-right") {
+            right_auto = v.trim().eq_ignore_ascii_case("auto");
+        }
+        cs.margin_auto_lr = left_auto && right_auto;
+    }
     // Padding.
     if let Some(v) = map.get("padding") {
         cs.padding = edges_shorthand(v, fs);

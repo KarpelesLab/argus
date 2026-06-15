@@ -323,7 +323,6 @@ impl Ctx<'_> {
         );
 
         let border_box_top = self.cursor_y;
-        let border_box_left = x + style.margin.left;
 
         let h_extra = style.margin.left
             + style.margin.right
@@ -336,12 +335,20 @@ impl Ctx<'_> {
             None => (avail - h_extra).max(0.0),
         };
         let content_w = clamp_content_width(&style, content_w, avail);
-        let content_left = border_box_left + style.border.left + style.padding.left;
         let border_box_w = content_w
             + style.padding.left
             + style.padding.right
             + style.border.left
             + style.border.right;
+        // Horizontal placement: a block with a definite width and `auto` left+right
+        // margins centers itself in the available width; otherwise it sits at the
+        // left margin.
+        let border_box_left = if style.width.is_some() && style.margin_auto_lr {
+            x + (avail - border_box_w).max(0.0) / 2.0
+        } else {
+            x + style.margin.left
+        };
+        let content_left = border_box_left + style.border.left + style.padding.left;
 
         // Reserve background + border rect slots up front so ancestors paint first.
         // `visibility: hidden` keeps the box's geometry but paints no ink.
@@ -2055,6 +2062,31 @@ mod tests {
             two.x > one.x + 100.0,
             "second item should be in the next column"
         );
+    }
+
+    #[test]
+    fn margin_auto_centers_a_fixed_width_block() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A 100px-wide block with `margin: 0 auto` centers in a 400px viewport:
+        // its left edge ≈ (400 - 100) / 2 = 150.
+        let html = "<div style=\"width:100px; margin:0 auto\">hi</div>";
+        let doc = parse(html);
+        let lay = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let hi = lay.runs.iter().find(|r| r.text == "hi").unwrap();
+        assert!(
+            (hi.x - 150.0).abs() < 2.0,
+            "centered text should start near x=150, got {}",
+            hi.x
+        );
+        // Without auto margins, the same block sits at the left (just the UA body
+        // margin, ~8px) — clearly not centered.
+        let doc2 = parse("<div style=\"width:100px\">hi</div>");
+        let lay2 = layout(&doc2, &font, 400.0, &ImageSizes::new());
+        let hi2 = lay2.runs.iter().find(|r| r.text == "hi").unwrap();
+        assert!(hi2.x < 20.0, "left-aligned block near the left, got {}", hi2.x);
     }
 
     #[test]
