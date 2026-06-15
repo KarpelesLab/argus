@@ -672,6 +672,14 @@ fn presentational_hints(doc: &Document, node: NodeId) -> Vec<(String, String)> {
     if matches!(tag, "td" | "th") && e.attr("nowrap").is_some() {
         out.push(("white-space".into(), "nowrap".into()));
     }
+    // `<caption align=top|bottom>` maps to `caption-side`.
+    if tag == "caption" {
+        if let Some(a) = e.attr("align") {
+            if matches!(a.trim().to_ascii_lowercase().as_str(), "top" | "bottom") {
+                out.push(("caption-side".into(), a.trim().to_ascii_lowercase()));
+            }
+        }
+    }
     // A cell's `valign` (or its row's, since vertical-align doesn't inherit) maps
     // to `vertical-align`; cells honor top/middle/bottom.
     if matches!(tag, "td" | "th") {
@@ -2256,6 +2264,11 @@ mod tests {
         let cs6 = computed_style(&doc, font, &ComputedStyle::initial(), &Stylesheet::default());
         assert_eq!(cs6.font_size, 24.0, "font size=5 → 24px");
         assert_eq!(cs6.color, Color::rgb(255, 0, 0));
+
+        // <caption align=bottom> → caption-side: bottom.
+        let cap = one(&mut doc, "caption", vec![Attribute::new("align", "bottom")]);
+        let cs7 = computed_style(&doc, cap, &ComputedStyle::initial(), &Stylesheet::default());
+        assert!(cs7.caption_side_bottom, "caption align=bottom → caption-side: bottom");
     }
 
     #[test]
