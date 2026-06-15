@@ -1538,6 +1538,7 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         cs.margin = edges_shorthand(v, fs);
     }
     side_edge(map, "margin", fs, &mut cs.margin);
+    logical_edges(map, "margin", fs, &mut cs.margin);
     // Detect `auto` left+right margins (block centering). The horizontal component
     // of the `margin` shorthand is its 2nd token (1/2/3 values) or {2nd, 4th} for 4;
     // explicit `margin-left`/`margin-right` longhands override.
@@ -1567,6 +1568,7 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         cs.padding = edges_shorthand(v, fs);
     }
     side_edge(map, "padding", fs, &mut cs.padding);
+    logical_edges(map, "padding", fs, &mut cs.padding);
     // Borders.
     if let Some(v) = map.get("border") {
         let (w, c) = parse_border(v, fs);
@@ -1698,6 +1700,25 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         };
     }
     if let Some(v) = map.get("max-height") {
+        cs.max_height = if v == "none" { None } else { parse_length(v) };
+    }
+    // CSS logical sizing (horizontal-tb): inline = width, block = height.
+    if let Some(v) = map.get("inline-size") {
+        cs.width = if v == "auto" { None } else { parse_length(v) };
+    }
+    if let Some(v) = map.get("min-inline-size") {
+        cs.min_width = if v == "auto" || v == "0" { None } else { parse_length(v) };
+    }
+    if let Some(v) = map.get("max-inline-size") {
+        cs.max_width = if v == "none" { None } else { parse_length(v) };
+    }
+    if let Some(v) = map.get("block-size") {
+        cs.height = if v == "auto" { None } else { parse_length(v) };
+    }
+    if let Some(v) = map.get("min-block-size") {
+        cs.min_height = if v == "auto" || v == "0" { None } else { parse_length(v) };
+    }
+    if let Some(v) = map.get("max-block-size") {
         cs.max_height = if v == "none" { None } else { parse_length(v) };
     }
     if let Some(v) = map.get("aspect-ratio") {
@@ -2320,6 +2341,49 @@ fn len_px(v: &str, fs: f32) -> Option<f32> {
     parse_length(v).map(|l| l.to_px(fs, 0.0))
 }
 
+/// Apply CSS logical box properties for `prop` (`margin`/`padding`) onto `edges`,
+/// assuming the default `horizontal-tb` writing mode: inline = left/right, block =
+/// top/bottom. Handles the `-inline`/`-block` shorthands (1–2 values) and the
+/// `-inline-start/-end`/`-block-start/-end` longhands. Applied after the physical
+/// longhands so an explicit logical value wins (approximating later-in-cascade).
+fn logical_edges(map: &HashMap<String, String>, prop: &str, fs: f32, edges: &mut Edges) {
+    if let Some(v) = map.get(&format!("{prop}-inline")) {
+        let t: Vec<&str> = v.split_whitespace().collect();
+        if let Some(px) = t.first().and_then(|s| len_px(s, fs)) {
+            edges.left = px;
+            edges.right = px;
+        }
+        if let Some(px) = t.get(1).and_then(|s| len_px(s, fs)) {
+            edges.right = px;
+        }
+    }
+    if let Some(v) = map.get(&format!("{prop}-block")) {
+        let t: Vec<&str> = v.split_whitespace().collect();
+        if let Some(px) = t.first().and_then(|s| len_px(s, fs)) {
+            edges.top = px;
+            edges.bottom = px;
+        }
+        if let Some(px) = t.get(1).and_then(|s| len_px(s, fs)) {
+            edges.bottom = px;
+        }
+    }
+    for (suffix, side) in [
+        ("inline-start", 0u8),
+        ("inline-end", 1),
+        ("block-start", 2),
+        ("block-end", 3),
+    ] {
+        if let Some(px) = map.get(&format!("{prop}-{suffix}")).and_then(|v| len_px(v, fs)) {
+            match side {
+                0 => edges.left = px,
+                1 => edges.right = px,
+                2 => edges.top = px,
+                _ => edges.bottom = px,
+            }
+        }
+    }
+}
+
 /// `top right bottom left` shorthand with 1–4 values.
 fn edges_shorthand(v: &str, fs: f32) -> Edges {
     let vals: Vec<f32> = v
@@ -2844,6 +2908,31 @@ mod tests {
         assert_eq!(g.n_stops, 2);
         assert_eq!(g.from, parse_color("yellow").unwrap());
         assert_eq!(g.to, parse_color("green").unwrap());
+    }
+
+    #[test]
+    fn logical_properties_map_to_physical() {
+        let mut doc = Document::new();
+        let d = one(&mut doc, "div", vec![]);
+        let cs = computed_style(
+            &doc,
+            d,
+            &ComputedStyle::initial(),
+            &parse_stylesheet(
+                "div { inline-size: 200px; block-size: 80px; \
+                 margin-inline: 10px 20px; padding-block-start: 5px; \
+                 padding-inline-end: 7px }",
+            ),
+        );
+        // inline/block sizing → width/height (horizontal-tb).
+        assert_eq!(cs.width, Some(Length::Px(200.0)));
+        assert_eq!(cs.height, Some(Length::Px(80.0)));
+        // margin-inline: 10px 20px → left 10, right 20.
+        assert_eq!(cs.margin.left, 10.0);
+        assert_eq!(cs.margin.right, 20.0);
+        // padding-block-start → top; padding-inline-end → right.
+        assert_eq!(cs.padding.top, 5.0);
+        assert_eq!(cs.padding.right, 7.0);
     }
 
     #[test]
