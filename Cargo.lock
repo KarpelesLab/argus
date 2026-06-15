@@ -79,6 +79,7 @@ dependencies = [
  "argus-dom",
  "argus-html",
  "argus-script",
+ "purecrypto",
 ]
 
 [[package]]

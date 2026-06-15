@@ -12,6 +12,7 @@ argus-dom.workspace = true
 argus-html.workspace = true
 argus-css.workspace = true
 argus-script.workspace = true
+purecrypto = "0.6.11"
 
 [lints]
 workspace = true

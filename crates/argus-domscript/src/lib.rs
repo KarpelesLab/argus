@@ -835,10 +835,10 @@ fn run_scripts(
     let policies = csp_policies(doc, header_csp);
     let scripts: Vec<String> = all_scripts
         .into_iter()
-        .filter(|(_, nonce)| {
+        .filter(|(body, nonce)| {
             policies
                 .iter()
-                .all(|p| policy_allows_script(p, nonce.as_deref()))
+                .all(|p| policy_allows_script(p, nonce.as_deref(), body))
         })
         .map(|(s, _)| s)
         .collect();
@@ -1006,20 +1006,27 @@ fn csp_policies(doc: &Document, header_csp: &[String]) -> Vec<String> {
     v
 }
 
-/// Whether one CSP policy allows an inline `<script>` carrying the given `nonce`.
-/// The effective directive is `script-src`, else `default-src`. If it lists any
-/// `'nonce-…'` source, the script must carry a matching (case-sensitive) nonce and
-/// `'unsafe-inline'` is ignored (per CSP3); otherwise `'unsafe-inline'`/`*` allow
-/// it. A policy with no effective directive does not restrict scripts.
-fn policy_allows_script(policy: &str, nonce: Option<&str>) -> bool {
+/// Whether one CSP policy allows an inline `<script>` with the given `nonce` and
+/// `body`. The effective directive is `script-src`, else `default-src`. If it lists
+/// any `'nonce-…'` or `'sha256/384/512-…'` source, the script must match one
+/// (nonce by attribute, hash by base64 digest of its body) and `'unsafe-inline'`
+/// is ignored (per CSP3); otherwise `'unsafe-inline'`/`*` allow it. A policy with
+/// no effective directive does not restrict scripts.
+fn policy_allows_script(policy: &str, nonce: Option<&str>, body: &str) -> bool {
     let Some(tokens) = csp_directive(policy, "script-src").or_else(|| csp_directive(policy, "default-src"))
     else {
         return true; // not restricted by this policy
     };
     let toks: Vec<&str> = tokens.split_whitespace().collect();
     let nonces: Vec<&str> = toks.iter().filter_map(|t| token_nonce(t)).collect();
-    if !nonces.is_empty() {
-        return nonce.is_some_and(|n| nonces.contains(&n));
+    let hashes: Vec<(&str, &str)> = toks.iter().filter_map(|t| token_hash(t)).collect();
+    if !nonces.is_empty() || !hashes.is_empty() {
+        if nonce.is_some_and(|n| nonces.contains(&n)) {
+            return true;
+        }
+        return hashes
+            .iter()
+            .any(|(algo, val)| script_hash_b64(body, algo).as_deref() == Some(val));
     }
     toks.iter().any(|t| {
         *t == "*" || t.trim_matches('\'').eq_ignore_ascii_case("unsafe-inline")
@@ -1035,6 +1042,56 @@ fn token_nonce(tok: &str) -> Option<&str> {
     } else {
         None
     }
+}
+
+/// Extract `(algorithm, base64-digest)` from a `'sha256-…'`/`'sha384-…'`/
+/// `'sha512-…'` source token, or `None` for any other token.
+fn token_hash(tok: &str) -> Option<(&'static str, &str)> {
+    let inner = tok.strip_prefix('\'')?.strip_suffix('\'')?;
+    for algo in ["sha256", "sha384", "sha512"] {
+        if inner.len() > algo.len()
+            && inner.as_bytes()[algo.len()] == b'-'
+            && inner[..algo.len()].eq_ignore_ascii_case(algo)
+        {
+            return Some((algo, &inner[algo.len() + 1..]));
+        }
+    }
+    None
+}
+
+/// The base64 (standard alphabet, padded) digest of `body` under `algo`.
+fn script_hash_b64(body: &str, algo: &str) -> Option<String> {
+    let bytes = body.as_bytes();
+    Some(match algo {
+        "sha256" => base64_encode(&purecrypto::hash::sha256(bytes)),
+        "sha384" => base64_encode(&purecrypto::hash::sha384(bytes)),
+        "sha512" => base64_encode(&purecrypto::hash::sha512(bytes)),
+        _ => return None,
+    })
+}
+
+/// Standard-alphabet base64 encode with `=` padding.
+fn base64_encode(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        out.push(T[(b0 >> 2) as usize] as char);
+        out.push(T[(((b0 & 0x3) << 4) | (b1 >> 4)) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            T[(((b1 & 0xf) << 2) | (b2 >> 6)) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(b2 & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 /// Every `<meta http-equiv="Content-Security-Policy">` policy string (lowercased).
@@ -2780,6 +2837,40 @@ mod tests {
         let mut doc2 = argus_html::parse(html2);
         apply_scripts(&mut doc2);
         assert_eq!(text_of(&doc2, "o"), "after", "matching nonce runs");
+    }
+
+    #[test]
+    fn base64_and_sha256_known_vector() {
+        // SHA-256("abc") base64 — the value CSP uses for 'sha256-…'.
+        let h = super::script_hash_b64("abc", "sha256").unwrap();
+        assert_eq!(h, "ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=");
+    }
+
+    #[test]
+    fn csp_hash_allows_matching_inline_script() {
+        // A 'sha256-…' source: the script whose body hashes to it runs; a different
+        // inline script (no matching hash, no unsafe-inline) is blocked.
+        let body = "document.getElementById('o').textContent = 'after';";
+        let hash = super::script_hash_b64(body, "sha256").unwrap();
+        let html = format!(
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'sha256-{hash}'\">\
+             <div id=\"o\">before</div>\
+             <script>{body}</script>"
+        );
+        let mut doc = argus_html::parse(&html);
+        apply_scripts(&mut doc);
+        assert_eq!(text_of(&doc, "o"), "after", "matching hash runs");
+
+        // A policy with a non-matching hash blocks the same script.
+        let html2 = format!(
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'sha256-{}'\">\
+             <div id=\"o\">before</div>\
+             <script>{body}</script>",
+            super::script_hash_b64("different", "sha256").unwrap()
+        );
+        let mut doc2 = argus_html::parse(&html2);
+        apply_scripts(&mut doc2);
+        assert_eq!(text_of(&doc2, "o"), "before", "non-matching hash blocks");
     }
 
     #[test]
