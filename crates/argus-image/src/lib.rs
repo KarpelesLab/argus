@@ -11,6 +11,9 @@
 //! AVIF awaits a working AV1 pixel decoder (oxideav-av1 is currently stubbed).
 //! See `docs/subsystems/media.md`.
 
+mod woff2;
+pub use woff2::woff2_to_sfnt;
+
 /// A decoded image: `width * height * 4` straight-alpha RGBA bytes.
 #[derive(Clone, Debug)]
 pub struct DecodedImage {

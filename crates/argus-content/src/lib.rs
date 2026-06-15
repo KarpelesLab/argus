@@ -305,9 +305,11 @@ impl Content {
                 log!("web font '{}' fetch failed", face.family);
                 continue;
             }
-            // WOFF (v1) wraps an sfnt with zlib-compressed tables; unwrap it so the
-            // TTF/OTF parser can read it. Raw sfnt bytes pass through unchanged.
-            let bytes = argus_image::woff_to_sfnt(&bytes).unwrap_or(bytes);
+            // WOFF2 (Brotli) and WOFF (zlib) wrap an sfnt; unwrap to a bare sfnt the
+            // TTF/OTF parser can read. Raw sfnt bytes pass through unchanged.
+            let bytes = argus_image::woff2_to_sfnt(&bytes)
+                .or_else(|| argus_image::woff_to_sfnt(&bytes))
+                .unwrap_or(bytes);
             if let Some(font) = self.font.take() {
                 self.font = Some(font.with_web_font(key, bytes));
                 log!("loaded web font '{}' ({} bytes)", face.family, face.src_url.len());
@@ -516,6 +518,46 @@ fn enter_sandbox() {
 #[cfg(test)]
 mod tests {
     use super::edit_value;
+
+    #[test]
+    fn woff2_decodes_to_a_parseable_font() {
+        // Validate the WOFF2 decoder against any real .woff2 on disk: the
+        // reconstructed sfnt must parse as a font and shape text. Skips if none
+        // is present (so CI without sample fonts still passes).
+        let mut dir_candidates: Vec<std::path::PathBuf> = Vec::new();
+        for base in ["/private/tmp", "/tmp"] {
+            if let Ok(rd) = std::fs::read_dir(base) {
+                for e in rd.flatten() {
+                    if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        dir_candidates.push(e.path().join("doc/static.files"));
+                    }
+                }
+            }
+        }
+        let mut tested = false;
+        for dir in dir_candidates {
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|s| s.to_str()) != Some("woff2") {
+                    continue;
+                }
+                let Ok(bytes) = std::fs::read(&p) else { continue };
+                let sfnt = argus_image::woff2_to_sfnt(&bytes)
+                    .unwrap_or_else(|| panic!("woff2 decode failed for {p:?}"));
+                let font = argus_gfx::Font::from_bytes(sfnt)
+                    .unwrap_or_else(|e| panic!("reconstructed sfnt rejected ({p:?}): {e}"));
+                assert!(font.measure("Hello", 16.0) > 0.0, "shapes text from {p:?}");
+                tested = true;
+            }
+            if tested {
+                break;
+            }
+        }
+        if !tested {
+            eprintln!("no .woff2 sample found; skipping end-to-end check");
+        }
+    }
 
     #[test]
     fn edit_value_appends_and_backspaces() {

@@ -376,7 +376,8 @@ fn choose_font_src(value: &str) -> Option<String> {
         let rank = match fmt.as_str() {
             "truetype" | "opentype" | "ttf" | "otf" | "sfnt" => 0,
             "woff" => 1,
-            // woff2/eot/svg or unknown: skip (can't decode).
+            "woff2" => 2, // Brotli-wrapped sfnt — decodable, but prefer raw/woff.
+            // eot/svg or unknown: skip (can't decode).
             _ => continue,
         };
         if best.as_ref().is_none_or(|(r, _)| rank < *r) {
@@ -785,13 +786,17 @@ mod tests {
         assert_eq!(sheet.font_faces.len(), 1);
         assert_eq!(sheet.font_faces[0].family, "inter", "quotes stripped, lowercased");
         assert_eq!(sheet.font_faces[0].src_url, "inter.ttf", "ttf preferred over woff/woff2");
-        // woff is chosen when no raw sfnt is offered.
+        // woff is chosen over woff2 when no raw sfnt is offered (lower rank wins).
         let woff = parse_stylesheet(
-            "@font-face { font-family: A; src: url(a.woff2), url(a.woff) format('woff') }",
+            "@font-face { font-family: A; src: url(a.woff2) format('woff2'), \
+             url(a.woff) format('woff') }",
         );
         assert_eq!(woff.font_faces[0].src_url, "a.woff");
-        // A face with only undecodable sources (woff2-only) is dropped.
-        let none = parse_stylesheet("@font-face { font-family: B; src: url(b.woff2) format('woff2') }");
+        // A woff2-only face is now accepted (Brotli-decodable), not dropped.
+        let w2 = parse_stylesheet("@font-face { font-family: B; src: url(b.woff2) format('woff2') }");
+        assert_eq!(w2.font_faces[0].src_url, "b.woff2");
+        // A truly undecodable face (eot/svg only) is dropped.
+        let none = parse_stylesheet("@font-face { font-family: C; src: url(c.eot) format('embedded-opentype') }");
         assert!(none.font_faces.is_empty());
         // A face missing src entirely is dropped.
         assert!(parse_stylesheet("@font-face { font-family: NoSrc }").font_faces.is_empty());
