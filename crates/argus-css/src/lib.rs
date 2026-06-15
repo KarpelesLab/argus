@@ -31,10 +31,21 @@ pub struct Rule {
     pub media: Option<String>,
 }
 
+/// An `@font-face` rule: a web-font `family` name bound to a downloadable `src`.
+#[derive(Clone, PartialEq, Debug)]
+pub struct FontFace {
+    /// The declared `font-family` name, lowercased (matched against used families).
+    pub family: String,
+    /// The first `url(...)` from `src` (relative to the stylesheet's base URL).
+    pub src_url: String,
+}
+
 /// A parsed stylesheet.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
+    /// `@font-face` rules collected from the sheet (used to fetch web fonts).
+    pub font_faces: Vec<FontFace>,
 }
 
 impl Stylesheet {
@@ -52,6 +63,7 @@ impl Stylesheet {
                 })
                 .cloned()
                 .collect(),
+            font_faces: self.font_faces.clone(),
         }
     }
 }
@@ -61,8 +73,9 @@ impl Stylesheet {
 pub fn parse_stylesheet(css: &str) -> Stylesheet {
     let tokens = tokenizer::tokenize(css);
     let mut rules = Vec::new();
-    parse_rules_into(&tokens, None, &mut rules);
-    let mut sheet = Stylesheet { rules };
+    let mut font_faces = Vec::new();
+    parse_rules_into(&tokens, None, &mut rules, &mut font_faces);
+    let mut sheet = Stylesheet { rules, font_faces };
     resolve_custom_properties(&mut sheet);
     sheet
 }
@@ -168,7 +181,12 @@ fn substitute_vars(
 
 /// Parse qualified rules from `tokens`, tagging each with `media` (the enclosing
 /// `@media` condition, if any). `@media` blocks recurse; other at-rules are skipped.
-fn parse_rules_into(tokens: &[Token], media: Option<&str>, rules: &mut Vec<Rule>) {
+fn parse_rules_into(
+    tokens: &[Token],
+    media: Option<&str>,
+    rules: &mut Vec<Rule>,
+    font_faces: &mut Vec<FontFace>,
+) {
     let mut i = 0;
     while i < tokens.len() {
         skip_ws(tokens, &mut i);
@@ -179,6 +197,7 @@ fn parse_rules_into(tokens: &[Token], media: Option<&str>, rules: &mut Vec<Rule>
         if let Token::AtKeyword(name) = &tokens[i] {
             let is_media = name.eq_ignore_ascii_case("media");
             let is_supports = name.eq_ignore_ascii_case("supports");
+            let is_font_face = name.eq_ignore_ascii_case("font-face");
             i += 1;
             // Capture the prelude (the media query) up to '{' or ';'.
             let prelude_start = i;
@@ -194,11 +213,15 @@ fn parse_rules_into(tokens: &[Token], media: Option<&str>, rules: &mut Vec<Rule>
                     let block = &tokens[block_start..i.saturating_sub(1).max(block_start)];
                     if is_media {
                         // Nested media combines conservatively to the inner query.
-                        parse_rules_into(block, Some(&query), rules);
+                        parse_rules_into(block, Some(&query), rules, font_faces);
                     } else if is_supports {
                         // Include the block only if we support the feature query.
                         if supports_condition(&query) {
-                            parse_rules_into(block, media, rules);
+                            parse_rules_into(block, media, rules, font_faces);
+                        }
+                    } else if is_font_face {
+                        if let Some(face) = font_face_from_block(block) {
+                            font_faces.push(face);
                         }
                     }
                 }
@@ -246,6 +269,33 @@ fn parse_rules_into(tokens: &[Token], media: Option<&str>, rules: &mut Vec<Rule>
             media: media.map(|m| m.to_string()),
         });
     }
+}
+
+/// Build a [`FontFace`] from an `@font-face` block's declarations, requiring both a
+/// `font-family` and a `src` with at least one `url(...)`. Returns `None` if either
+/// is missing.
+fn font_face_from_block(block: &[Token]) -> Option<FontFace> {
+    let decls = parse_declarations(block);
+    let family = decls
+        .iter()
+        .find(|d| d.name == "font-family")
+        .map(|d| d.value.trim().trim_matches(|c| c == '"' || c == '\'').to_ascii_lowercase())
+        .filter(|f| !f.is_empty())?;
+    let src_url = decls
+        .iter()
+        .find(|d| d.name == "src")
+        .and_then(|d| extract_first_url(&d.value))?;
+    Some(FontFace { family, src_url })
+}
+
+/// Extract the first `url(...)` target from a CSS value, stripping quotes and
+/// surrounding whitespace.
+fn extract_first_url(value: &str) -> Option<String> {
+    let start = value.find("url(")? + 4;
+    let rest = &value[start..];
+    let end = rest.find(')')?;
+    let url = rest[..end].trim().trim_matches(|c| c == '"' || c == '\'').trim();
+    (!url.is_empty()).then(|| url.to_string())
 }
 
 /// Whether an `@supports` condition is satisfied. Handles `(prop: value)` feature
@@ -554,6 +604,23 @@ mod tests {
         let sheet = parse_stylesheet(css);
         assert_eq!(sheet.rules.len(), 1, "only the p rule survives");
         assert_eq!(sheet.rules[0].declarations[0].value, "green");
+        // The @font-face rule is now captured (family + url), not just skipped.
+        assert_eq!(sheet.font_faces.len(), 1);
+        assert_eq!(sheet.font_faces[0].family, "x");
+        assert_eq!(sheet.font_faces[0].src_url, "x.woff2");
+    }
+
+    #[test]
+    fn font_face_extracts_family_and_first_url() {
+        let css = "@font-face { font-family: \"Inter\"; \
+                   src: url('/fonts/inter.woff2') format('woff2'), url(inter.ttf) }";
+        let sheet = parse_stylesheet(css);
+        assert_eq!(sheet.font_faces.len(), 1);
+        assert_eq!(sheet.font_faces[0].family, "inter", "quotes stripped, lowercased");
+        assert_eq!(sheet.font_faces[0].src_url, "/fonts/inter.woff2", "first url, quotes stripped");
+        // A face missing src is dropped.
+        let none = parse_stylesheet("@font-face { font-family: NoSrc }");
+        assert!(none.font_faces.is_empty());
     }
 
     #[test]
