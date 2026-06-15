@@ -303,7 +303,7 @@ pub fn dump_dom(url: Option<&str>) -> io::Result<String> {
     net.wait()?;
     // Reflect synchronous DOM mutations from the page's scripts (Phase 2).
     let mut doc = argus_html::parse(&html);
-    argus_domscript::apply_scripts(&mut doc);
+    argus_domscript::apply_scripts_with_url(&mut doc, url);
     Ok(doc.serialize())
 }
 
@@ -318,7 +318,7 @@ pub fn dump_a11y(url: Option<&str>) -> io::Result<String> {
     proto::send(net.channel(), Msg::Shutdown, &[])?;
     net.wait()?;
     let mut doc = argus_html::parse(&html);
-    argus_domscript::apply_scripts(&mut doc);
+    argus_domscript::apply_scripts_with_url(&mut doc, url);
     Ok(a11y_tree(&doc))
 }
 
@@ -437,7 +437,7 @@ pub fn dump_text(url: Option<&str>) -> io::Result<String> {
     proto::send(net.channel(), Msg::Shutdown, &[])?;
     net.wait()?;
     let mut doc = argus_html::parse(&html);
-    argus_domscript::apply_scripts(&mut doc);
+    argus_domscript::apply_scripts_with_url(&mut doc, url);
     Ok(render_text(&doc))
 }
 
@@ -452,7 +452,7 @@ pub fn dump_links(url: Option<&str>) -> io::Result<String> {
     proto::send(net.channel(), Msg::Shutdown, &[])?;
     net.wait()?;
     let mut doc = argus_html::parse(&html);
-    argus_domscript::apply_scripts(&mut doc);
+    argus_domscript::apply_scripts_with_url(&mut doc, url);
     Ok(extract_links(&doc, url))
 }
 
@@ -467,7 +467,7 @@ pub fn dump_headings(url: Option<&str>) -> io::Result<String> {
     proto::send(net.channel(), Msg::Shutdown, &[])?;
     net.wait()?;
     let mut doc = argus_html::parse(&html);
-    argus_domscript::apply_scripts(&mut doc);
+    argus_domscript::apply_scripts_with_url(&mut doc, url);
     Ok(extract_headings(&doc))
 }
 

@@ -401,6 +401,13 @@ document.body = __argus_el({kind: "sel", val: "body"});
 document.documentElement = __argus_el({kind: "sel", val: "html"});
 var window = document.window = document;
 
+// `location`: a read-only-ish view of the page URL, seeded from the host. Scripts
+// commonly read `location.pathname`/`search`/`hash`/`href`. Assignments are not
+// reflected (no navigation in the reconciliation model).
+var location = window.location = __LOCATION__;
+document.location = location;
+document.URL = location.href;
+
 // Timers: there is no wall clock in the synchronous reconciliation model, so
 // scheduled callbacks are queued and drained (earliest delay first) after the
 // script + event dispatches run. This makes deferred-init patterns work; it does
@@ -493,14 +500,21 @@ pub struct Interaction {
 /// Returns the console output (minus the internal ops line) for logging.
 pub fn apply_scripts(doc: &mut Document) -> Option<String> {
     let mut storage = std::collections::HashMap::new();
-    run_scripts(doc, &[], &mut storage, &[])
+    run_scripts(doc, &[], &mut storage, &[], None)
+}
+
+/// Like [`apply_scripts`], but seeds `window.location` from `url` so scripts can
+/// read `location.href`/`pathname`/`search`/`hash`/etc.
+pub fn apply_scripts_with_url(doc: &mut Document, url: Option<&str>) -> Option<String> {
+    let mut storage = std::collections::HashMap::new();
+    run_scripts(doc, &[], &mut storage, &[], url)
 }
 
 /// Like [`apply_scripts`], but also replays `events` (deterministic event replay)
 /// with a throwaway storage (no cross-call persistence).
 pub fn apply_scripts_with_events(doc: &mut Document, events: &[Interaction]) -> Option<String> {
     let mut storage = std::collections::HashMap::new();
-    run_scripts(doc, events, &mut storage, &[])
+    run_scripts(doc, events, &mut storage, &[], None)
 }
 
 /// Like [`apply_scripts`], but also honors **header-delivered** Content-Security-
@@ -509,7 +523,7 @@ pub fn apply_scripts_with_events(doc: &mut Document, events: &[Interaction]) -> 
 /// blocked if *any* meta or header policy forbids them.
 pub fn apply_scripts_with_csp(doc: &mut Document, header_csp: &[String]) -> Option<String> {
     let mut storage = std::collections::HashMap::new();
-    run_scripts(doc, &[], &mut storage, header_csp)
+    run_scripts(doc, &[], &mut storage, header_csp, None)
 }
 
 /// The full session entry point: run scripts, replay `events`, and persist
@@ -520,7 +534,7 @@ pub fn apply_scripts_session(
     events: &[Interaction],
     storage: &mut std::collections::HashMap<String, String>,
 ) -> Option<String> {
-    run_scripts(doc, events, storage, &[])
+    run_scripts(doc, events, storage, &[], None)
 }
 
 fn run_scripts(
@@ -528,6 +542,7 @@ fn run_scripts(
     events: &[Interaction],
     storage: &mut std::collections::HashMap<String, String>,
     header_csp: &[String],
+    url: Option<&str>,
 ) -> Option<String> {
     // Content-Security-Policy (from <meta> and/or response headers) can forbid
     // inline scripts; a resource must satisfy every policy.
@@ -542,9 +557,11 @@ fn run_scripts(
     let seed = seed_json(doc);
     let tree = tree_json(doc);
     let storage_seed = storage_json(storage);
+    let location = location_json(url);
     let mut src = PRELUDE
         .replace("__SEED__", &seed)
         .replace("__TREE__", &tree)
+        .replace("__LOCATION__", &location)
         .replace("__STORAGE__", &storage_seed);
     for s in &scripts {
         src.push('\n');
@@ -606,6 +623,59 @@ fn storage_json(storage: &std::collections::HashMap<String, String>) -> String {
         .map(|(k, v)| format!("{}:{}", json_string(k), json_string(v)))
         .collect();
     format!("{{{}}}", entries.join(","))
+}
+
+/// Build the `location` seed object (`href`/`protocol`/`host`/`hostname`/`port`/
+/// `pathname`/`search`/`hash`/`origin`) from the page URL. An empty/absent URL
+/// yields blank fields.
+fn location_json(url: Option<&str>) -> String {
+    let href = url.unwrap_or("");
+    // scheme://authority/path?query#fragment
+    let (scheme, after_scheme) = match href.split_once("://") {
+        Some((s, rest)) => (s, rest),
+        None => ("", href),
+    };
+    // Split off the fragment, then the query.
+    let (before_hash, hash) = match after_scheme.split_once('#') {
+        Some((b, h)) => (b, format!("#{h}")),
+        None => (after_scheme, String::new()),
+    };
+    let (authority_path, search) = match before_hash.split_once('?') {
+        Some((b, q)) => (b, format!("?{q}")),
+        None => (before_hash, String::new()),
+    };
+    // Authority ends at the first '/' (the path start).
+    let (authority, path) = match authority_path.find('/') {
+        Some(i) => (&authority_path[..i], &authority_path[i..]),
+        None => (authority_path, ""),
+    };
+    let (hostname, port) = match authority.rsplit_once(':') {
+        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => (h, p),
+        _ => (authority, ""),
+    };
+    let protocol = if scheme.is_empty() {
+        String::new()
+    } else {
+        format!("{scheme}:")
+    };
+    let pathname = if path.is_empty() { "/" } else { path };
+    let origin = if scheme.is_empty() {
+        String::new()
+    } else {
+        format!("{scheme}://{authority}")
+    };
+    format!(
+        "{{\"href\":{},\"protocol\":{},\"host\":{},\"hostname\":{},\"port\":{},\"pathname\":{},\"search\":{},\"hash\":{},\"origin\":{}}}",
+        json_string(href),
+        json_string(&protocol),
+        json_string(authority),
+        json_string(hostname),
+        json_string(port),
+        json_string(pathname),
+        json_string(&search),
+        json_string(&hash),
+        json_string(&origin),
+    )
 }
 
 /// Whether Content-Security-Policy forbids inline scripts. Considers every policy —
@@ -1980,6 +2050,20 @@ mod tests {
             .collect();
         assert_eq!(kids, vec!["ab", "be"], "afterbegin first, beforeend last");
         assert_eq!(text_of(&doc, "t"), "ABmidBE");
+    }
+
+    #[test]
+    fn location_is_seeded_from_the_page_url() {
+        let mut doc = argus_html::parse(
+            "<div id=\"o\"></div>\
+             <script>\
+               var l = location;\
+               document.getElementById('o').textContent =\
+                 l.protocol + '|' + l.hostname + '|' + l.pathname + '|' + l.search + '|' + l.hash;\
+             </script>",
+        );
+        apply_scripts_with_url(&mut doc, Some("https://ex.com/a/b?q=1#frag"));
+        assert_eq!(text_of(&doc, "o"), "https:|ex.com|/a/b|?q=1|#frag");
     }
 
     #[test]
