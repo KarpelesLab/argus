@@ -2573,30 +2573,50 @@ impl Ctx<'_> {
             let istyle = computed_style(self.doc, item, &style, self.author);
             let cspan = (istyle.grid_column_span.max(1) as usize).min(cols);
             let rspan = istyle.grid_row_span.max(1) as usize;
-            // Explicit column line (`grid-column: 2 / …`) pins the column and scans
-            // rows top-down for the first fit; otherwise auto-flow from the cursor.
+            // Explicit `grid-column`/`grid-row` lines pin an item's column/row; a
+            // pinned-only axis scans the other for the first fit. Otherwise the item
+            // auto-flows from the cursor.
             let explicit_col = istyle.grid_column_start.map(|line| {
                 (line.saturating_sub(1) as usize).min(cols.saturating_sub(cspan))
             });
-            let (mut r, mut c) = match explicit_col {
-                Some(col) => (0usize, col),
-                None => cursor,
+            let explicit_row = istyle.grid_row_start.map(|l| l.saturating_sub(1) as usize);
+            let (r, c) = match (explicit_row, explicit_col) {
+                // Fully pinned: place exactly (cells may overlap, as CSS allows).
+                (Some(row), Some(col)) => (row, col),
+                // Row pinned: first free column in that row, else column 0.
+                (Some(row), None) => {
+                    let mut c = 0;
+                    while c + cspan <= cols && !free_at(&occ, row, c, cspan) {
+                        c += 1;
+                    }
+                    (row, if c + cspan > cols { 0 } else { c })
+                }
+                // Column pinned: first free row scanning down.
+                (None, Some(col)) => {
+                    let mut r = 0;
+                    while !free_at(&occ, r, col, cspan) {
+                        r += 1;
+                    }
+                    (r, col)
+                }
+                // Auto-placed: next free slot from the cursor.
+                (None, None) => {
+                    let (mut r, mut c) = cursor;
+                    loop {
+                        if c + cspan > cols {
+                            r += 1;
+                            c = 0;
+                            continue;
+                        }
+                        if free_at(&occ, r, c, cspan) {
+                            break;
+                        }
+                        c += 1;
+                    }
+                    (r, c)
+                }
             };
-            loop {
-                if explicit_col.is_none() && c + cspan > cols {
-                    r += 1;
-                    c = 0;
-                    continue;
-                }
-                if free_at(&occ, r, c, cspan) {
-                    break;
-                }
-                if explicit_col.is_some() {
-                    r += 1;
-                } else {
-                    c += 1;
-                }
-            }
+            let auto_placed = explicit_row.is_none() && explicit_col.is_none();
             // Mark the span's cells occupied (growing the occupancy grid as needed).
             while occ.len() < r + rspan {
                 occ.push([false; GRID_MAX_TRACKS]);
@@ -2616,7 +2636,7 @@ impl Ctx<'_> {
                 width,
             });
             // Only auto-placed items advance the auto-placement cursor.
-            if explicit_col.is_none() {
+            if auto_placed {
                 cursor = (r, c + cspan);
             }
         }
@@ -6013,6 +6033,25 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         assert!((bx - 208.0).abs() < 6.0, "b in the third column, got {bx}");
         // "c" wraps to the next row, back under "a".
         assert!(cy > ay + 10.0 && (cx - ax).abs() < 2.0, "c under a on row 2");
+    }
+
+    #[test]
+    fn grid_line_based_row_placement() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Two columns. "a" is pinned to row 2 / column 1 even though it's first in
+        // source; "b" auto-flows into row 1. So "a" sits below "b".
+        let html = "<div style=\"display:grid; width:200px; grid-template-columns: repeat(2,1fr)\">\
+                      <div style=\"grid-row: 2; grid-column: 1; height:30px\">a</div>\
+                      <div style=\"height:30px\">b</div>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let ay = l.runs.iter().find(|r| r.text == "a").unwrap().baseline;
+        let by = l.runs.iter().find(|r| r.text == "b").unwrap().baseline;
+        assert!(ay > by + 10.0, "row-2 item 'a' sits below row-1 'b': {by} vs {ay}");
     }
 
     #[test]
