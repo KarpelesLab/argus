@@ -462,6 +462,8 @@ impl TreeBuilder {
     }
 
     fn start_in_body(&mut self, name: &str, attrs: &[(String, String)], _self_closing: bool) {
+        // The spec renames the legacy `<image>` start tag to `<img>`.
+        let name = if name == "image" { "img" } else { name };
         // Ignore re-openings of the structural elements.
         if matches!(name, "html" | "head" | "body") {
             return;

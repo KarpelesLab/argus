@@ -581,4 +581,37 @@ hi</textarea>
 |         <tr>
 |           <td>
 |             "D"
+
+#data
+<image src="x.png">
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <img>
+|       src="x.png"
+
+#data
+<div id="a" id="b">x</div>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <div>
+|       id="a"
+|       "x"
+
+#data
+<p><b><i>deep</p>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <p>
+|       <b>
+|         <i>
+|           "deep"
 "####;
