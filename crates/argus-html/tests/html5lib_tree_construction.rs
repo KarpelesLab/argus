@@ -475,4 +475,53 @@ Just text
 |     <p>
 |       "a"
 |     <!-- c -->
+
+#data
+<table><td>x</table>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <table>
+|       <tbody>
+|         <tr>
+|           <td>
+|             "x"
+
+#data
+<select><option>a<option>b</select>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <select>
+|       <option>
+|         "a"
+|       <option>
+|         "b"
+
+#data
+<textarea>
+hi</textarea>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <textarea>
+|       "hi"
+
+#data
+<button>a<button>b
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <button>
+|       "a"
+|     <button>
+|       "b"
 "####;

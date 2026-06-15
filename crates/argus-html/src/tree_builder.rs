@@ -93,6 +93,9 @@ struct TreeBuilder {
     open: Vec<NodeId>,
     mode: Mode,
     head: Option<NodeId>,
+    /// Set after a `<pre>`/`<listing>`/`<textarea>` start tag: a single newline at
+    /// the very start of that element's text is dropped (HTML's "ignore the LF").
+    ignore_lf: bool,
 }
 
 impl TreeBuilder {
@@ -102,6 +105,7 @@ impl TreeBuilder {
             open: Vec::new(),
             mode: Mode::Initial,
             head: None,
+            ignore_lf: false,
         }
     }
 
@@ -379,10 +383,21 @@ impl TreeBuilder {
     fn m_in_body(&mut self, tok: &Token) -> bool {
         match tok {
             Token::Characters(s) => {
+                // Drop one leading newline immediately after <pre>/<textarea>/<listing>.
+                if self.ignore_lf {
+                    self.ignore_lf = false;
+                    if let Some(rest) = s.strip_prefix('\n') {
+                        if !rest.is_empty() {
+                            self.insert_text(rest);
+                        }
+                        return false;
+                    }
+                }
                 self.insert_text(s);
                 false
             }
             Token::Comment(s) => {
+                self.ignore_lf = false;
                 let p = self.current();
                 self.insert_comment_in(p, s);
                 false
@@ -394,10 +409,12 @@ impl TreeBuilder {
                 attrs,
                 self_closing,
             } => {
+                self.ignore_lf = false;
                 self.start_in_body(name, attrs, *self_closing);
                 false
             }
             Token::EndTag { name } => {
+                self.ignore_lf = false;
                 self.end_in_body(name);
                 false
             }
@@ -446,6 +463,19 @@ impl TreeBuilder {
                 self.insert_and_push("tr", &[]);
             }
         }
+        // A new <option> closes an open <option>; <optgroup> closes an open option
+        // and optgroup (select children are siblings, not nested).
+        if matches!(name, "option" | "optgroup") && self.is_named(self.current(), "option") {
+            self.open.pop();
+        }
+        if name == "optgroup" && self.is_named(self.current(), "optgroup") {
+            self.open.pop();
+        }
+        // A new <button> in button scope closes the open one.
+        if name == "button" && self.has_in_scope("button", false) {
+            self.generate_implied_end_tags(None);
+            self.pop_until("button");
+        }
         if HEADINGS.contains(&name) {
             if let Some(n) = self.name_of(self.current()) {
                 if HEADINGS.contains(&n) {
@@ -457,6 +487,10 @@ impl TreeBuilder {
             self.insert_element(name, attrs);
         } else {
             self.insert_and_push(name, attrs);
+        }
+        // These elements drop a single leading newline in their text content.
+        if matches!(name, "pre" | "listing" | "textarea") {
+            self.ignore_lf = true;
         }
     }
 
