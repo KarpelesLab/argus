@@ -1074,7 +1074,11 @@ fn csp_policies(doc: &Document, header_csp: &[String]) -> Vec<String> {
 /// is ignored (per CSP3); otherwise `'unsafe-inline'`/`*` allow it. A policy with
 /// no effective directive does not restrict scripts.
 fn policy_allows_script(policy: &str, nonce: Option<&str>, body: &str) -> bool {
-    let Some(tokens) = csp_directive(policy, "script-src").or_else(|| csp_directive(policy, "default-src"))
+    // CSP3 precedence for a `<script>` element: script-src-elem → script-src →
+    // default-src. The first present directive governs.
+    let Some(tokens) = csp_directive(policy, "script-src-elem")
+        .or_else(|| csp_directive(policy, "script-src"))
+        .or_else(|| csp_directive(policy, "default-src"))
     else {
         return true; // not restricted by this policy
     };
@@ -2874,6 +2878,25 @@ mod tests {
                 "script should run for: {policy:?}"
             );
         }
+    }
+
+    #[test]
+    fn csp_script_src_elem_takes_precedence() {
+        // `script-src-elem` governs a <script> element over `script-src`.
+        let run = |content: &str| -> String {
+            let html = format!(
+                "<meta http-equiv=\"Content-Security-Policy\" content=\"{content}\">\
+                 <div id=\"o\">before</div>\
+                 <script>document.getElementById('o').textContent = 'after';</script>"
+            );
+            let mut doc = argus_html::parse(&html);
+            apply_scripts(&mut doc);
+            text_of(&doc, "o")
+        };
+        // script-src-elem 'none' blocks even though script-src allows inline.
+        assert_eq!(run("script-src 'unsafe-inline'; script-src-elem 'none'"), "before");
+        // script-src-elem 'unsafe-inline' allows even though script-src is 'self'.
+        assert_eq!(run("script-src 'self'; script-src-elem 'unsafe-inline'"), "after");
     }
 
     #[test]
