@@ -7,7 +7,7 @@
 //! (`oxideav-ico`, largest sub-image) — plus uncompressed 24/32-bit BMP, **TGA**
 //! (Truevision true-color + grayscale, uncompressed + RLE), **Netpbm** (PPM/PGM,
 //! ASCII + binary), **PCX** (RLE 24-bit + 8-bit palette), **TIFF** (baseline
-//! uncompressed + PackBits + LZW + Deflate RGB/grayscale, both byte orders), all built in, and `data:` URLs.
+//! uncompressed + PackBits + LZW + Deflate RGB/grayscale, horizontal predictor, both byte orders), all built in, and `data:` URLs.
 //! AVIF and lossy-WebP
 //! (VP8) decode here once that glue lands. See `docs/subsystems/media.md`.
 
@@ -612,6 +612,7 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
     let mut compression = 1u32;
     let mut photometric = 1u32;
     let mut samples = 1u32;
+    let mut predictor = 1u32;
     let mut strip_offsets: Vec<u32> = Vec::new();
     let mut strip_counts: Vec<u32> = Vec::new();
     for i in 0..count {
@@ -638,6 +639,7 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
             259 => compression = first,
             262 => photometric = first,
             277 => samples = first,
+            317 => predictor = first,
             273 => strip_offsets = vals,
             279 => strip_counts = vals,
             _ => {}
@@ -649,6 +651,10 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
         return None;
     }
     if !matches!((samples, photometric), (3, 2) | (1, 0) | (1, 1)) {
+        return None;
+    }
+    // Predictor: 1 = none, 2 = horizontal differencing (undone after decompress).
+    if !matches!(predictor, 1 | 2) {
         return None;
     }
     if (width as u64) * (height as u64) > 64_000_000 || strip_offsets.is_empty() {
@@ -671,6 +677,20 @@ fn decode_tiff(bytes: &[u8]) -> Option<DecodedImage> {
             8 | 32946 => deflate_decode_tiff(strip, &mut data, total)?,
             32773 => packbits_decode(strip, &mut data),
             _ => return None,
+        }
+    }
+    // Undo horizontal differencing (predictor 2): each sample is stored as its
+    // delta from the same channel's previous pixel in the row; prefix-sum per row.
+    if predictor == 2 {
+        let row = w * spp;
+        for r in 0..h {
+            let base = r * row;
+            if base + row > data.len() {
+                break;
+            }
+            for x in spp..row {
+                data[base + x] = data[base + x].wrapping_add(data[base + x - spp]);
+            }
         }
     }
     let mut rgba = vec![0u8; w * h * 4];
@@ -1104,6 +1124,49 @@ mod tests {
         assert_eq!(img.rgba[4], 20);
         assert_eq!(img.rgba[8], 30);
         assert_eq!(img.rgba[12], 40);
+    }
+
+    #[test]
+    fn decodes_predictor2_rgb_tiff() {
+        // 3x1 RGB, Deflate + horizontal-differencing predictor (tag 317 = 2).
+        // Original pixels: (10,20,30), (40,50,60), (70,80,90).
+        let orig = [10u8, 20, 30, 40, 50, 60, 70, 80, 90];
+        // Encode the per-row, per-channel deltas the predictor expects.
+        let mut diff = orig;
+        for x in (3..diff.len()).rev() {
+            diff[x] = orig[x].wrapping_sub(orig[x - 3]);
+        }
+        let strip =
+            compcol::vec::compress_to_vec::<compcol::zlib::Zlib>(&diff).expect("zlib compress");
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(b"II");
+        b.extend_from_slice(&42u16.to_le_bytes());
+        let ifd_off = 8 + strip.len() as u32;
+        b.extend_from_slice(&ifd_off.to_le_bytes());
+        b.extend_from_slice(&strip);
+        let entry = |b: &mut Vec<u8>, tag: u16, ty: u16, val: u32| {
+            b.extend_from_slice(&tag.to_le_bytes());
+            b.extend_from_slice(&ty.to_le_bytes());
+            b.extend_from_slice(&1u32.to_le_bytes());
+            b.extend_from_slice(&val.to_le_bytes());
+        };
+        b.extend_from_slice(&10u16.to_le_bytes()); // entry count
+        entry(&mut b, 256, 3, 3); // width
+        entry(&mut b, 257, 3, 1); // height
+        entry(&mut b, 258, 3, 8); // bits
+        entry(&mut b, 259, 3, 8); // Deflate
+        entry(&mut b, 262, 3, 2); // RGB
+        entry(&mut b, 273, 4, 8); // strip offset
+        entry(&mut b, 277, 3, 3); // samples
+        entry(&mut b, 278, 3, 1); // rows/strip
+        entry(&mut b, 279, 4, strip.len() as u32);
+        entry(&mut b, 317, 3, 2); // predictor = horizontal differencing
+        b.extend_from_slice(&0u32.to_le_bytes());
+        let img = decode(&b).expect("decode predictor tiff");
+        assert_eq!((img.width, img.height), (3, 1));
+        assert_eq!(&img.rgba[0..3], &[10, 20, 30]);
+        assert_eq!(&img.rgba[4..7], &[40, 50, 60]);
+        assert_eq!(&img.rgba[8..11], &[70, 80, 90]);
     }
 
     #[test]
