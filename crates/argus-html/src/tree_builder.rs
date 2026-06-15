@@ -69,16 +69,19 @@ const CLOSES_P: &[&str] = &[
     "header",
     "hgroup",
     "hr",
+    "listing",
     "main",
     "menu",
     "nav",
     "ol",
     "p",
     "pre",
+    "search",
     "section",
     "summary",
     "table",
     "ul",
+    "xmp",
 ];
 
 const HEADINGS: &[&str] = &["h1", "h2", "h3", "h4", "h5", "h6"];

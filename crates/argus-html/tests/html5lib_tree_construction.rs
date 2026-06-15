@@ -709,4 +709,16 @@ a</br>b
 |         <tr>
 |           <td>
 |             "c"
+
+#data
+<p>x<search>y</search>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <p>
+|       "x"
+|     <search>
+|       "y"
 "####;
