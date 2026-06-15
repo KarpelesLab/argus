@@ -2151,12 +2151,19 @@ impl Ctx<'_> {
         let table_w = clamp_content_width(&style, table_w, avail);
         let col_w = table_w / num_cols as f32;
 
-        // A `<caption>` renders as a block spanning the table width, above the rows.
-        if let Some(cap) = self.doc.children(id).find(|&c| {
+        // A `<caption>` renders as a block spanning the table width, above the rows
+        // by default or below them for `caption-side: bottom`.
+        let caption = self.doc.children(id).find(|&c| {
             matches!(&self.doc.node(c).data, NodeData::Element(e) if e.name.is_html("caption"))
-        }) {
-            let cap_style = computed_style(self.doc, cap, &style, self.author);
-            self.layout_block(cap, cap_style, table_left, table_w, None);
+        });
+        let render_caption = |this: &mut Self| {
+            if let Some(cap) = caption {
+                let cap_style = computed_style(this.doc, cap, &style, this.author);
+                this.layout_block(cap, cap_style, table_left, table_w, None);
+            }
+        };
+        if !style.caption_side_bottom {
+            render_caption(self);
         }
 
         // Placement honoring colspan *and* rowspan: scan an occupancy grid so cells
@@ -2257,6 +2264,9 @@ impl Ctx<'_> {
             self.layout_block(p.cell, p.style, table_left + p.col as f32 * col_w, w, None);
         }
         self.cursor_y = table_top + row_h.iter().sum::<f32>();
+        if style.caption_side_bottom {
+            render_caption(self);
+        }
     }
 
     /// The `rowspan` of a table cell (defaults to 1, clamped to `>= 1`).
@@ -3707,6 +3717,36 @@ mod tests {
             x_of("a")
         );
         assert!(x_of("y") > x_of("b"), "y should be past column 2");
+    }
+
+    #[test]
+    fn caption_side_bottom_renders_caption_below() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let cap_baseline = |css: &str| -> f32 {
+            let html = format!(
+                "<table style=\"{css}\"><caption>CAP</caption><tr><td>cell</td></tr></table>"
+            );
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 300.0, &ImageSizes::new());
+            l.runs.iter().find(|r| r.text == "CAP").unwrap().baseline
+        };
+        let cell_baseline = |css: &str| -> f32 {
+            let html = format!(
+                "<table style=\"{css}\"><caption>CAP</caption><tr><td>cell</td></tr></table>"
+            );
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 300.0, &ImageSizes::new());
+            l.runs.iter().find(|r| r.text == "cell").unwrap().baseline
+        };
+        // Default: caption above the cell. caption-side:bottom puts it below.
+        assert!(cap_baseline("") < cell_baseline(""), "default caption above");
+        assert!(
+            cap_baseline("caption-side:bottom") > cell_baseline("caption-side:bottom"),
+            "caption-side:bottom puts caption below the rows"
+        );
     }
 
     #[test]

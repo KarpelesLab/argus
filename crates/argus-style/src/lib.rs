@@ -303,6 +303,8 @@ pub struct ComputedStyle {
     pub text_transform: TextTransform,
     /// `box-sizing` — how `width` maps to the box model (not inherited).
     pub box_sizing: BoxSizing,
+    /// `caption-side: bottom` — render a table `<caption>` below the rows.
+    pub caption_side_bottom: bool,
     /// `line-height` as a multiple of `font-size` (inherited).
     pub line_height: f32,
     /// `text-indent` for the first line, in pixels (inherited).
@@ -391,6 +393,7 @@ impl ComputedStyle {
             list_style: ListStyle::Disc,
             text_transform: TextTransform::None,
             box_sizing: BoxSizing::ContentBox,
+            caption_side_bottom: false,
             line_height: 1.2,
             text_indent: 0.0,
             word_spacing: 0.0,
@@ -597,6 +600,7 @@ pub fn computed_style(
         pre_wrap: parent.pre_wrap,               // white-space inherits
         break_word: parent.break_word,           // overflow-wrap inherits
         accent_color: parent.accent_color,       // accent-color inherits
+        caption_side_bottom: parent.caption_side_bottom, // caption-side inherits
         text_shadow: parent.text_shadow,         // text-shadow inherits
         list_style: parent.list_style,           // list-style-type inherits
         text_transform: parent.text_transform,   // text-transform inherits
@@ -921,6 +925,9 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             "border-box" => BoxSizing::BorderBox,
             _ => BoxSizing::ContentBox,
         };
+    }
+    if let Some(v) = map.get("caption-side") {
+        cs.caption_side_bottom = v.trim() == "bottom";
     }
     // `gap` shorthand: `<row-gap> [<column-gap>]` (column defaults to row).
     if let Some(v) = map.get("gap").or_else(|| map.get("grid-gap")) {
