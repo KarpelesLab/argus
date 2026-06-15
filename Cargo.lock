@@ -115,12 +115,16 @@ dependencies = [
  "oxideav-avif",
  "oxideav-core",
  "oxideav-gif",
+ "oxideav-h264",
  "oxideav-ico",
  "oxideav-mjpeg",
+ "oxideav-mkv",
+ "oxideav-mp4",
  "oxideav-pixfmt",
  "oxideav-png",
  "oxideav-qoi",
  "oxideav-vp8",
+ "oxideav-vp9",
  "oxideav-webp",
 ]
 
@@ -622,6 +626,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxideav-h264"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "80c22eb7eff820df297f481f44ba95f7c424c1734a1977e9d29ff4b91263984c"
+dependencies = [
+ "oxideav-core",
+ "thiserror",
+]
+
+[[package]]
 name = "oxideav-ico"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -637,6 +651,24 @@ name = "oxideav-mjpeg"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52af3762738a9512f85e555447522aaacff4b339f1696a7e9bb890c405593f48"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-mkv"
+version = "0.0.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcad7166c4f1c39531320d6adbbcc129e66a6eaa1c7c19d82d119d693ef31a74"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-mp4"
+version = "0.0.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5bc426bb6e2ca3ebd48a550d5a45e493259a429ba6bdae53516df88ef8965b10"
 dependencies = [
  "oxideav-core",
 ]
@@ -714,6 +746,15 @@ name = "oxideav-vp8"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7b865e8b2e1235d596774797b704c02d956835b1f7f24069c89b65faf4bb90a"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-vp9"
+version = "0.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc3595d980a80d4a875ebb4e58bb203e985e27e818353543528099414a20147f"
 dependencies = [
  "oxideav-core",
 ]

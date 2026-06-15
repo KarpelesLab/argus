@@ -1085,7 +1085,7 @@ impl Ctx<'_> {
                         self.flush_words(&mut words, &style, content_left, content_w);
                         pending_space = false;
                         let mstyle = computed_style(self.doc, child, &style, self.author);
-                        self.place_media(e, &mstyle, content_left, content_w);
+                        self.place_media(e, child, &mstyle, content_left, content_w);
                     }
                     NodeData::Element(e)
                         if e.name.is_html("progress") || e.name.is_html("meter") =>
@@ -1832,15 +1832,36 @@ impl Ctx<'_> {
     /// a lighter centered play square) or a thin control bar (audio), sized by the
     /// `width`/`height` attributes or the HTML defaults. A `<video poster>` paints
     /// the poster image instead when its size is known.
-    fn place_media(&mut self, e: &ElementData, istyle: &ComputedStyle, x: f32, avail: f32) {
+    fn place_media(&mut self, e: &ElementData, id: NodeId, istyle: &ComputedStyle, x: f32, avail: f32) {
         if istyle.hidden {
             return;
         }
         let is_audio = e.name.is_html("audio");
-        // A poster with a known size renders as the video frame.
+        // The first sized candidate renders as the video frame: the `poster`
+        // image, else the video's own `src`, else each `<source>` child. The
+        // src/source candidates carry the decoded *first frame* of the video —
+        // `argus_image::decode` routes container bytes through the demux pipeline,
+        // so these resolve once the upstream pixel codecs land (unsized until
+        // then, falling through to the placeholder box below).
         if !is_audio {
-            if let Some(poster) = e.attr("poster") {
-                if let Some(&(iw, ih)) = self.image_sizes.get(poster) {
+            let mut candidates: Vec<String> = Vec::new();
+            if let Some(p) = e.attr("poster") {
+                candidates.push(p.to_string());
+            }
+            if let Some(s) = e.attr("src") {
+                candidates.push(s.to_string());
+            }
+            for c in self.doc.children(id) {
+                if let NodeData::Element(se) = &self.doc.node(c).data {
+                    if se.name.is_html("source") {
+                        if let Some(s) = se.attr("src") {
+                            candidates.push(s.to_string());
+                        }
+                    }
+                }
+            }
+            for key in &candidates {
+                if let Some(&(iw, ih)) = self.image_sizes.get(key) {
                     let w = e
                         .attr("width")
                         .and_then(|v| v.parse::<f32>().ok())
@@ -1856,7 +1877,7 @@ impl Ctx<'_> {
                             y: self.cursor_y,
                             w,
                             h,
-                            src: poster.to_string(),
+                            src: key.clone(),
                             crop: (0.0, 0.0, 1.0, 1.0),
                             clip: None,
                         });
@@ -5965,6 +5986,37 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         let l2 = layout(&doc2, &font, 600.0, &sizes);
         assert_eq!(l2.images.len(), 1, "poster rendered as image");
         assert_eq!(l2.images[0].src, "p.jpg");
+
+        // A sized `src` (the decoded first frame) renders when there is no poster.
+        let mut sizes2 = ImageSizes::new();
+        sizes2.insert("clip.mp4".to_string(), (320, 180));
+        let doc3 = parse("<video src=\"clip.mp4\"></video>");
+        let l3 = layout(&doc3, &font, 600.0, &sizes2);
+        assert_eq!(l3.images.len(), 1, "video first frame rendered");
+        assert_eq!(l3.images[0].src, "clip.mp4");
+
+        // A `<source>` child is the fallback when neither poster nor src is set.
+        let mut sizes3 = ImageSizes::new();
+        sizes3.insert("clip.webm".to_string(), (160, 90));
+        let doc4 = parse("<video><source src=\"clip.webm\" type=\"video/webm\"></video>");
+        let l4 = layout(&doc4, &font, 600.0, &sizes3);
+        assert_eq!(l4.images.len(), 1, "source first frame rendered");
+        assert_eq!(l4.images[0].src, "clip.webm");
+
+        // Poster wins over src when both are present and sized.
+        let mut sizes4 = ImageSizes::new();
+        sizes4.insert("p.jpg".to_string(), (320, 180));
+        sizes4.insert("clip.mp4".to_string(), (320, 180));
+        let doc5 = parse("<video poster=\"p.jpg\" src=\"clip.mp4\"></video>");
+        let l5 = layout(&doc5, &font, 600.0, &sizes4);
+        assert_eq!(l5.images.len(), 1);
+        assert_eq!(l5.images[0].src, "p.jpg", "poster preferred over src frame");
+
+        // No sized candidate → the dark placeholder box (unchanged behavior).
+        let doc6 = parse("<video src=\"clip.mp4\"></video>");
+        let l6 = layout(&doc6, &font, 600.0, &ImageSizes::new());
+        assert!(l6.images.is_empty(), "unsized video → placeholder, no image");
+        assert!(l6.rects.iter().any(|r| r.color.r < 0x40), "placeholder box");
     }
 
     #[test]

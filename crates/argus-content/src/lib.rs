@@ -527,6 +527,30 @@ fn collect_img_srcs(doc: &argus_dom::Document, viewport_w: f32) -> Vec<String> {
                 if let Some(src) = argus_layout::resolve_img_url(doc, id, viewport_w) {
                     out.push(src);
                 }
+            } else if e.name.is_html("video") {
+                // A `<video>` renders its `poster` (an image) or — once the video
+                // pixel codecs land — the first frame of its own `src`. Both are
+                // decoded through `argus_image::decode` (which routes container
+                // bytes to the demux pipeline). Keyed by the raw attribute, same
+                // as `<img>`; the browser resolves relative URLs at fetch time.
+                if let Some(poster) = e.attr("poster") {
+                    out.push(poster.to_string());
+                }
+                if let Some(src) = e.attr("src") {
+                    out.push(src.to_string());
+                }
+            } else if e.name.is_html("source") {
+                // A `<source>` inside `<video>`/`<audio>` (the `<picture>` case is
+                // handled via `resolve_img_url` on the sibling `<img>`).
+                if let Some(parent) = doc.node(id).parent() {
+                    if let argus_dom::NodeData::Element(pe) = &doc.node(parent).data {
+                        if pe.name.is_html("video") || pe.name.is_html("audio") {
+                            if let Some(src) = e.attr("src") {
+                                out.push(src.to_string());
+                            }
+                        }
+                    }
+                }
             }
         }
         for child in doc.children(id) {

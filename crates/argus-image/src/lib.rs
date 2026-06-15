@@ -13,6 +13,15 @@
 //! [`decode_avif`]. The upstream AV1 pixel-reconstruction pipeline is an in-progress
 //! rebuild, so decoding is graceful-`None` today (broken-image fallback) and renders
 //! real pixels once that decoder lands — no further changes needed here.
+//!
+//! **Video** (`<video>` first frame / poster still) is wired the same way through
+//! the first-party demux + decode pipeline: [`decode_video_frame`] probes the
+//! container (`oxideav-mp4` for MP4/MOV, `oxideav-mkv` for Matroska/WebM), opens a
+//! demuxer, finds the first video stream, and decodes its first frame via the pixel
+//! codecs (`oxideav-h264`, `oxideav-vp9`, `oxideav-av1`). `decode` routes non-AVIF
+//! `ftyp` boxes and EBML (`1A45DFA3`) bytes here. Those pixel codecs are upstream
+//! work-in-progress, so this is graceful-`None` today and renders real frames once
+//! they land — no further changes needed here.
 //! See `docs/subsystems/media.md`.
 
 mod woff2;
@@ -68,6 +77,16 @@ pub fn decode(bytes: &[u8]) -> Option<DecodedImage> {
             .any(|b| b == b"avif" || b == b"avis")
     {
         return decode_avif(bytes);
+    }
+    // Video containers — render the first frame as the poster still. ISOBMFF
+    // (MP4/MOV: any other `ftyp` brand) or Matroska/WebM (EBML magic). The demux
+    // pipeline is wired forward-compatibly; the pixel codecs are upstream WIP, so
+    // this returns None (broken-image fallback) until they land. See
+    // `decode_video_frame`.
+    if (bytes.len() > 12 && &bytes[4..8] == b"ftyp")
+        || bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3])
+    {
+        return decode_video_frame(bytes);
     }
     if bytes.starts_with(b"qoif") {
         return decode_qoi(bytes);
@@ -168,6 +187,66 @@ fn decode_avif(bytes: &[u8]) -> Option<DecodedImage> {
         .ok()?;
     let frame = dec.receive_arena_frame().ok()?;
     frame_to_rgba(&frame)
+}
+
+/// Decode the **first video frame** of a container (MP4/MOV or Matroska/WebM) to
+/// RGBA — the poster/first-frame still for a `<video>` element.
+///
+/// This wires the first-party oxideav demux + decode pipeline forward-compatibly:
+/// the containers (`oxideav-mp4`, `oxideav-mkv`) probe + open and expose streams
+/// today, but the video pixel codecs (`oxideav-h264`, `oxideav-vp9`, `oxideav-av1`)
+/// are upstream work-in-progress and emit no frames yet, so this returns `None`
+/// gracefully (broken-image fallback). It renders real frames the moment those
+/// decoders land — no argus changes needed. See [[argus-deferred-features]].
+pub fn decode_video_frame(bytes: &[u8]) -> Option<DecodedImage> {
+    use oxideav_core::{MediaType, RuntimeContext};
+    use std::io::Cursor;
+
+    let mut ctx = RuntimeContext::new();
+    // Containers (probe + demux).
+    oxideav_mp4::register(&mut ctx);
+    oxideav_mkv::register(&mut ctx);
+    // Video pixel codecs (all first-party; upstream WIP — no frames yet).
+    oxideav_h264::register(&mut ctx);
+    oxideav_vp9::register(&mut ctx);
+    oxideav_av1::register(&mut ctx);
+
+    // Identify the container, then open a demuxer over the bytes.
+    let mut probe = Cursor::new(bytes);
+    let container = ctx.containers.probe_input(&mut probe, None).ok()?;
+    let mut demux = ctx
+        .containers
+        .open_demuxer(&container, Box::new(Cursor::new(bytes.to_vec())), &ctx.codecs)
+        .ok()?;
+
+    // Pick the first video stream; clone its params so the immutable borrow of
+    // `streams()` ends before we mutably pull packets.
+    let (vindex, vparams) = {
+        let s = demux
+            .streams()
+            .iter()
+            .find(|s| s.params.media_type == MediaType::Video)?;
+        (s.index, s.params.clone())
+    };
+    let mut dec = ctx.codecs.first_decoder(&vparams).ok()?;
+
+    // Feed packets from the video stream until a frame pops out (or we run dry).
+    for _ in 0..100_000 {
+        let pkt = match demux.next_packet() {
+            Ok(p) => p,
+            Err(_) => break, // Eof or read error
+        };
+        if pkt.stream_index != vindex {
+            continue;
+        }
+        if dec.send_packet(&pkt).is_err() {
+            continue;
+        }
+        if let Ok(frame) = dec.receive_arena_frame() {
+            return frame_to_rgba(&frame);
+        }
+    }
+    None
 }
 
 /// Decode a WebP: lossless (VP8L) via `oxideav-webp`, or lossy (VP8 key frame)
@@ -1329,6 +1408,34 @@ mod tests {
                 let _ = decode(&bytes); // graceful today; the point is "no panic"
             }
         }
+    }
+
+    #[test]
+    fn video_containers_are_routed_and_handled_gracefully() {
+        // A non-AVIF ISOBMFF `ftyp` (MP4 `isom` brand) must route to the video
+        // first-frame path, not the AVIF path. The pixel codecs are upstream WIP,
+        // so this decodes to `None` (graceful fallback) and must never panic.
+        let mut mp4 = Vec::new();
+        mp4.extend_from_slice(&[0, 0, 0, 0x18]); // box size
+        mp4.extend_from_slice(b"ftyp");
+        mp4.extend_from_slice(b"isom"); // major brand (a real video brand)
+        mp4.extend_from_slice(&[0, 0, 0, 0]); // minor version
+        mp4.extend_from_slice(b"isomavc1"); // compatible brands
+        assert!(
+            decode(&mp4).is_none(),
+            "WIP video codec → graceful None, no panic"
+        );
+        // Called directly, the demux pipeline also yields None today (no frame).
+        assert!(decode_video_frame(&mp4).is_none());
+
+        // Matroska/WebM EBML magic must route the same way (no panic, None today).
+        let mkv = [0x1A, 0x45, 0xDF, 0xA3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert!(decode(&mkv).is_none());
+        assert!(decode_video_frame(&mkv).is_none());
+
+        // Truncated/garbage bytes that merely look video-ish must not panic.
+        assert!(decode_video_frame(b"\x1a\x45\xdf\xa3").is_none());
+        assert!(decode_video_frame(&[0; 4]).is_none());
     }
 
     #[test]
