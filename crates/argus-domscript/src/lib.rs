@@ -434,6 +434,18 @@ document.body = __argus_el({kind: "sel", val: "body"});
 document.documentElement = __argus_el({kind: "sel", val: "html"});
 var window = document.window = document;
 
+// Viewport metrics (the default headless/window viewport). Scripts read these for
+// responsive logic; scroll offsets are always 0 (no scrolling in this model).
+window.innerWidth = 800;
+window.innerHeight = 600;
+window.scrollX = window.pageXOffset = 0;
+window.scrollY = window.pageYOffset = 0;
+window.devicePixelRatio = 1;
+window.scroll = window.scrollTo = window.scrollBy = function() {};
+window.screen = {
+  width: 800, height: 600, availWidth: 800, availHeight: 600, colorDepth: 24, pixelDepth: 24
+};
+
 // `location`: a read-only-ish view of the page URL, seeded from the host. Scripts
 // commonly read `location.pathname`/`search`/`hash`/`href`. Assignments are not
 // reflected (no navigation in the reconciliation model).
@@ -454,11 +466,33 @@ var navigator = window.navigator = {
   doNotTrack: null
 };
 
-// `matchMedia`: a conservative stub (nothing matches) with the listener surface,
-// so responsive-JS feature detection doesn't throw.
+// Evaluate the `(min-width: Npx)` / `(max-width: Npx)` features of a media query
+// against the viewport width (other features are treated as non-matching).
+function __evalMedia(q, vw) {
+  q = "" + q;
+  // OR over comma branches; AND over `and`-joined conditions in each branch.
+  var branches = q.split(",");
+  for (var b = 0; b < branches.length; b++) {
+    var conds = branches[b].toLowerCase().split("and");
+    var ok = true;
+    for (var c = 0; c < conds.length; c++) {
+      var cond = conds[c].replace(/^\s+|\s+$/g, "");
+      if (cond === "" || cond === "screen" || cond === "all") continue;
+      var m = cond.match(/\((min|max)-width:\s*([0-9.]+)px\)/);
+      if (m) {
+        var px = parseFloat(m[2]);
+        if (m[1] === "min" ? vw < px : vw > px) { ok = false; break; }
+      } else { ok = false; break; }
+    }
+    if (ok) return true;
+  }
+  return false;
+}
+// `matchMedia`: evaluates width queries against the viewport, with the listener
+// surface so responsive JS works (and doesn't throw).
 window.matchMedia = function(q) {
   return {
-    matches: false, media: "" + q, onchange: null,
+    matches: __evalMedia(q, window.innerWidth), media: "" + q, onchange: null,
     addListener: function() {}, removeListener: function() {},
     addEventListener: function() {}, removeEventListener: function() {},
     dispatchEvent: function() { return false; }
@@ -2184,18 +2218,20 @@ mod tests {
         let mut doc = argus_html::parse(
             "<div id=\"o\">x</div>\
              <script>\
-               var m = window.matchMedia('(min-width: 600px)');\
+               var wide = window.matchMedia('(min-width: 600px)');\
+               var narrow = window.matchMedia('(max-width: 500px)');\
                var obs = new MutationObserver(function(){});\
                obs.observe(document.body, {childList:true});\
                requestIdleCallback(function(){\
                  document.getElementById('o').textContent =\
-                   m.matches + '|' + m.media + '|' + (typeof obs.disconnect);\
+                   wide.matches + '|' + narrow.matches + '|' + (typeof obs.disconnect);\
                });\
              </script>",
         );
         apply_scripts(&mut doc);
-        // The idle callback ran during the drain; matchMedia/observer didn't throw.
-        assert_eq!(text_of(&doc, "o"), "false|(min-width: 600px)|function");
+        // Viewport is 800px: min-width:600 matches, max-width:500 does not; the idle
+        // callback ran during the drain and the observer didn't throw.
+        assert_eq!(text_of(&doc, "o"), "true|false|function");
     }
 
     #[test]
