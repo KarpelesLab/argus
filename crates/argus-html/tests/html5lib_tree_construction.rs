@@ -1551,4 +1551,39 @@ hi</pre>
 |       <i>
 |         "4"
 |       "5"
+
+#data
+<table><td>x
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <table>
+|       <tbody>
+|         <tr>
+|           <td>
+|             "x"
+
+#data
+<p>a</b>b
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <p>
+|       "ab"
+
+#data
+<a>1<a>2
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <a>
+|       "1"
+|     <a>
+|       "2"
 "####;
