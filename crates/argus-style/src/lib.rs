@@ -803,6 +803,14 @@ pub fn computed_style(
         text_shadow: parent.text_shadow,         // text-shadow inherits
         list_style: parent.list_style,           // list-style-type inherits
         list_style_inside: parent.list_style_inside, // list-style-position inherits
+        // text-decoration isn't an inherited property, but it *propagates* to
+        // descendant inline boxes; modeling it as inherited (with a child's own
+        // `text-decoration` overriding below) gives the right visible result, e.g.
+        // a link's nested `<span>` stays underlined.
+        underline: parent.underline,
+        strike: parent.strike,
+        overline: parent.overline,
+        decoration_color: parent.decoration_color,
         text_transform: parent.text_transform,   // text-transform inherits
         line_height: parent.line_height,         // line-height inherits
         text_indent: parent.text_indent,         // text-indent inherits
@@ -2137,6 +2145,29 @@ mod tests {
             let g = parse_linear_gradient(v).expect(v);
             assert_eq!(g.dir, GradientDir::ToRight, "{v}");
         }
+    }
+
+    #[test]
+    fn text_decoration_propagates_to_descendants() {
+        // <a><span>…</span></a>: the link's underline propagates to the span,
+        // but a child's explicit `text-decoration: none` removes it.
+        let mut doc = Document::new();
+        let a = one(&mut doc, "a", vec![Attribute::new("href", "/x")]);
+        let span = doc.create_element(QualName::html("span"), vec![]);
+        doc.append(a, span);
+        let plain = doc.create_element(
+            QualName::html("span"),
+            vec![Attribute::new("style", "text-decoration: none")],
+        );
+        doc.append(a, plain);
+
+        let author = Stylesheet::default();
+        let a_cs = computed_style(&doc, a, &ComputedStyle::initial(), &author);
+        assert!(a_cs.underline, "the link itself is underlined");
+        let span_cs = computed_style(&doc, span, &a_cs, &author);
+        assert!(span_cs.underline, "nested span inherits the underline");
+        let plain_cs = computed_style(&doc, plain, &a_cs, &author);
+        assert!(!plain_cs.underline, "text-decoration:none overrides the inherited one");
     }
 
     #[test]
