@@ -3,14 +3,17 @@
 //! This is a pragmatic subset of the WHATWG "tree construction" stage (§13.2.6).
 //! It implements the document skeleton (implicit `html`/`head`/`body` via the
 //! Initial→…→InBody insertion modes), void elements, the common implied-end-tag
-//! behavior (`<p>`, `<li>`, headings), and scoped end-tag matching — enough to
-//! build faithful trees for typical content. The harder machinery — the full
-//! table modes, the adoption agency algorithm for misnested formatting elements,
-//! foster parenting, and template contents — is deferred and tracked in
-//! `docs/subsystems/dom.md`. Conformance against html5lib-tests comes with it.
+//! behavior (`<p>`, `<li>`/`<dd>`/`<dt>`, headings), implicit table `tbody`/`tr`,
+//! table-text foster parenting, the `<image>`→`<img>` / `</br>` / empty-`</p>`
+//! quirks, and a basic subset of **SVG/MathML foreign content** (namespaced
+//! subtrees) — enough to build faithful trees for typical content. The harder
+//! machinery — full table modes, the adoption agency algorithm for misnested
+//! formatting elements, foreign-content integration points/breakout tags, and
+//! template contents — is deferred and tracked in `docs/subsystems/dom.md`.
+//! Conformance against html5lib-tests comes with it.
 
 use crate::tokenizer::{tokenize, Token};
-use argus_dom::{Attribute, Document, NodeData, NodeId, QualName};
+use argus_dom::{Attribute, Document, Namespace, NodeData, NodeId, QualName};
 
 /// Parse `input` into a [`Document`].
 pub fn parse(input: &str) -> Document {
@@ -162,6 +165,27 @@ impl TreeBuilder {
     fn insert_and_push(&mut self, name: &str, attrs: &[(String, String)]) -> NodeId {
         let id = self.insert_element(name, attrs);
         self.open.push(id);
+        id
+    }
+
+    /// The namespace of the current open element (HTML at the document root).
+    fn current_ns(&self) -> Namespace {
+        self.open
+            .last()
+            .and_then(|&id| self.doc.node(id).as_element())
+            .map(|e| e.name.ns)
+            .unwrap_or(Namespace::Html)
+    }
+
+    /// Insert an element in an explicit namespace (for SVG/MathML foreign content).
+    fn insert_element_ns(&mut self, ns: Namespace, name: &str, attrs: &[(String, String)]) -> NodeId {
+        let attrs = attrs
+            .iter()
+            .map(|(n, v)| Attribute::new(n.as_str(), v.as_str()))
+            .collect();
+        let id = self.doc.create_element(QualName::new(ns, name), attrs);
+        let parent = self.current();
+        self.doc.append(parent, id);
         id
     }
 
@@ -461,9 +485,30 @@ impl TreeBuilder {
         }
     }
 
-    fn start_in_body(&mut self, name: &str, attrs: &[(String, String)], _self_closing: bool) {
+    fn start_in_body(&mut self, name: &str, attrs: &[(String, String)], self_closing: bool) {
         // The spec renames the legacy `<image>` start tag to `<img>`.
         let name = if name == "image" { "img" } else { name };
+
+        // Foreign content (a basic subset): `<svg>`/`<math>` establish a namespace,
+        // and descendant elements inherit it until the subtree is popped. Inside
+        // foreign content the HTML-specific tree fixups below don't apply, and a
+        // self-closing tag inserts without pushing. (Breakout tags, integration
+        // points, and attribute/case adjustment are not yet modeled.)
+        let cur_ns = self.current_ns();
+        let ns = match name {
+            "svg" => Namespace::Svg,
+            "math" => Namespace::MathMl,
+            _ if cur_ns != Namespace::Html => cur_ns,
+            _ => Namespace::Html,
+        };
+        if ns != Namespace::Html {
+            let id = self.insert_element_ns(ns, name, attrs);
+            if !self_closing {
+                self.open.push(id);
+            }
+            return;
+        }
+
         // Ignore re-openings of the structural elements.
         if matches!(name, "html" | "head" | "body") {
             return;

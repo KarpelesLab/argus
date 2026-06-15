@@ -650,4 +650,30 @@ a</br>b
 |         <tr>
 |           <td>
 |             "c"
+
+#data
+<svg><circle/><rect/></svg>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <svg svg>
+|       <svg circle>
+|       <svg rect>
+
+#data
+<p>before<svg><g><text>t</text></g></svg>after</p>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <p>
+|       "before"
+|       <svg svg>
+|         <svg g>
+|           <svg text>
+|             "t"
+|       "after"
 "####;
