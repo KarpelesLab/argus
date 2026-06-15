@@ -732,4 +732,17 @@ a</br>b
 |     class="a"
 |     id="x"
 |     "hi"
+
+#data
+<p>a<table>b</table>c
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <p>
+|       "a"
+|     "b"
+|     <table>
+|     "c"
 "####;
