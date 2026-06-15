@@ -1082,7 +1082,9 @@ fn extract_jsonld(doc: &argus_dom::Document) -> String {
 /// Collect document metadata as `key: value` lines: `title`, `lang` (`<html lang>`),
 /// `charset`, `<meta name=…>` values (description/keywords/author/robots/viewport/
 /// theme-color), `<meta property=og:…>` / `name=twitter:…` social tags, and the
-/// `<link rel=canonical>` URL (resolved against `base`). Pure (no I/O), unit-testable.
+/// `<link>` URLs `canonical`, `icon` (favicon), `alternate:<lang>` hreflang
+/// variants, and RSS/Atom `feed`s (all resolved against `base`). Pure (no I/O),
+/// unit-testable.
 fn extract_meta(doc: &argus_dom::Document, base: Option<&str>) -> String {
     use argus_dom::{Document, NodeData, NodeId};
 
@@ -1133,9 +1135,20 @@ fn extract_meta(doc: &argus_dom::Document, base: Option<&str>) -> String {
                 }
             } else if e.name.is_html("link") {
                 let rel = e.attr("rel").unwrap_or("");
-                if rel.eq_ignore_ascii_case("canonical") {
-                    if let Some(href) = e.attr("href") {
+                let href = e.attr("href").filter(|h| !h.trim().is_empty());
+                if let Some(href) = href {
+                    if rel.eq_ignore_ascii_case("canonical") {
                         out.push(("canonical".to_string(), resolve_url(base, href)));
+                    } else if rel.split_ascii_whitespace().any(|t| t.eq_ignore_ascii_case("icon")) {
+                        // `icon` / `shortcut icon` — the favicon URL.
+                        out.push(("icon".to_string(), resolve_url(base, href)));
+                    } else if rel.eq_ignore_ascii_case("alternate") {
+                        // hreflang alternates (key includes the language) or RSS/Atom feeds.
+                        if let Some(lang) = e.attr("hreflang") {
+                            out.push((format!("alternate:{}", lang.to_ascii_lowercase()), resolve_url(base, href)));
+                        } else if e.attr("type").is_some_and(|t| t.contains("rss") || t.contains("atom")) {
+                            out.push(("feed".to_string(), resolve_url(base, href)));
+                        }
                     }
                 }
             }
@@ -1983,6 +1996,8 @@ mod tests {
                <meta name=\"description\" content=\"A   test   page\">\
                <meta property=\"og:title\" content=\"OG Title\">\
                <link rel=\"canonical\" href=\"/page\">\
+               <link rel=\"shortcut icon\" href=\"/favicon.ico\">\
+               <link rel=\"alternate\" hreflang=\"fr\" href=\"/fr/page\">\
              </head><body>x</body></html>",
         );
         let out = extract_meta(&doc, Some("https://site.example/dir/"));
@@ -1993,6 +2008,8 @@ mod tests {
         assert!(lines.contains(&"description: A test page"), "{out}");
         assert!(lines.contains(&"og:title: OG Title"), "{out}");
         assert!(lines.contains(&"canonical: https://site.example/page"), "{out}");
+        assert!(lines.contains(&"icon: https://site.example/favicon.ico"), "{out}");
+        assert!(lines.contains(&"alternate:fr: https://site.example/fr/page"), "{out}");
     }
 
     #[test]
