@@ -25,9 +25,10 @@
 //! selectors) / `createElement` / `body` / `write`, and on elements
 //! `textContent`/`innerText`,
 //! `innerHTML`, `className`, `setAttribute`/`getAttribute`, `style.<camelCase>`,
-//! `classList`, scoped `querySelector`/`querySelectorAll`, tree traversal
-//! (`parentNode`/`parentElement`, `children`, `first`/`lastElementChild`,
-//! `next`/`previousElementSibling`), and `appendChild`/`append`/`remove`.
+//! `classList`, scoped `querySelector`/`querySelectorAll`, `matches`/`closest`,
+//! tree traversal (`parentNode`/`parentElement`, `children`,
+//! `first`/`lastElementChild`, `next`/`previousElementSibling`), and
+//! `appendChild`/`append`/`remove`.
 
 use argus_dom::{Attribute, Document, NodeData, NodeId, QualName};
 
@@ -245,6 +246,21 @@ function __argus_el(tgt) {
       }
       if (k === "getElementsByClassName") {
         return function(c) { return __collectClass("" + c, __idxOf(tgt)); };
+      }
+      if (k === "matches") {
+        return function(sel) { var mn = __byIdx[__idxOf(tgt)]; return mn ? __matchSel(mn, "" + sel) : false; };
+      }
+      if (k === "closest") {
+        return function(sel) {
+          var cix = __idxOf(tgt);
+          while (cix >= 0) {
+            var cn = __byIdx[cix];
+            if (!cn) break;
+            if (__matchSel(cn, "" + sel)) return __argus_el({kind: "idx", val: cix});
+            cix = cn.p;
+          }
+          return null;
+        };
       }
       // --- Read-only tree traversal (resolved against the seeded __tree) ---
       if (k === "parentNode" || k === "parentElement") {
@@ -1629,6 +1645,24 @@ mod tests {
         assert_eq!(text_of(&doc, "in1"), "Q");
         assert_eq!(text_of(&doc, "in2"), "Q");
         assert_eq!(text_of(&doc, "out"), "z"); // outside #box, untouched
+    }
+
+    #[test]
+    fn matches_and_closest_for_delegation() {
+        // The event-delegation idiom: from a deep node, closest('.card') finds the
+        // ancestor, and matches() tests a selector against an element.
+        let mut doc = argus_html::parse(
+            "<div class=\"card\" id=\"card\"><div class=\"body\"><span id=\"deep\">x</span></div></div>\
+             <script>\
+               var hit = document.getElementById('deep').closest('.card');\
+               hit.setAttribute('data-found', 'yes');\
+               document.getElementById('card').setAttribute(\
+                 'data-self', document.getElementById('card').matches('div.card') ? 'y' : 'n');\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        assert_eq!(attr_of(&doc, "card", "data-found").as_deref(), Some("yes"));
+        assert_eq!(attr_of(&doc, "card", "data-self").as_deref(), Some("y"));
     }
 
     #[test]
