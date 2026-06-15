@@ -20,7 +20,10 @@
 //! the content process via [`apply_scripts_session`]) / `sessionStorage`
 //! (per-page). The DOM API surface includes:
 //! `document.getElementById` / `querySelector` (full CSS selector engine) /
-//! `createElement` / `body` / `write`, and on elements `textContent`/`innerText`,
+//! `querySelectorAll` / `getElementsByTagName` / `getElementsByClassName` (live
+//! collections resolved in JS against a seeded document-order element tree, simple
+//! selectors) / `createElement` / `body` / `write`, and on elements
+//! `textContent`/`innerText`,
 //! `innerHTML`, `className`, `setAttribute`/`getAttribute`, `style.<camelCase>`,
 //! `classList`, scoped `querySelector`, and `appendChild`/`append`/`remove`.
 
@@ -28,11 +31,110 @@ use argus_dom::{Attribute, Document, NodeData, NodeId, QualName};
 
 /// The JS prelude defining `document`, `window`, and proxy element handles.
 /// `__SEED__` is replaced with a JSON object of `{ id: { textContent, ... } }`.
-const PRELUDE: &str = r#"
+const PRELUDE: &str = r##"
 var __argus_ops = [];
 var __seed = __SEED__;
+// Full element tree in document order: each {i,t,id,c,p,tc} is index, tag, id,
+// class, parent index, text. Lets querySelectorAll/getElementsBy* run in JS-space.
+var __tree = __TREE__;
+var __byIdx = {};
+for (var __ti = 0; __ti < __tree.length; __ti++) { __byIdx[__tree[__ti].i] = __tree[__ti]; }
 var __argus_state = {};      // in-JS overlay so reads reflect prior writes this run
 var __argus_listeners = {};  // event listeners keyed by target, for replay dispatch
+// --- JS-side simple-selector matching over __tree (for the *All collections) ---
+function __isWord(ch) {
+  return (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") ||
+         (ch >= "0" && ch <= "9") || ch === "-" || ch === "_";
+}
+function __strim(s) {
+  s = "" + s; var a = 0, b = s.length;
+  while (a < b && s.charAt(a) <= " ") a++;
+  while (b > a && s.charAt(b - 1) <= " ") b--;
+  return s.substring(a, b);
+}
+// Match a single compound selector (tag / #id / .class / combos / '*'). Anything
+// with combinators, attributes, or pseudo-classes is unsupported → no match.
+function __matchCompound(node, sel) {
+  sel = __strim(sel);
+  if (sel === "") return false;
+  if (sel === "*") return true;
+  for (var k = 0; k < sel.length; k++) {
+    var c = sel.charAt(k);
+    if (c === " " || c === ">" || c === "+" || c === "~" || c === "[" ||
+        c === "]" || c === ":" || c === "(" || c === ")") return false;
+  }
+  var i = 0, tag = "";
+  while (i < sel.length) {
+    var ch0 = sel.charAt(i);
+    if ((ch0 >= "a" && ch0 <= "z") || (ch0 >= "A" && ch0 <= "Z") ||
+        (ch0 >= "0" && ch0 <= "9") || ch0 === "-") { tag += ch0; i++; } else break;
+  }
+  var needId = null, needClasses = [];
+  while (i < sel.length) {
+    var ch = sel.charAt(i++); var name = "";
+    while (i < sel.length && __isWord(sel.charAt(i))) { name += sel.charAt(i); i++; }
+    if (ch === "#") needId = name;
+    else if (ch === ".") needClasses.push(name);
+    else return false;
+  }
+  if (tag !== "" && tag !== "*" && tag.toLowerCase() !== ("" + node.t).toLowerCase()) return false;
+  if (needId !== null && needId !== node.id) return false;
+  for (var j = 0; j < needClasses.length; j++) {
+    var cl = " " + (node.c || "") + " ";
+    if (cl.indexOf(" " + needClasses[j] + " ") < 0) return false;
+  }
+  return true;
+}
+function __matchSel(node, sel) {
+  var parts = ("" + sel).split(",");
+  for (var i = 0; i < parts.length; i++) { if (__matchCompound(node, parts[i])) return true; }
+  return false;
+}
+// Is `node` a descendant of the element at index `rootIdx`? (-1 = whole document.)
+function __isDescendant(node, rootIdx) {
+  if (rootIdx < 0) return true;
+  var p = node.p;
+  while (p >= 0) { if (p === rootIdx) return true; p = __byIdx[p] ? __byIdx[p].p : -1; }
+  return false;
+}
+function __collectAll(sel, rootIdx) {
+  var out = [];
+  for (var i = 0; i < __tree.length; i++) {
+    var n = __tree[i];
+    if (!__isDescendant(n, rootIdx)) continue;
+    if (__matchSel(n, sel)) out.push(__argus_el({kind: "idx", val: n.i}));
+  }
+  return out;
+}
+function __collectTag(tag, rootIdx) {
+  var lt = ("" + tag).toLowerCase(); var out = [];
+  for (var i = 0; i < __tree.length; i++) {
+    var n = __tree[i];
+    if (!__isDescendant(n, rootIdx)) continue;
+    if (lt === "*" || ("" + n.t).toLowerCase() === lt) out.push(__argus_el({kind: "idx", val: n.i}));
+  }
+  return out;
+}
+function __collectClass(cls, rootIdx) {
+  var out = [];
+  for (var i = 0; i < __tree.length; i++) {
+    var n = __tree[i];
+    if (!__isDescendant(n, rootIdx)) continue;
+    var cl = " " + (n.c || "") + " ";
+    if (cl.indexOf(" " + cls + " ") >= 0) out.push(__argus_el({kind: "idx", val: n.i}));
+  }
+  return out;
+}
+// Resolve an element handle to its __tree index (for scoped collection queries).
+function __idxOf(tgt) {
+  if (tgt.kind === "idx") return tgt.val;
+  if (tgt.kind === "id") {
+    for (var i = 0; i < __tree.length; i++) if (__tree[i].id === tgt.val) return __tree[i].i;
+  } else if (tgt.kind === "sel") {
+    for (var j = 0; j < __tree.length; j++) if (__matchSel(__tree[j], tgt.val)) return __tree[j].i;
+  }
+  return -1;
+}
 function __sk(tgt) { return tgt.kind + "" + tgt.val; }
 function __reg(tgt, type, fn) {
   var key = __sk(tgt);
@@ -45,9 +147,15 @@ function __read(tgt, seed, k) {
   if (seed && seed[k] != null) return seed[k];
   return null;
 }
-// `tgt` is {kind:"id"|"sel", val:"..."}. Seeded reads are only available for ids.
+// `tgt` is {kind:"id"|"sel"|"idx"|"new"|"scoped", val:...}. Seeded reads come from
+// __seed for ids and from the __tree entry for idx handles (querySelectorAll results).
 function __argus_el(tgt) {
-  var seed = (tgt.kind === "id") ? __seed[tgt.val] : null;
+  var seed = null;
+  if (tgt.kind === "id") seed = __seed[tgt.val];
+  else if (tgt.kind === "idx") {
+    var __tn = __byIdx[tgt.val];
+    if (__tn) seed = {textContent: __tn.tc, "class": __tn.c, id: __tn.id};
+  }
   return new Proxy({}, {
     set: function(t, k, v) {
       // `on<event> = fn` registers an event listener; everything else is a prop.
@@ -127,6 +235,15 @@ function __argus_el(tgt) {
       if (k === "querySelector") {
         return function(sel) { return __argus_el({kind: "scoped", parent: tgt, val: "" + sel}); };
       }
+      if (k === "querySelectorAll") {
+        return function(sel) { return __collectAll("" + sel, __idxOf(tgt)); };
+      }
+      if (k === "getElementsByTagName") {
+        return function(tag) { return __collectTag("" + tag, __idxOf(tgt)); };
+      }
+      if (k === "getElementsByClassName") {
+        return function(c) { return __collectClass("" + c, __idxOf(tgt)); };
+      }
       var r = __read(tgt, seed, k);
       return r == null ? "" : r;
     }
@@ -150,6 +267,9 @@ var document = {
     __argus_ops.push({op: "create", nid: nid, tag: "" + tag});
     return __argus_el({kind: "new", val: nid});
   },
+  querySelectorAll: function(sel) { return __collectAll("" + sel, -1); },
+  getElementsByTagName: function(tag) { return __collectTag("" + tag, -1); },
+  getElementsByClassName: function(c) { return __collectClass("" + c, -1); },
   write: function(s) { __argus_ops.push({op: "write", value: "" + s}); }
 };
 document.body = __argus_el({kind: "sel", val: "body"});
@@ -232,7 +352,7 @@ var localStorage = __mkStorage(true);
 var sessionStorage = __mkStorage(false);
 window.localStorage = localStorage;
 window.sessionStorage = sessionStorage;
-"#;
+"##;
 
 /// One past interaction to replay: fire `event` on the element identified by
 /// `kind` (`"id"`/`"sel"`) + `val`. Replaying the full history each run lets JS
@@ -284,9 +404,11 @@ fn run_scripts(
     }
 
     let seed = seed_json(doc);
+    let tree = tree_json(doc);
     let storage_seed = storage_json(storage);
     let mut src = PRELUDE
         .replace("__SEED__", &seed)
+        .replace("__TREE__", &tree)
         .replace("__STORAGE__", &storage_seed);
     for s in &scripts {
         src.push('\n');
@@ -455,6 +577,56 @@ fn seed_json(doc: &Document) -> String {
     format!("{{{}}}", entries.join(","))
 }
 
+/// Build the `__tree` JSON: every element in **document order** as
+/// `{i, t, id, c, p, tc}` — index, tag, id, class, parent index (`-1` for the
+/// root-most element), and text content. The JS shim implements
+/// `querySelectorAll`/`getElementsByTagName`/`getElementsByClassName` against this,
+/// targeting matches by index `i`; Rust resolves `i` back to a node via a document
+/// -order snapshot taken before any ops mutate the tree (so indices stay stable).
+fn tree_json(doc: &Document) -> String {
+    let mut entries: Vec<String> = Vec::new();
+    fn walk(doc: &Document, id: NodeId, parent_idx: i64, entries: &mut Vec<String>) {
+        let mut my_idx = parent_idx;
+        if let NodeData::Element(e) = &doc.node(id).data {
+            my_idx = entries.len() as i64;
+            let tag = e.name.local.as_ref();
+            let elem_id = e.attr("id").unwrap_or("");
+            let class = e.attr("class").unwrap_or("");
+            entries.push(format!(
+                "{{\"i\":{},\"t\":{},\"id\":{},\"c\":{},\"p\":{},\"tc\":{}}}",
+                entries.len(),
+                json_string(tag),
+                json_string(elem_id),
+                json_string(class),
+                parent_idx,
+                json_string(&text_content(doc, id)),
+            ));
+        }
+        for child in doc.children(id) {
+            walk(doc, child, my_idx, entries);
+        }
+    }
+    walk(doc, doc.root(), -1, &mut entries);
+    format!("[{}]", entries.join(","))
+}
+
+/// A document-order snapshot of every element's [`NodeId`], matching `tree_json`'s
+/// indexing, so an `idx` op target resolves to a stable node even as later ops
+/// mutate the tree.
+fn element_snapshot(doc: &Document) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    fn walk(doc: &Document, id: NodeId, out: &mut Vec<NodeId>) {
+        if matches!(&doc.node(id).data, NodeData::Element(_)) {
+            out.push(id);
+        }
+        for c in doc.children(id) {
+            walk(doc, c, out);
+        }
+    }
+    walk(doc, doc.root(), &mut out);
+    out
+}
+
 /// The concatenated text of an element's descendants.
 fn text_content(doc: &Document, id: NodeId) -> String {
     let mut out = String::new();
@@ -484,6 +656,9 @@ fn apply_ops(
     };
     // Detached elements created by `document.createElement`, keyed by synthetic id.
     let mut created: HashMap<String, NodeId> = HashMap::new();
+    // Stable document-order element handles for `idx` targets (querySelectorAll &
+    // friends), captured before any op mutates the tree.
+    let snapshot = element_snapshot(doc);
 
     for op in ops {
         let Json::Obj(fields) = op else { continue };
@@ -537,7 +712,7 @@ fn apply_ops(
             continue;
         }
 
-        let Some(node) = resolve_target(doc, &created, get("tgt")) else {
+        let Some(node) = resolve_target(doc, &created, &snapshot, get("tgt")) else {
             continue;
         };
         match op_kind {
@@ -548,13 +723,13 @@ fn apply_ops(
             "class" => apply_class_list(doc, node, &key, &value),
             "remove" => doc.detach(node),
             "append" => {
-                if let Some(child) = resolve_target(doc, &created, get("child")) {
+                if let Some(child) = resolve_target(doc, &created, &snapshot, get("child")) {
                     doc.append(node, child);
                 }
             }
             "insertBefore" => {
-                if let Some(child) = resolve_target(doc, &created, get("child")) {
-                    match resolve_target(doc, &created, get("ref")) {
+                if let Some(child) = resolve_target(doc, &created, &snapshot, get("child")) {
+                    match resolve_target(doc, &created, &snapshot, get("ref")) {
                         Some(reference) => doc.insert_before(reference, child),
                         None => doc.append(node, child),
                     }
@@ -566,22 +741,37 @@ fn apply_ops(
 }
 
 /// Resolve a target descriptor to a node. `id`/`sel` resolve globally, `new`
-/// looks up a created element, and `scoped` finds the first descendant of a
-/// (recursively resolved) parent matching a selector.
+/// looks up a created element, `scoped` finds the first descendant of a
+/// (recursively resolved) parent matching a selector, and `idx` indexes the
+/// document-order element `snapshot` (for `querySelectorAll` & friends).
 fn resolve_target(
     doc: &Document,
     created: &std::collections::HashMap<String, NodeId>,
+    snapshot: &[NodeId],
     tgt: Option<&Json>,
 ) -> Option<NodeId> {
     let Some(Json::Obj(t)) = tgt else { return None };
     let f = |k: &str| t.iter().find(|(n, _)| n == k).and_then(|(_, v)| v.as_str());
+    let num = |k: &str| {
+        t.iter().find(|(n, _)| n == k).and_then(|(_, v)| match v {
+            Json::Num(x) => Some(*x),
+            _ => None,
+        })
+    };
     let obj = |k: &str| t.iter().find(|(n, _)| n == k).map(|(_, v)| v);
     match f("kind") {
         Some("id") => f("val").and_then(|v| find_by_id(doc, v)),
         Some("sel") => f("val").and_then(|v| find_by_selector(doc, v)),
         Some("new") => f("val").and_then(|v| created.get(v).copied()),
+        Some("idx") => {
+            let i = num("val")?;
+            if i < 0.0 {
+                return None;
+            }
+            snapshot.get(i as usize).copied()
+        }
         Some("scoped") => {
-            let parent = resolve_target(doc, created, obj("parent"))?;
+            let parent = resolve_target(doc, created, snapshot, obj("parent"))?;
             find_by_selector_within(doc, parent, f("val")?)
         }
         _ => None,
@@ -1348,6 +1538,63 @@ mod tests {
         );
         apply_scripts(&mut doc);
         assert_eq!(text_of(&doc, "out"), "async-ok");
+    }
+
+    #[test]
+    fn query_selector_all_iterates_and_mutates_matches() {
+        // The canonical pattern: select a class, loop, mutate each. All three must
+        // change — proving the JS-side collection enumerates the real tree.
+        let mut doc = argus_html::parse(
+            "<ul>\
+               <li class=\"item\" id=\"a\">1</li>\
+               <li class=\"item\" id=\"b\">2</li>\
+               <li class=\"other\" id=\"c\">3</li>\
+               <li class=\"item\" id=\"d\">4</li>\
+             </ul>\
+             <script>\
+               var xs = document.querySelectorAll('.item');\
+               for (var i = 0; i < xs.length; i++) { xs[i].textContent = 'hit'; }\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        assert_eq!(text_of(&doc, "a"), "hit");
+        assert_eq!(text_of(&doc, "b"), "hit");
+        assert_eq!(text_of(&doc, "c"), "3"); // .other was not selected
+        assert_eq!(text_of(&doc, "d"), "hit");
+    }
+
+    #[test]
+    fn get_elements_by_tag_name_and_class_name() {
+        let mut doc = argus_html::parse(
+            "<p id=\"p1\">a</p><p id=\"p2\">b</p><span class=\"x\" id=\"s1\">c</span>\
+             <script>\
+               var ps = document.getElementsByTagName('p');\
+               for (var i = 0; i < ps.length; i++) { ps[i].classList.add('seen'); }\
+               var xs = document.getElementsByClassName('x');\
+               xs[0].textContent = 'tagged';\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        assert_eq!(attr_of(&doc, "p1", "class").as_deref(), Some("seen"));
+        assert_eq!(attr_of(&doc, "p2", "class").as_deref(), Some("seen"));
+        assert_eq!(text_of(&doc, "s1"), "tagged");
+    }
+
+    #[test]
+    fn scoped_query_selector_all_limits_to_subtree() {
+        // el.querySelectorAll only enumerates descendants of that element.
+        let mut doc = argus_html::parse(
+            "<div id=\"box\"><b class=\"t\" id=\"in1\">x</b><b class=\"t\" id=\"in2\">y</b></div>\
+             <b class=\"t\" id=\"out\">z</b>\
+             <script>\
+               var hits = document.getElementById('box').querySelectorAll('.t');\
+               for (var i = 0; i < hits.length; i++) { hits[i].textContent = 'Q'; }\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        assert_eq!(text_of(&doc, "in1"), "Q");
+        assert_eq!(text_of(&doc, "in2"), "Q");
+        assert_eq!(text_of(&doc, "out"), "z"); // outside #box, untouched
     }
 
     #[test]

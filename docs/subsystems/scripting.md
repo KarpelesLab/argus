@@ -52,7 +52,10 @@ through a **JS-side `document`/`window` shim + post-execution reconciliation** i
 4. The recorded ops (JSON) are parsed in Rust and replayed into the real `Document`
    before layout.
 
-What works today: `getElementById`/`querySelector`/`createElement`/`body`/`write`,
+What works today: `getElementById`/`querySelector`/`querySelectorAll`/
+`getElementsByTagName`/`getElementsByClassName` (the *All collections run in JS against
+a seeded document-order element tree, supporting simple `tag`/`.class`/`#id`/`*`
+selectors, scoped to a subtree for the element-level methods)/`createElement`/`body`/`write`,
 element `textContent`/`innerHTML`/`className`/`setAttribute`/`style.*`/`classList`/
 `appendChild`/`insertBefore`/`remove`; **discrete events** (`addEventListener('click')`/
 `onclick` via deterministic replay); **timers** (`setTimeout`/`setInterval`, shim-queued
