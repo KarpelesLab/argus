@@ -878,11 +878,60 @@ pub fn computed_style(
 /// The generated `content` string for an element's `::before`/`::after`
 /// pseudo-element, if any author rule sets one (the highest-specificity winner).
 /// Returns `None` for `content: none`/`normal` or when there's no content.
+/// The cascade-winning raw value of a single property `prop` for `node` (UA +
+/// presentational hints + author + inline), or `None` if unset. Used for
+/// properties not stored in the (Copy) `ComputedStyle`, e.g. `counter-reset`.
+pub fn cascaded_value(doc: &Document, node: NodeId, author: &Stylesheet, prop: &str) -> Option<String> {
+    let mut cands = Vec::new();
+    let mut order = 0usize;
+    collect(ua_stylesheet(), Origin::Ua, doc, node, &mut cands, &mut order);
+    for (name, value) in presentational_hints(doc, node) {
+        cands.push(Cand {
+            rank: rank(Origin::Author, false),
+            spec: Specificity::default(),
+            order,
+            name,
+            value,
+        });
+        order += 1;
+    }
+    collect(author, Origin::Author, doc, node, &mut cands, &mut order);
+    if let NodeData::Element(e) = &doc.node(node).data {
+        if let Some(style) = e.attr("style") {
+            for d in parse_declaration_block(style) {
+                cands.push(Cand {
+                    rank: rank(Origin::Inline, d.important),
+                    spec: Specificity::default(),
+                    order,
+                    name: d.name,
+                    value: d.value,
+                });
+                order += 1;
+            }
+        }
+    }
+    cands.sort_by_key(|c| (c.rank, c.spec, c.order));
+    cands.into_iter().rfind(|c| c.name == prop).map(|c| c.value)
+}
+
+/// Whether any UA or author rule uses CSS counters (`counter-reset`/`-increment`
+/// or a `counter(`/`counters(` in a `content` value) — lets the layout skip the
+/// counter machinery entirely on the common no-counter page.
+pub fn uses_counters(author: &Stylesheet) -> bool {
+    ua_stylesheet().rules.iter().chain(author.rules.iter()).any(|r| {
+        r.declarations.iter().any(|d| {
+            matches!(d.name.as_str(), "counter-reset" | "counter-increment")
+                || (d.name == "content" && d.value.contains("counter("))
+        })
+    })
+}
+
 pub fn pseudo_content(
     doc: &Document,
     node: NodeId,
     author: &Stylesheet,
     which: argus_css::PseudoElement,
+    counters: &HashMap<String, i32>,
 ) -> Option<String> {
     let mut best: Option<(Specificity, usize, String)> = None;
     let mut order = 0usize;
@@ -912,13 +961,18 @@ pub fn pseudo_content(
     if v.eq_ignore_ascii_case("none") || v.eq_ignore_ascii_case("normal") {
         return None;
     }
-    Some(resolve_content(doc, node, v))
+    Some(resolve_content(doc, node, v, counters))
 }
 
 /// Resolve a `content` value into its rendered string: a sequence of quoted
 /// strings and `attr(<name>)` references, concatenated (other functions →
 /// empty). `attr()` reads the element's attribute (empty if absent, per spec).
-fn resolve_content(doc: &Document, node: NodeId, v: &str) -> String {
+fn resolve_content(
+    doc: &Document,
+    node: NodeId,
+    v: &str,
+    counters: &HashMap<String, i32>,
+) -> String {
     let mut out = String::new();
     let mut rest = v.trim();
     while !rest.is_empty() {
@@ -928,6 +982,16 @@ fn resolve_content(doc: &Document, node: NodeId, v: &str) -> String {
                 if let Some(val) = doc.node(node).as_element().and_then(|e| e.attr(name)) {
                     out.push_str(val);
                 }
+                rest = after[end + 1..].trim_start();
+                continue;
+            }
+        }
+        // `counter(<name>[, <style>])` outputs the named counter's current value
+        // (the optional list-style is ignored; default 0 if the counter is unset).
+        if let Some(after) = rest.strip_prefix("counter(") {
+            if let Some(end) = after.find(')') {
+                let name = after[..end].split(',').next().unwrap_or("").trim();
+                out.push_str(&counters.get(name).copied().unwrap_or(0).to_string());
                 rest = after[end + 1..].trim_start();
                 continue;
             }

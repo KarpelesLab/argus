@@ -134,6 +134,27 @@ fn srcset_best(srcset: &str) -> Option<&str> {
     best.map(|(u, _)| u)
 }
 
+/// Parse a `counter-reset`/`counter-increment` list (`name [int] name2 [int2] …`)
+/// into `(name, value)` pairs; a name with no following integer uses `default`.
+fn parse_counter_list(v: &str, default: i32) -> Vec<(String, i32)> {
+    let mut out = Vec::new();
+    let mut toks = v.split_whitespace().peekable();
+    while let Some(name) = toks.next() {
+        if name == "none" {
+            continue;
+        }
+        let n = match toks.peek().and_then(|t| t.parse::<i32>().ok()) {
+            Some(val) => {
+                toks.next();
+                val
+            }
+            None => default,
+        };
+        out.push((name.to_string(), n));
+    }
+    out
+}
+
 /// The marker for a list item, given its `list-style-type` and 1-based index
 /// among siblings. Returns `None` for `list-style-type: none`.
 fn list_marker(style: ListStyle, index: u32) -> Option<Marker> {
@@ -437,6 +458,8 @@ pub fn layout(doc: &Document, font: &Font, viewport_width: f32, images: &ImageSi
         cb_w: viewport_width,
         cb_h: None,
         viewport_w: viewport_width,
+        counters: HashMap::new(),
+        uses_counters: argus_style::uses_counters(&author),
     };
 
     let start = body_or_root(doc);
@@ -493,6 +516,11 @@ struct Ctx<'a> {
     cb_h: Option<f32>,
     /// Viewport width — the containing block used by `position: fixed`.
     viewport_w: f32,
+    /// CSS counter values (`counter-reset`/`-increment`), in document order, for
+    /// `counter()` in generated content. Empty/unused unless the page has counters.
+    counters: HashMap<String, i32>,
+    /// Whether any rule uses counters — gates the per-element counter work.
+    uses_counters: bool,
 }
 
 impl Ctx<'_> {
@@ -507,6 +535,9 @@ impl Ctx<'_> {
         avail: f32,
         marker: Option<Marker>,
     ) {
+        // CSS counters: apply this element's reset/increment (document order) so its
+        // generated content's `counter()` reflects the value.
+        self.apply_counter_ops(id);
         // For `position: relative`, remember where this subtree's display-list
         // items begin so they can all be shifted by the inset offset at the end.
         let ds_start = (
@@ -754,7 +785,7 @@ impl Ctx<'_> {
             let float_base = self.floats.len();
             // `::before` generated content is the element's first inline content.
             if let Some(text) =
-                argus_style::pseudo_content(self.doc, id, self.author, PseudoElement::Before)
+                argus_style::pseudo_content(self.doc, id, self.author, PseudoElement::Before, &self.counters)
             {
                 self.gather_generated(&text, &style, &mut words, &mut pending_space);
             }
@@ -1035,7 +1066,7 @@ impl Ctx<'_> {
             }
             // `::after` generated content is the element's last inline content.
             if let Some(text) =
-                argus_style::pseudo_content(self.doc, id, self.author, PseudoElement::After)
+                argus_style::pseudo_content(self.doc, id, self.author, PseudoElement::After, &self.counters)
             {
                 self.gather_generated(&text, &style, &mut words, &mut pending_space);
             }
@@ -1771,6 +1802,25 @@ impl Ctx<'_> {
 
     fn is_li(&self, id: NodeId) -> bool {
         matches!(&self.doc.node(id).data, NodeData::Element(e) if e.name.is_html("li"))
+    }
+
+    /// Apply `id`'s CSS `counter-reset` then `counter-increment` to the running
+    /// counter state (so the element's `::before`/`::after` `counter()` sees the
+    /// post-increment value). A no-op unless the page uses counters.
+    fn apply_counter_ops(&mut self, id: NodeId) {
+        if !self.uses_counters {
+            return;
+        }
+        if let Some(v) = argus_style::cascaded_value(self.doc, id, self.author, "counter-reset") {
+            for (name, val) in parse_counter_list(&v, 0) {
+                self.counters.insert(name, val);
+            }
+        }
+        if let Some(v) = argus_style::cascaded_value(self.doc, id, self.author, "counter-increment") {
+            for (name, val) in parse_counter_list(&v, 1) {
+                *self.counters.entry(name).or_insert(0) += val;
+            }
+        }
     }
 
     /// A `<li value="N">` override of the running list counter, if present.
@@ -3270,7 +3320,7 @@ impl Ctx<'_> {
                 // `::before`/`::after` generated content for inline elements (e.g.
                 // the UA quotes on `<q>`).
                 if let Some(t) =
-                    argus_style::pseudo_content(self.doc, id, self.author, PseudoElement::Before)
+                    argus_style::pseudo_content(self.doc, id, self.author, PseudoElement::Before, &self.counters)
                 {
                     self.gather_generated(&t, &cstyle, words, pending_space);
                 }
@@ -3278,7 +3328,7 @@ impl Ctx<'_> {
                     self.gather_inline(child, &cstyle, child_link.clone(), words, pending_space);
                 }
                 if let Some(t) =
-                    argus_style::pseudo_content(self.doc, id, self.author, PseudoElement::After)
+                    argus_style::pseudo_content(self.doc, id, self.author, PseudoElement::After, &self.counters)
                 {
                     self.gather_generated(&t, &cstyle, words, pending_space);
                 }
@@ -4458,6 +4508,28 @@ mod tests {
         let outside = marker_x("");
         let inside = marker_x("list-style-position: inside");
         assert!(inside > outside, "inside marker is further right: {outside} -> {inside}");
+    }
+
+    #[test]
+    fn css_counters_number_generated_content() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // counter-reset on the body, counter-increment per <h2>, and counter() in
+        // the ::before content → headings are auto-numbered 1, 2, 3.
+        let html = "<style>\
+                      body { counter-reset: section }\
+                      h2 { counter-increment: section }\
+                      h2::before { content: counter(section) '. ' }\
+                    </style>\
+                    <h2>Alpha</h2><h2>Beta</h2><h2>Gamma</h2>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let texts: Vec<&str> = l.runs.iter().map(|r| r.text.as_str()).collect();
+        assert!(texts.contains(&"1."), "first heading numbered 1: {texts:?}");
+        assert!(texts.contains(&"2."), "second heading numbered 2: {texts:?}");
+        assert!(texts.contains(&"3."), "third heading numbered 3: {texts:?}");
     }
 
     #[test]
