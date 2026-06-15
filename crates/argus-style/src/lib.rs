@@ -1395,7 +1395,7 @@ fn parse_linear_gradient(v: &str) -> Option<Gradient> {
         color_parts = &parts[1..];
     } else if let Some(deg) = first.strip_suffix("deg").and_then(|d| d.trim().parse::<f32>().ok()) {
         let a = ((deg % 360.0) + 360.0) % 360.0;
-        dir = if a < 45.0 || a >= 315.0 {
+        dir = if !(45.0..315.0).contains(&a) {
             GradientDir::ToTop
         } else if a < 135.0 {
             GradientDir::ToRight

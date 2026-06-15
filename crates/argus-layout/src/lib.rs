@@ -899,6 +899,35 @@ impl Ctx<'_> {
                     radius: 0.0,
                 });
             }
+            // `<input type=range>`: a thin track with a thumb at the value position.
+            if e.name.is_html("input") && ty == "range" && !style.hidden {
+                let num = |n: &str, d: f32| e.attr(n).and_then(|v| v.trim().parse().ok()).unwrap_or(d);
+                let (min, max) = (num("min", 0.0), num("max", 100.0));
+                let val = num("value", (min + max) / 2.0);
+                let frac = if max > min { ((val - min) / (max - min)).clamp(0.0, 1.0) } else { 0.0 };
+                let cy = border_box_top + border_box_h / 2.0;
+                let track_h = 4.0_f32.min(border_box_h);
+                let accent = style.accent_color.unwrap_or(argus_geometry::Color::rgb(0x2b, 0x6c, 0xde));
+                self.rects.push(RectFill {
+                    x: border_box_left,
+                    y: cy - track_h / 2.0,
+                    w: border_box_w,
+                    h: track_h,
+                    color: argus_geometry::Color::rgb(0xc0, 0xc0, 0xc0),
+                    radius: track_h / 2.0,
+                });
+                let thumb = border_box_h.clamp(8.0, 14.0);
+                let tx = (border_box_left + frac * border_box_w - thumb / 2.0)
+                    .clamp(border_box_left, border_box_left + border_box_w - thumb);
+                self.rects.push(RectFill {
+                    x: tx,
+                    y: cy - thumb / 2.0,
+                    w: thumb,
+                    h: thumb,
+                    color: accent,
+                    radius: thumb / 2.0,
+                });
+            }
         }
 
         // `outline`: four rects just outside the border box (no layout effect).
@@ -2972,6 +3001,34 @@ mod tests {
             line_count("overflow-wrap: break-word") > 1,
             "break-word splits the long word across lines"
         );
+    }
+
+    #[test]
+    fn input_type_range_renders_track_and_thumb() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // value=75 of 0..100 → thumb near 75% across a 100px-wide range.
+        let html = "<input type=\"range\" min=\"0\" max=\"100\" value=\"75\" style=\"width:100px; height:16px; accent-color:#2b6cde\">";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        // The wide gray track gives the slider's geometry; the thumb is the small
+        // accent-colored (blue) square.
+        let track = l
+            .rects
+            .iter()
+            .find(|r| r.w > 50.0 && r.h < 6.0 && r.color.r > 150 && r.color.r == r.color.b)
+            .expect("track rect");
+        let thumb = l
+            .rects
+            .iter()
+            .find(|r| r.color.b > 150 && r.color.r < 100 && r.w < 16.0 && r.w > 6.0)
+            .expect("thumb rect");
+        // Thumb center sits ~75% across the track.
+        let center = thumb.x + thumb.w / 2.0;
+        let expected = track.x + 0.75 * track.w;
+        assert!((center - expected).abs() < 6.0, "thumb at ~75%: {center} vs {expected}");
     }
 
     #[test]
