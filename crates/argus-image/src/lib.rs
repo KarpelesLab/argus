@@ -6,7 +6,8 @@
 //! (`oxideav-webp`, lossless), **QOI** (`oxideav-qoi`), and **ICO/CUR favicons**
 //! (`oxideav-ico`, largest sub-image) — plus uncompressed 24/32-bit BMP, **TGA**
 //! (Truevision true-color + grayscale, uncompressed + RLE), **Netpbm** (PPM/PGM,
-//! ASCII + binary), all built in, and `data:` URLs. AVIF, TIFF, and lossy-WebP
+//! ASCII + binary), **PCX** (RLE 24-bit + 8-bit palette), all built in, and
+//! `data:` URLs. AVIF, TIFF, and lossy-WebP
 //! (VP8) decode here once that glue lands. See `docs/subsystems/media.md`.
 
 /// A decoded image: `width * height * 4` straight-alpha RGBA bytes.
@@ -59,6 +60,10 @@ pub fn decode(bytes: &[u8]) -> Option<DecodedImage> {
     // Netpbm: `P2`/`P3`/`P5`/`P6` magic.
     if bytes.len() > 1 && bytes[0] == b'P' && matches!(bytes[1], b'2' | b'3' | b'5' | b'6') {
         return decode_netpbm(bytes);
+    }
+    // PCX: manufacturer byte 0x0A, version byte 0..=5.
+    if bytes.len() > 1 && bytes[0] == 0x0A && bytes[1] <= 5 {
+        return decode_pcx(bytes);
     }
     // TGA has no leading signature; try it last (it validates structurally).
     decode_tga(bytes)
@@ -460,6 +465,103 @@ fn decode_netpbm(bytes: &[u8]) -> Option<DecodedImage> {
     })
 }
 
+/// Decode a PCX (ZSoft PC Paintbrush) image: RLE-encoded, 8 bits-per-plane, with
+/// 3 planes (24-bit RGB) or 1 plane + a trailing 256-color palette (indexed).
+/// Other bit depths are not handled.
+fn decode_pcx(bytes: &[u8]) -> Option<DecodedImage> {
+    if bytes.len() < 128 || bytes[0] != 0x0A {
+        return None;
+    }
+    let rd_u16 = |o: usize| u16::from_le_bytes([bytes[o], bytes[o + 1]]);
+    let encoding = bytes[2];
+    let bpp = bytes[3]; // bits per pixel per plane
+    let xmin = rd_u16(4) as i32;
+    let ymin = rd_u16(6) as i32;
+    let xmax = rd_u16(8) as i32;
+    let ymax = rd_u16(10) as i32;
+    let planes = bytes[65];
+    let bytes_per_line = rd_u16(66) as usize;
+    if encoding != 1 || bpp != 8 || !matches!(planes, 1 | 3) {
+        return None;
+    }
+    let width = (xmax - xmin + 1).max(0) as usize;
+    let height = (ymax - ymin + 1).max(0) as usize;
+    if width == 0 || height == 0 || (width as u64) * (height as u64) > 64_000_000 {
+        return None;
+    }
+    let nplanes = planes as usize;
+    if bytes_per_line < width {
+        return None;
+    }
+
+    // RLE-decode each scanline into `nplanes * bytes_per_line` bytes per row.
+    let mut p = 128usize;
+    let row_len = bytes_per_line * nplanes;
+    let mut scan = vec![0u8; height * row_len];
+    let mut i = 0usize;
+    let end = height * row_len;
+    while i < end {
+        let b = *bytes.get(p)?;
+        p += 1;
+        if b & 0xC0 == 0xC0 {
+            let count = (b & 0x3F) as usize;
+            let val = *bytes.get(p)?;
+            p += 1;
+            for _ in 0..count {
+                if i >= end {
+                    break;
+                }
+                scan[i] = val;
+                i += 1;
+            }
+        } else {
+            scan[i] = b;
+            i += 1;
+        }
+    }
+
+    let mut rgba = vec![0u8; width * height * 4];
+    if nplanes == 3 {
+        // Planar RGB: each row is [R…][G…][B…].
+        for y in 0..height {
+            let base = y * row_len;
+            for x in 0..width {
+                let r = scan[base + x];
+                let g = scan[base + bytes_per_line + x];
+                let b = scan[base + 2 * bytes_per_line + x];
+                let d = (y * width + x) * 4;
+                rgba[d] = r;
+                rgba[d + 1] = g;
+                rgba[d + 2] = b;
+                rgba[d + 3] = 0xFF;
+            }
+        }
+    } else {
+        // 1 plane + a 256-color palette in the trailing 769 bytes (0x0C marker).
+        let pal_start = bytes.len().checked_sub(769)?;
+        if bytes[pal_start] != 0x0C {
+            return None;
+        }
+        let pal = &bytes[pal_start + 1..];
+        for y in 0..height {
+            let base = y * row_len;
+            for x in 0..width {
+                let idx = scan[base + x] as usize * 3;
+                let d = (y * width + x) * 4;
+                rgba[d] = *pal.get(idx)?;
+                rgba[d + 1] = *pal.get(idx + 1)?;
+                rgba[d + 2] = *pal.get(idx + 2)?;
+                rgba[d + 3] = 0xFF;
+            }
+        }
+    }
+    Some(DecodedImage {
+        width: width as u32,
+        height: height as u32,
+        rgba,
+    })
+}
+
 /// Decode a `data:` URL (`data:[<mime>][;base64],<payload>`).
 pub fn decode_data_url(url: &str) -> Option<DecodedImage> {
     let rest = url.strip_prefix("data:")?;
@@ -565,6 +667,39 @@ mod tests {
         assert_eq!(&img.rgba[4..8], &[255, 255, 255, 255], "(1,0) white");
         assert_eq!(&img.rgba[8..12], &[255, 0, 0, 255], "(0,1) red");
         assert_eq!(&img.rgba[12..16], &[0, 255, 0, 255], "(1,1) green");
+    }
+
+    #[test]
+    fn decodes_rgb_pcx() {
+        // 2x2 RLE 8bpp 3-plane PCX: row0 = red,green; row1 = blue,white.
+        let mut b = vec![0u8; 128];
+        b[0] = 0x0A; // manufacturer
+        b[1] = 5; // version
+        b[2] = 1; // RLE
+        b[3] = 8; // bpp/plane
+        b[8..10].copy_from_slice(&1u16.to_le_bytes()); // xmax
+        b[10..12].copy_from_slice(&1u16.to_le_bytes()); // ymax
+        b[65] = 3; // planes
+        b[66..68].copy_from_slice(&2u16.to_le_bytes()); // bytes/line
+        // A byte is a literal if < 0xC0; 0xFF is encoded as a run-of-1 to be safe.
+        let lit = |v: &mut Vec<u8>, x: u8| {
+            if x & 0xC0 == 0xC0 {
+                v.push(0xC1);
+            }
+            v.push(x);
+        };
+        // Row 0: R[255,0] G[0,255] B[0,0]; Row 1: R[0,255] G[0,255] B[255,255].
+        for plane in [[255u8, 0], [0, 255], [0, 0], [0, 255], [0, 255], [255, 255]] {
+            for x in plane {
+                lit(&mut b, x);
+            }
+        }
+        let img = decode(&b).expect("decode pcx");
+        assert_eq!((img.width, img.height), (2, 2));
+        assert_eq!(&img.rgba[0..4], &[255, 0, 0, 255], "(0,0) red");
+        assert_eq!(&img.rgba[4..8], &[0, 255, 0, 255], "(1,0) green");
+        assert_eq!(&img.rgba[8..12], &[0, 0, 255, 255], "(0,1) blue");
+        assert_eq!(&img.rgba[12..16], &[255, 255, 255, 255], "(1,1) white");
     }
 
     #[test]
