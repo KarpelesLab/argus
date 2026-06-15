@@ -528,6 +528,35 @@ var history = window.history = {
   back: function() {}, forward: function() {}, go: function() {}
 };
 
+// `URLSearchParams`: parse/serialize a query string (very common for reading
+// `location.search`). `+` decodes to space; other percent-escapes are left as-is.
+function URLSearchParams(init) {
+  var pairs = [];
+  init = "" + (init == null ? "" : init);
+  if (init.charAt(0) === "?") init = init.substring(1);
+  if (init.length > 0) {
+    var parts = init.split("&");
+    for (var i = 0; i < parts.length; i++) {
+      if (parts[i].length === 0) continue;
+      var eq = parts[i].indexOf("=");
+      var k = (eq < 0 ? parts[i] : parts[i].substring(0, eq)).replace(/\+/g, " ");
+      var v = (eq < 0 ? "" : parts[i].substring(eq + 1)).replace(/\+/g, " ");
+      pairs.push([k, v]);
+    }
+  }
+  return {
+    get: function(k) { for (var i = 0; i < pairs.length; i++) if (pairs[i][0] === k) return pairs[i][1]; return null; },
+    getAll: function(k) { var r = []; for (var i = 0; i < pairs.length; i++) if (pairs[i][0] === k) r.push(pairs[i][1]); return r; },
+    has: function(k) { for (var i = 0; i < pairs.length; i++) if (pairs[i][0] === k) return true; return false; },
+    set: function(k, v) { for (var i = 0; i < pairs.length; i++) if (pairs[i][0] === k) { pairs[i][1] = "" + v; return; } pairs.push([k, "" + v]); },
+    append: function(k, v) { pairs.push([k, "" + v]); },
+    "delete": function(k) { var r = []; for (var i = 0; i < pairs.length; i++) if (pairs[i][0] !== k) r.push(pairs[i]); pairs = r; },
+    forEach: function(fn) { for (var i = 0; i < pairs.length; i++) fn(pairs[i][1], pairs[i][0]); },
+    toString: function() { var s = []; for (var i = 0; i < pairs.length; i++) s.push(pairs[i][0] + "=" + pairs[i][1]); return s.join("&"); }
+  };
+}
+window.URLSearchParams = URLSearchParams;
+
 // Timers: there is no wall clock in the synchronous reconciliation model, so
 // scheduled callbacks are queued and drained (earliest delay first) after the
 // script + event dispatches run. This makes deferred-init patterns work; it does
@@ -2207,6 +2236,20 @@ mod tests {
         assert_eq!(text_of(&doc, "t"), "ABmidBE");
     }
 
+
+    #[test]
+    fn url_search_params_parses_query() {
+        let mut doc = argus_html::parse(
+            "<div id=\"o\"></div>\
+             <script>\
+               var p = new URLSearchParams(location.search);\
+               document.getElementById('o').textContent =\
+                 p.get('a') + '|' + p.get('b') + '|' + p.has('c') + '|' + p.get('missing');\
+             </script>",
+        );
+        apply_scripts_with_url(&mut doc, Some("https://ex.com/?a=1&b=hello+world&c="));
+        assert_eq!(text_of(&doc, "o"), "1|hello world|true|null");
+    }
 
     #[test]
     fn history_pushstate_updates_location() {
