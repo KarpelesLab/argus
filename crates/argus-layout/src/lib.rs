@@ -970,9 +970,29 @@ impl Ctx<'_> {
             })
             .unwrap_or_else(|| self.intrinsic_border_width(id, &fstyle))
             .min(avail);
-        let top = self.cursor_y + fstyle.margin.top;
-        // Anchor to the side, past floats already occupying this band.
-        let (lx, rx) = self.float_band(x, content_right, top, top + 1.0);
+        // Find the highest band at/below the cursor where the float fits in the
+        // remaining width; if it doesn't fit beside existing floats, drop below the
+        // nearest one and retry (so floats stack).
+        let mut top = self.cursor_y + fstyle.margin.top;
+        let (mut lx, mut rx) = self.float_band(x, content_right, top, top + 1.0);
+        loop {
+            if rx - lx >= fw {
+                break;
+            }
+            let next = self
+                .floats
+                .iter()
+                .filter(|f| f.bottom > top && f.top <= top)
+                .map(|f| f.bottom)
+                .fold(f32::MAX, f32::min);
+            if next == f32::MAX || next <= top {
+                break; // nothing to drop past (float just overflows the line)
+            }
+            top = next;
+            let band = self.float_band(x, content_right, top, top + 1.0);
+            lx = band.0;
+            rx = band.1;
+        }
         let left = match fstyle.float {
             Float::Right => (rx - fw).max(lx),
             _ => lx,
@@ -3210,6 +3230,37 @@ mod tests {
         let word = l.runs.iter().find(|r| r.text == "wrapping").unwrap();
         // Page margin ~8 + float width 100 → text starts near x≈108.
         assert!(word.x > 100.0, "text should flow right of the float, got {}", word.x);
+    }
+
+    #[test]
+    fn two_left_floats_stack_side_by_side_then_below() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Container content width = 300px. Two 120px left floats fit side by side
+        // (0-120, 120-240); a third 120px float can't fit (240+120>300) and drops
+        // below the first row of floats.
+        let html = "<div style=\"width:300px\">\
+                      <div style=\"float:left; width:120px; height:40px\">a</div>\
+                      <div style=\"float:left; width:120px; height:40px\">b</div>\
+                      <div style=\"float:left; width:120px; height:40px\">c</div>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 600.0, &ImageSizes::new());
+        let at = |t: &str| {
+            let r = l.runs.iter().find(|r| r.text == t).unwrap();
+            (r.x, r.baseline)
+        };
+        let (ax, ay) = at("a");
+        let (bx, by) = at("b");
+        let (cx, cy) = at("c");
+        // a and b on the same float row, b to the right of a.
+        assert!((ay - by).abs() < 1.0, "a and b on the same row");
+        assert!(bx > ax + 100.0, "b sits right of a, got a={ax} b={bx}");
+        // c drops below (its baseline is lower) and returns to the left edge.
+        assert!(cy > ay + 30.0, "c dropped below the float row, got {cy} vs {ay}");
+        assert!((cx - ax).abs() < 2.0, "c back at the left edge, got {cx}");
     }
 
     #[test]
