@@ -607,7 +607,8 @@ impl Ctx<'_> {
                     NodeData::Element(e) if e.name.is_html("img") => {
                         self.flush_words(&mut words, &style, content_left, content_w);
                         pending_space = false;
-                        self.place_image(e, content_left, content_w, style.hidden);
+                        let istyle = computed_style(self.doc, child, &style, self.author);
+                        self.place_image(e, &istyle, content_left, content_w);
                     }
                     NodeData::Element(e) if e.name.is_html("hr") => {
                         self.flush_words(&mut words, &style, content_left, content_w);
@@ -891,8 +892,10 @@ impl Ctx<'_> {
         }
     }
 
-    /// Place an `<img>` as a block-level replaced box on its own line.
-    fn place_image(&mut self, e: &ElementData, x: f32, avail: f32, hidden: bool) {
+    /// Place an `<img>` as a block-level replaced box on its own line. A broken or
+    /// unresolved image with non-empty `alt` text renders that text instead.
+    fn place_image(&mut self, e: &ElementData, istyle: &ComputedStyle, x: f32, avail: f32) {
+        let hidden = istyle.hidden;
         let Some(src) = e.attr("src") else { return };
         let (iw, ih) = self.image_sizes.get(src).copied().unwrap_or((0, 0));
 
@@ -922,6 +925,23 @@ impl Ctx<'_> {
                 });
             }
             self.cursor_y += h;
+        } else if !hidden {
+            // Broken/unresolved image: render its `alt` text on its own line(s).
+            if let Some(alt) = e.attr("alt").filter(|a| !a.trim().is_empty()) {
+                let fs = istyle.font_size;
+                let color = istyle.fade(istyle.color);
+                for line in self.wrap_collapsed(alt, fs, avail) {
+                    let baseline = self.cursor_y + self.font.ascent_px(fs);
+                    self.runs.push(TextRun {
+                        x,
+                        baseline,
+                        text: line,
+                        size_px: fs,
+                        color,
+                    });
+                    self.cursor_y += fs * istyle.line_height;
+                }
+            }
         }
     }
 
@@ -3083,6 +3103,22 @@ borderdisplay0123floatleftrightclearbothfrgrowshrinkwrapspanabsolutefixedrelativ
         let end = first_baseline("flex-end");
         assert!(center > start + 80.0, "center pushes down: {start} -> {center}");
         assert!(end > center + 80.0, "flex-end further down: {center} -> {end}");
+    }
+
+    #[test]
+    fn broken_image_renders_alt_text() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // No intrinsic size is provided for the src (unresolved image), so the alt
+        // text is rendered in its place.
+        let html = "<img src=\"missing.png\" alt=\"a red apple\">";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let texts: Vec<&str> = l.runs.iter().map(|r| r.text.as_str()).collect();
+        assert!(texts.contains(&"a red apple"), "alt text rendered, got {texts:?}");
+        assert!(l.images.is_empty(), "no image box for an unresolved image");
     }
 
     #[test]
