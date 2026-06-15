@@ -77,6 +77,10 @@ pub enum PseudoClass {
     /// `:required` / `:read-only` — backed by attribute presence.
     Required,
     ReadOnly,
+    /// `:optional` — a form control without `required`.
+    Optional,
+    /// `:read-write` — an editable control (input/textarea, not readonly/disabled).
+    ReadWrite,
     /// `:link` / `:any-link` — a hyperlink (`<a>`/`<area>` with an `href`).
     AnyLink,
     /// `:root` — the document's root element (`<html>`).
@@ -313,6 +317,8 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                                 "enabled" => c.pseudos.push(PseudoClass::Enabled),
                                 "required" => c.pseudos.push(PseudoClass::Required),
                                 "read-only" => c.pseudos.push(PseudoClass::ReadOnly),
+                                "optional" => c.pseudos.push(PseudoClass::Optional),
+                                "read-write" => c.pseudos.push(PseudoClass::ReadWrite),
                                 "link" | "any-link" => c.pseudos.push(PseudoClass::AnyLink),
                                 "root" => c.pseudos.push(PseudoClass::Root),
                                 "empty" => c.pseudos.push(PseudoClass::Empty),
@@ -647,6 +653,22 @@ fn pseudo_matches(doc: &Document, node: NodeId, p: PseudoClass) -> bool {
         PseudoClass::Enabled => !element_has_attr(doc, node, "disabled"),
         PseudoClass::Required => element_has_attr(doc, node, "required"),
         PseudoClass::ReadOnly => element_has_attr(doc, node, "readonly"),
+        // `:optional` — a form control (input/select/textarea) without `required`.
+        PseudoClass::Optional => matches!(
+            &doc.node(node).data,
+            NodeData::Element(e)
+                if (e.name.is_html("input") || e.name.is_html("select") || e.name.is_html("textarea"))
+                    && e.attr("required").is_none()
+        ),
+        // `:read-write` — an editable input/textarea (not readonly/disabled), or an
+        // element with `contenteditable` other than `false`.
+        PseudoClass::ReadWrite => matches!(
+            &doc.node(node).data,
+            NodeData::Element(e)
+                if ((e.name.is_html("input") || e.name.is_html("textarea"))
+                        && e.attr("readonly").is_none() && e.attr("disabled").is_none())
+                    || e.attr("contenteditable").is_some_and(|v| v != "false")
+        ),
         PseudoClass::AnyLink => matches!(
             &doc.node(node).data,
             NodeData::Element(e)
@@ -896,6 +918,14 @@ mod tests {
         assert!(!matches(&doc, plain, &sel(":required")));
         assert!(matches(&doc, readonly, &sel(":read-only")));
         assert!(!matches(&doc, plain, &sel("input:read-only")));
+
+        // :optional — a control without `required`; :read-write — an editable
+        // input (not readonly/disabled).
+        assert!(matches(&doc, plain, &sel("input:optional")));
+        assert!(!matches(&doc, required, &sel(":optional")));
+        assert!(matches(&doc, plain, &sel("input:read-write")));
+        assert!(!matches(&doc, readonly, &sel(":read-write")));
+        assert!(!matches(&doc, disabled, &sel(":read-write")));
 
         // :link / :any-link — <a href>, not a bare <a>.
         let link = doc.create_element(QualName::html("a"), vec![Attribute::new("href", "/x")]);
