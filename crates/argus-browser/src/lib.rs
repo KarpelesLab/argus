@@ -1138,6 +1138,12 @@ fn extract_meta(doc: &argus_dom::Document, base: Option<&str>) -> String {
                     if !content.is_empty() {
                         out.push((prop.to_ascii_lowercase(), collapse(content)));
                     }
+                } else if let Some(equiv) = e.attr("http-equiv") {
+                    // `http-equiv="refresh"` is a client-side redirect/refresh
+                    // crawlers care about; surface its `content` (delay; url=…).
+                    if !content.is_empty() {
+                        out.push((equiv.to_ascii_lowercase(), collapse(content)));
+                    }
                 }
             } else if e.name.is_html("link") {
                 let rel = e.attr("rel").unwrap_or("");
@@ -2028,6 +2034,7 @@ mod tests {
                <link rel=\"canonical\" href=\"/page\">\
                <link rel=\"shortcut icon\" href=\"/favicon.ico\">\
                <link rel=\"alternate\" hreflang=\"fr\" href=\"/fr/page\">\
+               <meta http-equiv=\"refresh\" content=\"5; url=/next\">\
              </head><body>x</body></html>",
         );
         let out = extract_meta(&doc, Some("https://site.example/dir/"));
@@ -2040,6 +2047,7 @@ mod tests {
         assert!(lines.contains(&"canonical: https://site.example/page"), "{out}");
         assert!(lines.contains(&"icon: https://site.example/favicon.ico"), "{out}");
         assert!(lines.contains(&"alternate:fr: https://site.example/fr/page"), "{out}");
+        assert!(lines.contains(&"refresh: 5; url=/next"), "{out}");
     }
 
     #[test]
