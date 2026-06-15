@@ -1122,15 +1122,21 @@ fn packbits_decode(src: &[u8], out: &mut Vec<u8>) {
 
 /// Decode a `data:` URL (`data:[<mime>][;base64],<payload>`).
 pub fn decode_data_url(url: &str) -> Option<DecodedImage> {
+    decode(&decode_data_url_bytes(url)?)
+}
+
+/// Extract the raw payload bytes of a `data:` URL (base64 or percent-encoded),
+/// without interpreting them as an image. Used for non-image data URLs such as
+/// `@font-face` font payloads.
+pub fn decode_data_url_bytes(url: &str) -> Option<Vec<u8>> {
     let rest = url.strip_prefix("data:")?;
     let (meta, payload) = rest.split_once(',')?;
-    let bytes = if meta.contains(";base64") {
-        base64_decode(payload.trim())?
+    if meta.contains(";base64") {
+        base64_decode(payload.trim())
     } else {
         // Plain payload: undo percent-encoding (`%xx`) into raw bytes.
-        percent_decode(payload)
-    };
-    decode(&bytes)
+        Some(percent_decode(payload))
+    }
 }
 
 /// Percent-decode a `data:` URL payload: each `%xx` becomes the byte `0xXX`; a
@@ -1865,6 +1871,21 @@ mod tests {
         assert_eq!(base64_decode("TWFu").unwrap(), b"Man");
         // "hello" → "aGVsbG8="
         assert_eq!(base64_decode("aGVsbG8=").unwrap(), b"hello");
+    }
+
+    #[test]
+    fn data_url_bytes_base64_and_plain() {
+        // base64 payload (e.g. a web-font data URL) decodes to raw bytes.
+        assert_eq!(
+            decode_data_url_bytes("data:font/woff2;base64,aGVsbG8=").unwrap(),
+            b"hello"
+        );
+        // Plain (percent-encoded) payload.
+        assert_eq!(
+            decode_data_url_bytes("data:application/octet-stream,A%42C").unwrap(),
+            b"ABC"
+        );
+        assert!(decode_data_url_bytes("not-a-data-url").is_none());
     }
 
     #[test]

@@ -276,9 +276,10 @@ pub struct ComputedStyle {
     pub bold: bool,
     /// `font-style: italic`/`oblique` (faux-slanted at render time).
     pub italic: bool,
-    /// `font-family` resolves to the `monospace` generic (or a UA-monospace
-    /// element like `<code>`/`<pre>`): shape with the monospace face. Inherited.
-    pub monospace: bool,
+    /// Face selector from the used `font-family`: a web-font family hash (≥ 2,
+    /// `argus_css::family_key`), the `monospace` generic / fixed-width family (1),
+    /// or the default proportional face (0). Inherited.
+    pub font_key: u32,
     pub color: Color,
     pub background_color: Color,
     pub margin: Edges,
@@ -463,7 +464,7 @@ impl ComputedStyle {
             font_size: 16.0,
             bold: false,
             italic: false,
-            monospace: false,
+            font_key: 0,
             color: Color::BLACK,
             background_color: Color::TRANSPARENT,
             margin: Edges::default(),
@@ -936,7 +937,7 @@ pub fn computed_style(
         font_size: parent.font_size,
         bold: parent.bold,
         italic: parent.italic,
-        monospace: parent.monospace, // font-family generic inherits
+        font_key: parent.font_key, // font-family selection inherits
         color: parent.color,
         text_align: parent.text_align,           // text-align inherits
         white_space_pre: parent.white_space_pre, // white-space inherits
@@ -1260,12 +1261,12 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             cs.italic = toks[..idx].iter().any(|t| *t == "italic" || *t == "oblique");
             // The family is whatever follows the size token.
             if idx + 1 < toks.len() {
-                cs.monospace = family_is_monospace(&toks[idx + 1..].join(" "));
+                cs.font_key = font_key_for_family(&toks[idx + 1..].join(" "));
             }
         }
     }
     if let Some(v) = map.get("font-family") {
-        cs.monospace = family_is_monospace(v);
+        cs.font_key = font_key_for_family(v);
     }
     if let Some(v) = map.get("font-style") {
         cs.italic = matches!(v.trim(), "italic" | "oblique");
@@ -2389,23 +2390,33 @@ fn len_px(v: &str, fs: f32) -> Option<f32> {
     parse_length(v).map(|l| l.to_px(fs, 0.0))
 }
 
-/// Whether a `font-family` value resolves to a monospace face: the `monospace`
-/// generic, or a well-known fixed-width family named anywhere in the list. The
-/// first recognized family decides; quotes and surrounding space are ignored.
-fn family_is_monospace(v: &str) -> bool {
+/// Resolve a `font-family` value to a face selector key: `FONT_KEY_MONOSPACE` for
+/// the `monospace` generic or a well-known fixed-width family, a web-font family
+/// hash ([`argus_css::family_key`]) for the first specific (non-generic) family
+/// name, or `FONT_KEY_DEFAULT` for a proportional generic. The first recognized
+/// family decides; quotes and surrounding space are ignored.
+fn font_key_for_family(v: &str) -> u32 {
     for fam in v.split(',') {
         let fam = fam.trim().trim_matches(|c| c == '"' || c == '\'').trim();
+        if fam.is_empty() {
+            continue;
+        }
         let lower = fam.to_ascii_lowercase();
         match lower.as_str() {
             "monospace" | "ui-monospace" | "courier" | "courier new" | "consolas" | "monaco"
             | "menlo" | "sf mono" | "dejavu sans mono" | "liberation mono" | "roboto mono"
-            | "source code pro" | "fira code" | "jetbrains mono" => return true,
-            // A non-monospace generic terminates the search (it would be used first).
-            "serif" | "sans-serif" | "system-ui" | "cursive" | "fantasy" => return false,
-            _ => {}
+            | "source code pro" | "fira code" | "jetbrains mono" => {
+                return argus_css::FONT_KEY_MONOSPACE
+            }
+            // A proportional generic resolves to the default face.
+            "serif" | "sans-serif" | "system-ui" | "ui-serif" | "ui-sans-serif" | "cursive"
+            | "fantasy" | "inherit" | "initial" => return argus_css::FONT_KEY_DEFAULT,
+            // A specific family name: a web-font candidate (resolved against the
+            // registry at paint time; falls back to the default face if absent).
+            _ => return argus_css::family_key(&lower),
         }
     }
-    false
+    argus_css::FONT_KEY_DEFAULT
 }
 
 /// Apply CSS logical box properties for `prop` (`margin`/`padding`) onto `edges`,
@@ -2978,37 +2989,28 @@ mod tests {
     }
 
     #[test]
-    fn monospace_family_detection() {
+    fn font_family_resolves_to_face_key() {
+        use argus_css::{family_key, FONT_KEY_DEFAULT, FONT_KEY_MONOSPACE};
         let mut doc = Document::new();
         let code = one(&mut doc, "code", vec![]);
         let div = one(&mut doc, "div", vec![]);
+        let key = |css: &str| {
+            computed_style(&doc, div, &ComputedStyle::initial(), &parse_stylesheet(css)).font_key
+        };
         // UA stylesheet makes <code> monospace.
         let cs_code = computed_style(&doc, code, &ComputedStyle::initial(), &parse_stylesheet(""));
-        assert!(cs_code.monospace, "<code> is monospace by UA default");
-        // A monospace generic in the family list.
-        let cs1 = computed_style(
-            &doc,
-            div,
-            &ComputedStyle::initial(),
-            &parse_stylesheet("div { font-family: 'Foo Bar', monospace }"),
+        assert_eq!(cs_code.font_key, FONT_KEY_MONOSPACE, "<code> is monospace by UA");
+        // The `monospace` generic and known fixed-width families → monospace key.
+        assert_eq!(key("div { font-family: monospace }"), FONT_KEY_MONOSPACE);
+        assert_eq!(key("div { font: 14px Menlo, monospace }"), FONT_KEY_MONOSPACE);
+        // A proportional generic → the default face.
+        assert_eq!(key("div { font-family: sans-serif }"), FONT_KEY_DEFAULT);
+        // A specific (web-font candidate) family → that family's stable hash key.
+        assert_eq!(
+            key("div { font-family: 'Inter', sans-serif }"),
+            family_key("inter"),
+            "first specific family decides the key"
         );
-        assert!(cs1.monospace, "monospace generic detected");
-        // A proportional family is not monospace.
-        let cs2 = computed_style(
-            &doc,
-            div,
-            &ComputedStyle::initial(),
-            &parse_stylesheet("div { font-family: Arial, sans-serif }"),
-        );
-        assert!(!cs2.monospace, "sans-serif is not monospace");
-        // The `font` shorthand's family part is honored too.
-        let cs3 = computed_style(
-            &doc,
-            div,
-            &ComputedStyle::initial(),
-            &parse_stylesheet("div { font: 14px Menlo, monospace }"),
-        );
-        assert!(cs3.monospace, "font shorthand family detected");
     }
 
     #[test]

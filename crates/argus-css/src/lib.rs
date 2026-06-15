@@ -31,6 +31,29 @@ pub struct Rule {
     pub media: Option<String>,
 }
 
+/// Reserved [`family_key`] values: `0` = default/proportional, `1` = the
+/// `monospace` generic. Web-font family hashes are always `>= 2`.
+pub const FONT_KEY_DEFAULT: u32 = 0;
+pub const FONT_KEY_MONOSPACE: u32 = 1;
+
+/// A stable key for a font-family name, shared by the style engine (which records
+/// the used family) and the font registry (which registers `@font-face` faces), so
+/// both agree on a face. Lowercased FNV-1a, biased into `>= 2` to avoid the
+/// reserved default/monospace keys.
+pub fn family_key(name: &str) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in name.trim().trim_matches(|c| c == '"' || c == '\'').bytes() {
+        h ^= b.to_ascii_lowercase() as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    // Keep clear of the reserved 0/1 keys.
+    if h < 2 {
+        h.wrapping_add(2)
+    } else {
+        h
+    }
+}
+
 /// An `@font-face` rule: a web-font `family` name bound to a downloadable `src`.
 #[derive(Clone, PartialEq, Debug)]
 pub struct FontFace {
@@ -608,6 +631,18 @@ mod tests {
         assert_eq!(sheet.font_faces.len(), 1);
         assert_eq!(sheet.font_faces[0].family, "x");
         assert_eq!(sheet.font_faces[0].src_url, "x.woff2");
+    }
+
+    #[test]
+    fn family_key_is_stable_and_avoids_reserved() {
+        // Case/quote-insensitive and deterministic.
+        assert_eq!(family_key("Inter"), family_key("  inter  "));
+        assert_eq!(family_key("\"Inter\""), family_key("inter"));
+        // Distinct families get distinct keys, all clear of the reserved 0/1.
+        assert_ne!(family_key("inter"), family_key("roboto"));
+        for name in ["inter", "roboto", "a", "x", ""] {
+            assert!(family_key(name) >= 2, "{name} key must be >= 2");
+        }
     }
 
     #[test]

@@ -436,8 +436,8 @@ struct InlineWord {
     bold: bool,
     /// Whether this word is italic (`font-style: italic`).
     italic: bool,
-    /// Whether this word shapes with the monospace face (`font-family: monospace`).
-    monospace: bool,
+    /// Face selector (web-font hash ≥ 2, monospace 1, or default 0).
+    font_key: u32,
     /// `text-shadow` (offset-x, offset-y, color), if any.
     shadow: Option<(f32, f32, argus_geometry::Color)>,
     /// Color of the decoration lines (`text-decoration-color`, else the text color).
@@ -765,7 +765,7 @@ impl Ctx<'_> {
             match marker {
                 Marker::Text(s) => {
                     let baseline = self.cursor_y + self.font.ascent_px(fs);
-                    let mw = self.font.measure_in(s, fs, style.monospace);
+                    let mw = self.font.measure_key(s, fs, style.font_key);
                     self.runs.push(TextRun {
                         x: content_left - mw - 8.0,
                         baseline,
@@ -776,7 +776,7 @@ impl Ctx<'_> {
                         italic: style.italic,
                         shadow: style.text_shadow,
                         letter_spacing: 0.0,
-                        monospace: style.monospace,
+                        font_key: style.font_key,
                     });
                 }
                 bullet => {
@@ -832,9 +832,9 @@ impl Ctx<'_> {
                 // `pre-line` collapses runs of whitespace to single spaces and wraps
                 // long lines; `pre`/`pre-wrap` keep each newline-delimited line whole.
                 let visual: Vec<String> = if style.pre_line {
-                    self.wrap_collapsed(line, fs, content_w, style.monospace)
+                    self.wrap_collapsed(line, fs, content_w, style.font_key)
                 } else if style.pre_wrap {
-                    self.wrap_preserving(line, fs, content_w, style.monospace)
+                    self.wrap_preserving(line, fs, content_w, style.font_key)
                 } else {
                     vec![line.to_string()]
                 };
@@ -850,7 +850,7 @@ impl Ctx<'_> {
                         italic: style.italic,
                         shadow: style.text_shadow,
                         letter_spacing: 0.0,
-                        monospace: style.monospace,
+                        font_key: style.font_key,
                     });
                     self.cursor_y += fs * style.line_height;
                 }
@@ -873,7 +873,7 @@ impl Ctx<'_> {
                         words.push(InlineWord {
                             text: word.to_string(),
                             font_size: style.font_size,
-                            monospace: style.monospace,
+                            font_key: style.font_key,
                             color: style.fade(style.color),
                             background: argus_geometry::Color::TRANSPARENT,
                             space_before: false,
@@ -937,7 +937,7 @@ impl Ctx<'_> {
                     words.push(InlineWord {
                         text: word.to_string(),
                         font_size: style.font_size,
-                        monospace: style.monospace,
+                        font_key: style.font_key,
                         color,
                         background: argus_geometry::Color::TRANSPARENT,
                         space_before: i > 0,
@@ -1119,7 +1119,7 @@ impl Ctx<'_> {
                                 words.push(InlineWord {
                                     text: String::new(),
                                     font_size: cstyle.font_size,
-                                    monospace: cstyle.monospace,
+                                    font_key: cstyle.font_key,
                                     color: argus_geometry::Color::TRANSPARENT,
                                     background: argus_geometry::Color::TRANSPARENT,
                                     space_before,
@@ -1823,7 +1823,7 @@ impl Ctx<'_> {
             words.push(InlineWord {
                 text: String::new(),
                 font_size: istyle.font_size,
-                monospace: istyle.monospace,
+                font_key: istyle.font_key,
                 color: argus_geometry::Color::TRANSPARENT,
                 background: argus_geometry::Color::TRANSPARENT,
                 space_before,
@@ -1956,7 +1956,7 @@ impl Ctx<'_> {
             if let Some(alt) = e.attr("alt").filter(|a| !a.trim().is_empty()) {
                 let fs = istyle.font_size;
                 let color = istyle.fade(istyle.color);
-                for line in self.wrap_collapsed(alt, fs, avail, istyle.monospace) {
+                for line in self.wrap_collapsed(alt, fs, avail, istyle.font_key) {
                     let baseline = self.cursor_y + self.font.ascent_px(fs);
                     self.runs.push(TextRun {
                         x,
@@ -1968,7 +1968,7 @@ impl Ctx<'_> {
                         italic: istyle.italic,
                         shadow: istyle.text_shadow,
                         letter_spacing: 0.0,
-                        monospace: istyle.monospace,
+                        font_key: istyle.font_key,
                     });
                     self.cursor_y += fs * istyle.line_height;
                 }
@@ -2033,13 +2033,13 @@ impl Ctx<'_> {
     /// Greedily wrap a single line into sub-lines that fit `width`, collapsing runs
     /// of whitespace to single spaces (for `white-space: pre-line`). Always returns
     /// at least one (possibly empty) sub-line, and never splits a single word.
-    fn wrap_collapsed(&self, line: &str, fs: f32, width: f32, mono: bool) -> Vec<String> {
-        let space_w = self.font.measure_in(" ", fs, mono);
+    fn wrap_collapsed(&self, line: &str, fs: f32, width: f32, font_key: u32) -> Vec<String> {
+        let space_w = self.font.measure_key(" ", fs, font_key);
         let mut out: Vec<String> = Vec::new();
         let mut cur = String::new();
         let mut cur_w = 0.0f32;
         for word in line.split_whitespace() {
-            let ww = self.font.measure_in(word, fs, mono);
+            let ww = self.font.measure_key(word, fs, font_key);
             if cur.is_empty() {
                 cur.push_str(word);
                 cur_w = ww;
@@ -2060,7 +2060,7 @@ impl Ctx<'_> {
     /// Greedily wrap a line into sub-lines that fit `width` while **preserving**
     /// whitespace (for `white-space: pre-wrap`). Breaks at the last space before
     /// overflow; a token wider than `width` overflows rather than being split.
-    fn wrap_preserving(&self, line: &str, fs: f32, width: f32, mono: bool) -> Vec<String> {
+    fn wrap_preserving(&self, line: &str, fs: f32, width: f32, font_key: u32) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let mut cur = String::new();
         let mut last_break: Option<usize> = None; // byte index just past a space
@@ -2069,7 +2069,7 @@ impl Ctx<'_> {
             if ch == ' ' {
                 last_break = Some(cur.len());
             }
-            if self.font.measure_in(&cur, fs, mono) > width && cur.chars().count() > 1 {
+            if self.font.measure_key(&cur, fs, font_key) > width && cur.chars().count() > 1 {
                 match last_break.filter(|&b| b < cur.len()) {
                     Some(bp) => {
                         let rest = cur.split_off(bp);
@@ -2092,14 +2092,14 @@ impl Ctx<'_> {
 
     /// Truncate `text` to the largest prefix whose width plus an `…` fits `width`,
     /// returning the prefix with `…` appended (for `text-overflow: ellipsis`).
-    fn truncate_ellipsis(&self, text: &str, fs: f32, width: f32, mono: bool) -> String {
+    fn truncate_ellipsis(&self, text: &str, fs: f32, width: f32, font_key: u32) -> String {
         let ell = "…";
-        let ell_w = self.font.measure_in(ell, fs, mono);
+        let ell_w = self.font.measure_key(ell, fs, font_key);
         let budget = (width - ell_w).max(0.0);
         let mut cur = String::new();
         for ch in text.chars() {
             cur.push(ch);
-            if self.font.measure_in(&cur, fs, mono) > budget {
+            if self.font.measure_key(&cur, fs, font_key) > budget {
                 cur.pop();
                 break;
             }
@@ -2110,12 +2110,12 @@ impl Ctx<'_> {
 
     /// Split a word into the largest character chunks that each fit `width` (for
     /// `overflow-wrap: break-word`). Always keeps at least one char per chunk.
-    fn split_word(&self, word: &str, fs: f32, width: f32, mono: bool) -> Vec<String> {
+    fn split_word(&self, word: &str, fs: f32, width: f32, font_key: u32) -> Vec<String> {
         let mut chunks = Vec::new();
         let mut cur = String::new();
         for ch in word.chars() {
             cur.push(ch);
-            if self.font.measure_in(&cur, fs, mono) > width && cur.chars().count() > 1 {
+            if self.font.measure_key(&cur, fs, font_key) > width && cur.chars().count() > 1 {
                 cur.pop();
                 chunks.push(std::mem::take(&mut cur));
                 cur.push(ch);
@@ -2245,11 +2245,11 @@ impl Ctx<'_> {
                 continue;
             }
             let space = if w.space_before {
-                self.font.measure_in(" ", w.font_size, w.monospace)
+                self.font.measure_key(" ", w.font_size, w.font_key)
             } else {
                 0.0
             };
-            cur += space + self.font.measure_in(&w.text, w.font_size, w.monospace);
+            cur += space + self.font.measure_key(&w.text, w.font_size, w.font_key);
         }
         max_line = max_line.max(cur);
         max_line + style.padding.left + style.padding.right + style.border.left + style.border.right
@@ -3371,7 +3371,7 @@ impl Ctx<'_> {
             words.push(InlineWord {
                 text: rendered,
                 font_size: style.font_size,
-                monospace: style.monospace,
+                font_key: style.font_key,
                 color,
                 background,
                 space_before: *pending_space || !first,
@@ -3440,7 +3440,7 @@ impl Ctx<'_> {
                         words.push(InlineWord {
                             text: transform_text(sub, style.text_transform).replace('\u{00A0}', " "),
                             font_size: style.font_size,
-                            monospace: style.monospace,
+                            font_key: style.font_key,
                             color,
                             background,
                             // Words are separated by whitespace; sub-words (split at a
@@ -3479,7 +3479,7 @@ impl Ctx<'_> {
                     words.push(InlineWord {
                         text: String::new(),
                         font_size: style.font_size,
-                        monospace: style.monospace,
+                        font_key: style.font_key,
                         color: style.fade(style.color),
                         background: argus_geometry::Color::TRANSPARENT,
                         space_before: false,
@@ -3544,8 +3544,8 @@ impl Ctx<'_> {
         if block.break_word && width > 0.0 {
             let mut expanded: Vec<InlineWord> = Vec::with_capacity(taken.len());
             for w in taken {
-                if !w.text.is_empty() && self.font.measure_in(&w.text, w.font_size, w.monospace) > width {
-                    for (k, chunk) in self.split_word(&w.text, w.font_size, width, w.monospace).into_iter().enumerate() {
+                if !w.text.is_empty() && self.font.measure_key(&w.text, w.font_size, w.font_key) > width {
+                    for (k, chunk) in self.split_word(&w.text, w.font_size, width, w.font_key).into_iter().enumerate() {
                         let mut nw = w.clone();
                         nw.text = chunk;
                         if k > 0 {
@@ -3575,13 +3575,13 @@ impl Ctx<'_> {
                 text.push_str(&w.text);
                 max_size = max_size.max(w.font_size);
             }
-            if self.font.measure_in(&text, max_size, taken.iter().any(|w| w.monospace)) > width {
+            if self.font.measure_key(&text, max_size, taken.iter().map(|w| w.font_key).find(|&k| k != 0).unwrap_or(0)) > width {
                 let color = taken
                     .iter()
                     .find(|w| !w.text.is_empty())
                     .map(|w| w.color)
                     .unwrap_or(block.fade(block.color));
-                let clipped = self.truncate_ellipsis(&text, max_size, width, taken.iter().any(|w| w.monospace));
+                let clipped = self.truncate_ellipsis(&text, max_size, width, taken.iter().map(|w| w.font_key).find(|&k| k != 0).unwrap_or(0));
                 let baseline = self.cursor_y + self.font.ascent_px(max_size);
                 self.runs.push(TextRun {
                     x,
@@ -3593,7 +3593,7 @@ impl Ctx<'_> {
                     italic: taken.iter().any(|w| w.italic),
                     shadow: taken.iter().find_map(|w| w.shadow),
                     letter_spacing: 0.0,
-                    monospace: taken.iter().any(|w| w.monospace),
+                    font_key: taken.iter().map(|w| w.font_key).find(|&k| k != 0).unwrap_or(0),
                 });
                 self.cursor_y += max_size * block.line_height;
                 return;
@@ -3625,14 +3625,14 @@ impl Ctx<'_> {
                     break;
                 }
                 let space = if i > line_start && w.space_before {
-                    self.font.measure_in(" ", w.font_size, w.monospace) + block.word_spacing
+                    self.font.measure_key(" ", w.font_size, w.font_key) + block.word_spacing
                 } else {
                     0.0
                 };
                 let ww = match w.atomic {
                     Some((_, _, bw, _, _)) => bw,
                     None => {
-                        self.font.measure_in(&w.text, w.font_size, w.monospace)
+                        self.font.measure_key(&w.text, w.font_size, w.font_key)
                             + block.letter_spacing * w.text.chars().count() as f32
                     }
                 };
@@ -3658,7 +3658,7 @@ impl Ctx<'_> {
             for (j, w) in line.iter().enumerate() {
                 let has_space = j > 0 && w.space_before;
                 let space = if has_space {
-                    self.font.measure_in(" ", w.font_size, w.monospace) + block.word_spacing
+                    self.font.measure_key(" ", w.font_size, w.font_key) + block.word_spacing
                 } else {
                     0.0
                 };
@@ -3671,7 +3671,7 @@ impl Ctx<'_> {
                         bw
                     }
                     None => {
-                        self.font.measure_in(&w.text, w.font_size, w.monospace)
+                        self.font.measure_key(&w.text, w.font_size, w.font_key)
                             + block.letter_spacing * w.text.chars().count() as f32
                     }
                 };
@@ -3708,7 +3708,7 @@ impl Ctx<'_> {
                 // (origin-laid-out) display-list range to the line position.
                 if let Some((start, end, bw, bh, valign)) = w.atomic {
                     if j > 0 && w.space_before {
-                        pen_x += self.font.measure_in(" ", w.font_size, w.monospace) + block.word_spacing;
+                        pen_x += self.font.measure_key(" ", w.font_size, w.font_key) + block.word_spacing;
                     }
                     // Vertical placement within the line box per `vertical-align`.
                     let dy = match valign {
@@ -3729,13 +3729,13 @@ impl Ctx<'_> {
                 }
                 if j > 0 && w.space_before {
                     pen_x +=
-                        self.font.measure_in(" ", w.font_size, w.monospace) + block.word_spacing + justify_extra;
+                        self.font.measure_key(" ", w.font_size, w.font_key) + block.word_spacing + justify_extra;
                 }
                 // `letter-spacing` widens the word's advance by one spacing per
                 // character (matching the per-glyph offset the painter applies).
                 let ls = block.letter_spacing;
                 let word_w =
-                    self.font.measure_in(&w.text, w.font_size, w.monospace) + ls * w.text.chars().count() as f32;
+                    self.font.measure_key(&w.text, w.font_size, w.font_key) + ls * w.text.chars().count() as f32;
                 let wb = baseline + w.baseline_shift;
                 // Inline background (e.g. <mark>, highlighted span) paints behind the
                 // glyphs, covering the line box around this word.
@@ -3758,7 +3758,7 @@ impl Ctx<'_> {
                     italic: w.italic,
                     shadow: w.shadow,
                     letter_spacing: ls,
-                    monospace: w.monospace,
+                    font_key: w.font_key,
                 });
                 let dh = (w.font_size / 16.0).max(1.0);
                 if w.underline {
@@ -4335,14 +4335,14 @@ mod tests {
             eprintln!("no system font; skipping");
             return;
         };
-        // `<code>` (UA monospace) inside a normal paragraph: only the code run is
-        // flagged monospace, the surrounding text is not.
+        // `<code>` (UA monospace) inside a normal paragraph: only the code run gets
+        // the monospace face key, the surrounding text keeps the default face.
         let doc = parse("<p>plain <code>mono</code> plain</p>");
         let l = layout(&doc, &font, 400.0, &ImageSizes::new());
         let code = l.runs.iter().find(|r| r.text.contains("mono")).expect("code run");
-        assert!(code.monospace, "code run shapes monospace");
+        assert_eq!(code.font_key, argus_css::FONT_KEY_MONOSPACE, "code run is monospace");
         let plain = l.runs.iter().find(|r| r.text.contains("plain")).expect("plain run");
-        assert!(!plain.monospace, "surrounding text is not monospace");
+        assert_eq!(plain.font_key, argus_css::FONT_KEY_DEFAULT, "surrounding text is default");
     }
 
     #[test]

@@ -42,6 +42,8 @@ fn recolor(node: &mut Node, paint: &Paint) {
 pub struct Font {
     chain: FaceChain,
     mono_chain: Option<FaceChain>,
+    /// Web-font faces (`@font-face`) keyed by `argus_css::family_key(family)`.
+    web_faces: std::collections::HashMap<u32, FaceChain>,
 }
 
 impl Font {
@@ -53,6 +55,7 @@ impl Font {
         Ok(Font {
             chain: FaceChain::new(face),
             mono_chain: None,
+            web_faces: std::collections::HashMap::new(),
         })
     }
 
@@ -64,6 +67,7 @@ impl Font {
             Ok(face) => Font {
                 chain: self.chain.push_fallback(face),
                 mono_chain: self.mono_chain,
+                web_faces: self.web_faces,
             },
             Err(_) => self,
         }
@@ -82,11 +86,29 @@ impl Font {
         }
     }
 
-    /// The face chain to shape with: the monospace chain when `mono` and one is
-    /// loaded, else the primary chain.
-    fn chain_for(&self, mono: bool) -> &FaceChain {
-        match (mono, &self.mono_chain) {
-            (true, Some(c)) => c,
+    /// Register a web-font (`@font-face`) face under `key`
+    /// (`argus_css::family_key(family)`). On a parse failure the font is unchanged
+    /// (runs requesting that family fall back to the primary face).
+    pub fn with_web_font(mut self, key: u32, bytes: Vec<u8>) -> Font {
+        if let Ok(face) = Face::from_ttf_bytes(bytes.clone()).or_else(|_| Face::from_otf_bytes(bytes))
+        {
+            self.web_faces.insert(key, FaceChain::new(face));
+        }
+        self
+    }
+
+    /// The face chain to shape with for a run's `font_key`: a registered web face
+    /// (key ≥ 2), the monospace face (key 1), else the primary chain. Any of these
+    /// fall back to the primary chain when the requested face isn't loaded.
+    fn chain_for(&self, font_key: u32) -> &FaceChain {
+        if font_key >= 2 {
+            if let Some(c) = self.web_faces.get(&font_key) {
+                return c;
+            }
+            return &self.chain;
+        }
+        match (font_key, &self.mono_chain) {
+            (1, Some(c)) => c,
             _ => &self.chain,
         }
     }
@@ -103,13 +125,13 @@ impl Font {
 
     /// Advance width of `text` at `size_px`, in pixels (sum of glyph advances).
     pub fn measure(&self, text: &str, size_px: f32) -> f32 {
-        self.measure_in(text, size_px, false)
+        self.measure_key(text, size_px, 0)
     }
 
-    /// Like [`measure`](Self::measure), shaping with the monospace face when
-    /// `mono` is set and a monospace face is loaded.
-    pub fn measure_in(&self, text: &str, size_px: f32, mono: bool) -> f32 {
-        match self.chain_for(mono).shape(text, size_px) {
+    /// Like [`measure`](Self::measure), shaping with the face selected by
+    /// `font_key` (web face ≥ 2, monospace = 1, primary = 0).
+    pub fn measure_key(&self, text: &str, size_px: f32, font_key: u32) -> f32 {
+        match self.chain_for(font_key).shape(text, size_px) {
             Ok(glyphs) => glyphs.iter().map(|g| g.x_advance).sum(),
             Err(_) => 0.0,
         }
@@ -133,8 +155,8 @@ pub struct TextRun {
     pub shadow: Option<(f32, f32, Color)>,
     /// `letter-spacing`: extra pixels inserted after each glyph (0 = none).
     pub letter_spacing: f32,
-    /// Shape with the monospace face (`font-family: monospace`, `<code>`/`<pre>`).
-    pub monospace: bool,
+    /// Face selector: web-font family hash (≥ 2), monospace (1), or primary (0).
+    pub font_key: u32,
 }
 
 /// A filled rectangle in canvas pixels (e.g. an element background), optionally
@@ -247,7 +269,7 @@ pub fn render_text(
     height: u32,
     _color: Color,
 ) -> Canvas {
-    let root = build_run(font, text, size_px, origin_x, baseline_y, 0.0, false);
+    let root = build_run(font, text, size_px, origin_x, baseline_y, 0.0, 0);
     let video = render_run(root, width, height);
     let pixels = video
         .planes
@@ -391,7 +413,7 @@ fn push_run_nodes(font: &Font, run: &TextRun, out: &mut Vec<Node>) {
             run.x + dx,
             run.baseline + dy,
             run.letter_spacing,
-            run.monospace,
+            run.font_key,
         );
         if run.italic {
             sgroup.transform = sgroup.transform.compose(&Transform2D::skew_x(-0.21));
@@ -411,7 +433,7 @@ fn push_run_nodes(font: &Font, run: &TextRun, out: &mut Vec<Node>) {
             run.x + dx,
             run.baseline,
             run.letter_spacing,
-            run.monospace,
+            run.font_key,
         );
         // Faux-italic: shear the run's baseline-local space so glyph tops lean right.
         if run.italic {
@@ -435,9 +457,9 @@ fn build_run(
     origin_x: f32,
     baseline_y: f32,
     letter_spacing: f32,
-    monospace: bool,
+    font_key: u32,
 ) -> Group {
-    let placed = Shaper::shape_to_paths(font.chain_for(monospace), text, size_px);
+    let placed = Shaper::shape_to_paths(font.chain_for(font_key), text, size_px);
     let children: Vec<Node> = placed
         .into_iter()
         .enumerate()
@@ -505,7 +527,7 @@ mod tests {
         };
         // Each glyph i is shifted right by i*spacing relative to no spacing.
         let xs = |ls: f32| -> Vec<f32> {
-            let g = build_run(&font, "abc", 16.0, 0.0, 0.0, ls, false);
+            let g = build_run(&font, "abc", 16.0, 0.0, 0.0, ls, 0);
             g.children
                 .iter()
                 .map(|c| match c {

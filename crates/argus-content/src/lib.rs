@@ -36,6 +36,7 @@ pub fn run(channel: Channel) -> io::Result<()> {
         input_values: std::collections::HashMap::new(),
         links: Vec::new(),
         bounds: Vec::new(),
+        loaded_web_fonts: std::collections::HashSet::new(),
         scroll_y: 0,
         content_height: viewport.height,
         _frame: None,
@@ -159,6 +160,8 @@ struct Content {
     links: Vec<argus_layout::LinkBox>,
     /// Id'd element boxes from the last render (screen coords), for click dispatch.
     bounds: Vec<argus_layout::ElementBound>,
+    /// `@font-face` family keys already fetched + registered (avoid re-fetching).
+    loaded_web_fonts: std::collections::HashSet<u32>,
     /// Vertical scroll offset in pixels.
     scroll_y: u32,
     /// Full page height from the last layout (reported to the browser for clamping).
@@ -173,6 +176,8 @@ impl Content {
     /// `channel` is used to fetch image subresources from the browser.
     fn render(&mut self, channel: &Channel) -> io::Result<Framebuffer> {
         self.links.clear();
+        // Fetch + register any not-yet-loaded `@font-face` web fonts before paint.
+        self.load_web_fonts(channel)?;
         let mut fb = Framebuffer::create(self.viewport)?;
         let (Some(font), Some(doc)) = (&self.font, &self.doc) else {
             fb.fill(PHASE0_PAINT);
@@ -268,6 +273,37 @@ impl Content {
         );
         self.links = layout.links;
         Ok(fb)
+    }
+
+    /// Fetch and register any `@font-face` web fonts declared by the document that
+    /// haven't been loaded yet, keyed by `argus_css::family_key` so the style engine
+    /// and the font registry agree. Data-URL sources decode locally; others fetch
+    /// through the browser. Each family is attempted once.
+    fn load_web_fonts(&mut self, channel: &Channel) -> io::Result<()> {
+        let (Some(doc), Some(_)) = (&self.doc, &self.font) else {
+            return Ok(());
+        };
+        let faces = argus_style::author_stylesheet(doc).font_faces;
+        for face in faces {
+            let key = argus_css::family_key(&face.family);
+            if !self.loaded_web_fonts.insert(key) {
+                continue; // already attempted
+            }
+            let bytes = if face.src_url.starts_with("data:") {
+                argus_image::decode_data_url_bytes(&face.src_url).unwrap_or_default()
+            } else {
+                fetch_resource(channel, &face.src_url)?
+            };
+            if bytes.is_empty() {
+                log!("web font '{}' fetch failed", face.family);
+                continue;
+            }
+            if let Some(font) = self.font.take() {
+                self.font = Some(font.with_web_font(key, bytes));
+                log!("loaded web font '{}' ({} bytes)", face.family, face.src_url.len());
+            }
+        }
+        Ok(())
     }
 
     /// Hit-test a click against id'd element boxes; if one is hit, append a `click`
