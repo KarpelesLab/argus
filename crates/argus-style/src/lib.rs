@@ -1329,7 +1329,7 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         };
     }
     if let Some(v) = map.get("box-shadow") {
-        cs.box_shadow = parse_box_shadow(v, cs.font_size);
+        cs.box_shadow = parse_box_shadow(v, cs.font_size, cs.color);
     }
     if let Some(v) = map
         .get("list-style-type")
@@ -2186,18 +2186,19 @@ fn parse_radial_gradient(v: &str, current: Color) -> Option<Gradient> {
 
 /// Parse a (single, outer) `box-shadow` into `(offset-x, offset-y, blur, spread,
 /// color)` in px. The lengths are offset-x, offset-y, blur, spread (in order); a
-/// color token sets the color (default black). `inset` shadows are skipped.
-fn parse_box_shadow(v: &str, fs: f32) -> Option<(f32, f32, f32, f32, Color)> {
+/// color token sets the color (default and `currentColor` → the element's text
+/// color `current`, per spec). `inset` shadows are skipped.
+fn parse_box_shadow(v: &str, fs: f32, current: Color) -> Option<(f32, f32, f32, f32, Color)> {
     let layer = v.split(',').next()?.trim();
     if layer == "none" || layer.split_whitespace().any(|t| t == "inset") {
         return None;
     }
     let mut lengths: Vec<f32> = Vec::new();
-    let mut color = Color::rgb(0, 0, 0);
+    let mut color = current;
     for tok in layer.split_whitespace() {
         if let Some(l) = parse_length(tok) {
             lengths.push(l.to_px(fs, 0.0));
-        } else if let Some(c) = parse_color(tok) {
+        } else if let Some(c) = stop_color(tok, current) {
             color = c;
         }
     }
@@ -2828,6 +2829,27 @@ mod tests {
         assert_eq!(g.n_stops, 2);
         assert_eq!(g.from, parse_color("yellow").unwrap());
         assert_eq!(g.to, parse_color("green").unwrap());
+    }
+
+    #[test]
+    fn box_shadow_color_defaults_to_current_color() {
+        let mut doc = Document::new();
+        let d = one(&mut doc, "div", vec![]);
+        // No color token → the shadow takes the element's `color` (spec default),
+        // and an explicit `currentColor` resolves the same way.
+        for decl in [
+            "div { color: #ff0000; box-shadow: 0 2px 4px }",
+            "div { color: #ff0000; box-shadow: 0 2px 4px currentColor }",
+        ] {
+            let cs = computed_style(
+                &doc,
+                d,
+                &ComputedStyle::initial(),
+                &parse_stylesheet(decl),
+            );
+            let (_, _, _, _, c) = cs.box_shadow.expect("shadow parsed");
+            assert_eq!(c, Color { r: 255, g: 0, b: 0, a: 255 }, "{decl}");
+        }
     }
 
     #[test]
