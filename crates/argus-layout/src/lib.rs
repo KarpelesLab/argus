@@ -2663,9 +2663,10 @@ mod tests {
             (seed & 0xff) as u8
         };
         // Bias toward markup plus CSS property/value bytes so styled, nested boxes
-        // (flex/grid/tables/lists) are exercised, not just text.
-        const BIAS: &[u8] =
-            b"<>/=\"' ;:{}().%#-\nstyledivpaulitbflexgridcolorwidthpaddingmarginbordedisplay0123";
+        // (flex/grid/tables/lists, floats, positioning, fr tracks) are exercised,
+        // not just text.
+        const BIAS: &[u8] = b"<>/=\"' ;:{}().%#-\nstyledivpaulitbflexgridcolorwidthpaddingmargin\
+borderdisplay0123floatleftrightclearbothfrgrowshrinkwrapspanabsolutefixedrelativtopbottomgaprepeat";
         for _ in 0..2000 {
             let len = (byte() as usize) * 4;
             let bytes: Vec<u8> = (0..len)
@@ -2680,11 +2681,17 @@ mod tests {
             let s = String::from_utf8_lossy(&bytes);
             let doc = parse(&s);
             // The full pipeline (parse → cascade → layout) must never panic, and
-            // must produce finite geometry.
+            // every emitted geometry must be finite (no NaN/inf from fr/flex math).
             let l = layout(&doc, &font, 400.0, &ImageSizes::new());
             assert!(l.height.is_finite());
             for r in &l.rects {
-                assert!(r.w.is_finite() && r.h.is_finite());
+                assert!(r.w.is_finite() && r.h.is_finite() && r.x.is_finite() && r.y.is_finite());
+            }
+            for run in &l.runs {
+                assert!(run.x.is_finite() && run.baseline.is_finite());
+            }
+            for im in &l.images {
+                assert!(im.x.is_finite() && im.y.is_finite() && im.w.is_finite() && im.h.is_finite());
             }
         }
     }

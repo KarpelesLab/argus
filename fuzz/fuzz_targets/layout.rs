@@ -33,5 +33,16 @@ fuzz_target!(|data: &[u8]| {
     let html = String::from_utf8_lossy(data);
     let doc = argus_html::parse(&html);
     let l = layout(&doc, font, 400.0, &ImageSizes::new());
+    // No emitted geometry may be NaN/inf — guards the fr/flex-grow/shrink division
+    // and float-band math against degenerate (e.g. zero-track, huge-span) inputs.
     assert!(l.height.is_finite());
+    for r in &l.rects {
+        assert!(r.x.is_finite() && r.y.is_finite() && r.w.is_finite() && r.h.is_finite());
+    }
+    for run in &l.runs {
+        assert!(run.x.is_finite() && run.baseline.is_finite());
+    }
+    for im in &l.images {
+        assert!(im.x.is_finite() && im.y.is_finite() && im.w.is_finite() && im.h.is_finite());
+    }
 });
