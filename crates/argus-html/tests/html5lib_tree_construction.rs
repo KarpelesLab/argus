@@ -745,4 +745,33 @@ a</br>b
 |     "b"
 |     <table>
 |     "c"
+
+#data
+<p>1<b>2</p>3
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <p>
+|       "1"
+|       <b>
+|         "2"
+|     <b>
+|       "3"
+
+#data
+<p>1<b>2</p><i>3</i>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <p>
+|       "1"
+|       <b>
+|         "2"
+|     <b>
+|       <i>
+|         "3"
 "####;

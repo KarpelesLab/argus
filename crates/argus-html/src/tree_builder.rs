@@ -6,9 +6,12 @@
 //! behavior (`<p>`, `<li>`/`<dd>`/`<dt>`, headings), implicit table `tbody`/`tr`,
 //! table-text foster parenting, the `<image>`→`<img>` / `</br>` / empty-`</p>`
 //! quirks, and a basic subset of **SVG/MathML foreign content** (namespaced
-//! subtrees) — enough to build faithful trees for typical content. The harder
-//! machinery — full table modes, the adoption agency algorithm for misnested
-//! formatting elements, foreign-content integration points/breakout tags, and
+//! subtrees) — enough to build faithful trees for typical content. It also keeps
+//! the **list of active formatting elements** and **reconstructs** them, so inline
+//! formatting a block boundary closed is re-opened for following content
+//! (`<p>x<b>y</p>z` → `<p>x<b>y</b></p><b>z</b>`). The harder machinery — full table
+//! modes, the *reparenting* half of the adoption agency algorithm (misnested
+//! block-in-formatting), foreign-content integration points/breakout tags, and
 //! template contents — is deferred and tracked in `docs/subsystems/dom.md`.
 //! Conformance against html5lib-tests comes with it.
 
@@ -86,6 +89,12 @@ const CLOSES_P: &[&str] = &[
 
 const HEADINGS: &[&str] = &["h1", "h2", "h3", "h4", "h5", "h6"];
 
+/// Inline formatting elements tracked in the list of active formatting elements,
+/// so they can be reconstructed after a block boundary closes them.
+const FORMATTING: &[&str] = &[
+    "a", "b", "big", "code", "em", "font", "i", "nobr", "s", "small", "strike", "strong", "tt", "u",
+];
+
 /// Elements popped by "generate implied end tags".
 const IMPLIED_END: &[&str] = &["dd", "dt", "li", "optgroup", "option", "p", "rp", "rt"];
 
@@ -93,6 +102,13 @@ const IMPLIED_END: &[&str] = &["dd", "dt", "li", "optgroup", "option", "p", "rp"
 const SCOPE_BOUNDARY: &[&str] = &[
     "applet", "caption", "html", "table", "td", "th", "marquee", "object", "template",
 ];
+
+/// An entry in the list of active formatting elements: a scope marker, or a
+/// formatting element open on the stack.
+enum Afe {
+    Marker,
+    Element(NodeId),
+}
 
 struct TreeBuilder {
     doc: Document,
@@ -102,6 +118,9 @@ struct TreeBuilder {
     /// Set after a `<pre>`/`<listing>`/`<textarea>` start tag: a single newline at
     /// the very start of that element's text is dropped (HTML's "ignore the LF").
     ignore_lf: bool,
+    /// The list of active formatting elements — formatting tags that should be
+    /// re-opened (reconstructed) when content appears after a block closed them.
+    active_formatting: Vec<Afe>,
 }
 
 impl TreeBuilder {
@@ -112,6 +131,78 @@ impl TreeBuilder {
             mode: Mode::Initial,
             head: None,
             ignore_lf: false,
+            active_formatting: Vec::new(),
+        }
+    }
+
+    /// Re-open any active formatting elements that aren't on the open stack, so
+    /// inline formatting carries across a block that closed it (`<p>x<b>y</p>z`).
+    fn reconstruct_active_formatting(&mut self) {
+        let n = self.active_formatting.len();
+        if n == 0 {
+            return;
+        }
+        // Nothing to do if the last entry is a marker or already on the open stack.
+        match &self.active_formatting[n - 1] {
+            Afe::Marker => return,
+            Afe::Element(id) if self.open.contains(id) => return,
+            _ => {}
+        }
+        // Rewind to the first entry that is a marker or still on the open stack.
+        let mut i = n - 1;
+        while i > 0 {
+            i -= 1;
+            match &self.active_formatting[i] {
+                Afe::Marker => {
+                    i += 1;
+                    break;
+                }
+                Afe::Element(id) if self.open.contains(id) => {
+                    i += 1;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        // Clone each remaining entry's element and insert it at the current position.
+        for j in i..n {
+            let Afe::Element(orig) = &self.active_formatting[j] else {
+                continue;
+            };
+            let (name, attrs) = match &self.doc.node(*orig).data {
+                NodeData::Element(e) => (
+                    e.name.clone(),
+                    e.attrs
+                        .iter()
+                        .map(|a| Attribute::new(a.name.clone(), a.value.clone()))
+                        .collect::<Vec<_>>(),
+                ),
+                _ => continue,
+            };
+            let clone = self.doc.create_element(name, attrs);
+            let parent = self.current();
+            self.doc.append(parent, clone);
+            self.open.push(clone);
+            self.active_formatting[j] = Afe::Element(clone);
+        }
+    }
+
+    /// Remove the most recent active-formatting entry for `name` (an end tag).
+    fn remove_formatting(&mut self, name: &str) {
+        if let Some(pos) = self.active_formatting.iter().rposition(|e| match e {
+            Afe::Element(id) => self.is_named(*id, name),
+            Afe::Marker => false,
+        }) {
+            self.active_formatting.remove(pos);
+        }
+    }
+
+    /// Drop active-formatting entries back to (and including) the last marker.
+    fn clear_formatting_to_marker(&mut self) {
+        while let Some(e) = self.active_formatting.pop() {
+            if matches!(e, Afe::Marker) {
+                break;
+            }
         }
     }
 
@@ -467,11 +558,15 @@ impl TreeBuilder {
                     self.ignore_lf = false;
                     if let Some(rest) = s.strip_prefix('\n') {
                         if !rest.is_empty() {
+                            self.reconstruct_active_formatting();
                             self.insert_text(rest);
                         }
                         return false;
                     }
                 }
+                // Re-open formatting that a block boundary closed, so text after it
+                // (`<p>x<b>y</p>z`) is wrapped in a fresh copy of the formatting.
+                self.reconstruct_active_formatting();
                 self.insert_text(s);
                 false
             }
@@ -613,10 +708,21 @@ impl TreeBuilder {
                 }
             }
         }
+        // Re-open any active formatting elements a block boundary closed, so the new
+        // element (and its content) nests inside them.
+        self.reconstruct_active_formatting();
         if VOID.contains(&name) {
             self.insert_element(name, attrs);
         } else {
             self.insert_and_push(name, attrs);
+        }
+        // Track formatting elements for later reconstruction; cells/captions/etc.
+        // push a marker so formatting doesn't leak across their boundary.
+        if FORMATTING.contains(&name) {
+            let node = self.current();
+            self.active_formatting.push(Afe::Element(node));
+        } else if matches!(name, "td" | "th" | "caption" | "applet" | "object" | "marquee") {
+            self.active_formatting.push(Afe::Marker);
         }
         // These elements drop a single leading newline in their text content.
         if matches!(name, "pre" | "listing" | "textarea") {
@@ -649,6 +755,23 @@ impl TreeBuilder {
                             break;
                         }
                     }
+                }
+            }
+            n if FORMATTING.contains(&n) => {
+                // Simplified adoption: drop the formatting element from both the
+                // active-formatting list and the open stack (the full reparenting
+                // algorithm isn't modeled; reconstruction handles the common case).
+                self.remove_formatting(n);
+                if self.has_in_scope(n, false) {
+                    self.generate_implied_end_tags(Some(n));
+                    self.pop_until(n);
+                }
+            }
+            "td" | "th" | "caption" | "applet" | "object" | "marquee" => {
+                if self.has_in_scope(name, false) {
+                    self.generate_implied_end_tags(None);
+                    self.pop_until(name);
+                    self.clear_formatting_to_marker();
                 }
             }
             n => {
