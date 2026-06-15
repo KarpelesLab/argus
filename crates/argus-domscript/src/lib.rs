@@ -191,7 +191,17 @@ function __argus_el(tgt) {
         return {
           add: function(c) { __argus_ops.push({op: "class", tgt: tgt, key: "add", value: "" + c}); },
           remove: function(c) { __argus_ops.push({op: "class", tgt: tgt, key: "remove", value: "" + c}); },
-          toggle: function(c) { __argus_ops.push({op: "class", tgt: tgt, key: "toggle", value: "" + c}); },
+          toggle: function(c, force) {
+            // With a `force` argument, toggle becomes an unconditional add/remove.
+            var key = (arguments.length > 1) ? (force ? "add" : "remove") : "toggle";
+            __argus_ops.push({op: "class", tgt: tgt, key: key, value: "" + c});
+            return key === "add" || (key === "toggle" && !has(c));
+          },
+          replace: function(a, b) {
+            __argus_ops.push({op: "class", tgt: tgt, key: "remove", value: "" + a});
+            __argus_ops.push({op: "class", tgt: tgt, key: "add", value: "" + b});
+            return has(a);
+          },
           contains: has
         };
       }
@@ -1381,6 +1391,31 @@ mod tests {
         assert_eq!(
             set,
             ["c", "z"]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            "class was {class:?}"
+        );
+    }
+
+    #[test]
+    fn class_list_toggle_force_and_replace() {
+        let mut doc = argus_html::parse(
+            "<div id=\"d\" class=\"a b\">x</div>\
+             <script>\
+               var e = document.getElementById('d');\
+               e.classList.toggle('a', true);   /* force-add (already present) */\
+               e.classList.toggle('b', false);  /* force-remove */\
+               e.classList.toggle('keep', true);/* force-add new */\
+               e.classList.replace('a', 'z');   /* a → z */\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        let class = attr_of(&doc, "d", "class").unwrap_or_default();
+        let set: std::collections::BTreeSet<&str> = class.split_whitespace().collect();
+        // start a,b → force+a (no-op), force-b, +keep, replace a→z → {z, keep}
+        assert_eq!(
+            set,
+            ["keep", "z"]
                 .into_iter()
                 .collect::<std::collections::BTreeSet<_>>(),
             "class was {class:?}"
