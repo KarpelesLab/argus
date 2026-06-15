@@ -243,8 +243,9 @@ fn parse_rules_into(tokens: &[Token], media: Option<&str>, rules: &mut Vec<Rule>
 }
 
 /// Whether a `@media` query matches a viewport `viewport_width` px wide. Supports
-/// `screen`/`all`/`print`, `(min-width)`/`(max-width)` in px/em, comma lists (OR),
-/// and `and` (AND). Unknown features are treated as non-matching.
+/// `screen`/`all`/`print`, `(min-width)`/`(max-width)`/`(width)` in px/em, comma
+/// lists (OR), `and` (AND), and a leading `not` (negation). Unknown features are
+/// treated as non-matching.
 pub fn media_query_matches(query: &str, viewport_width: f32) -> bool {
     let q = query.trim();
     if q.is_empty() {
@@ -260,8 +261,14 @@ fn media_branch_matches(branch: &str, vw: f32) -> bool {
     if branch.is_empty() {
         return true;
     }
+    // A leading `not` negates the whole branch (e.g. `not screen`, `not all`,
+    // `not (min-width: 600px)`).
+    let (negate, branch) = match branch.strip_prefix("not ") {
+        Some(rest) => (true, rest.trim().to_string()),
+        None => (false, branch),
+    };
     // Every `and`-joined condition must hold.
-    branch.split("and").all(|cond| {
+    let matched = branch.split("and").all(|cond| {
         let cond = cond.trim().trim_start_matches("only ").trim();
         if cond.is_empty() || cond == "screen" || cond == "all" {
             return true;
@@ -278,11 +285,13 @@ fn media_branch_matches(branch: &str, vw: f32) -> bool {
             return match (feat, px) {
                 ("min-width", Some(p)) => vw >= p,
                 ("max-width", Some(p)) => vw <= p,
+                ("width", Some(p)) => (vw - p).abs() < 0.5,
                 _ => false,
             };
         }
         false
-    })
+    });
+    matched != negate
 }
 
 /// Parse a bare declaration block (e.g. the value of an inline `style` attribute).
@@ -475,6 +484,16 @@ mod tests {
         assert!(!media_query_matches("screen and (min-width: 800px)", 500.0));
         // Comma list is OR.
         assert!(media_query_matches("print, (max-width: 600px)", 500.0));
+
+        // `not` negates the whole branch.
+        assert!(!media_query_matches("not screen", 800.0)); // we render as screen
+        assert!(media_query_matches("not print", 800.0));
+        assert!(!media_query_matches("not all", 800.0));
+        assert!(!media_query_matches("not (min-width: 600px)", 700.0)); // width matches → negated
+        assert!(media_query_matches("not (min-width: 600px)", 500.0)); // doesn't match → negated true
+        // Exact `(width:)`.
+        assert!(media_query_matches("(width: 800px)", 800.0));
+        assert!(!media_query_matches("(width: 800px)", 700.0));
 
         // A matching media rule overrides a base rule via matching_media().
         let sheet =
