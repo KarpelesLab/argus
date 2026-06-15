@@ -636,6 +636,22 @@ fn presentational_hints(doc: &Document, node: NodeId) -> Vec<(String, String)> {
             out.push(("border-spacing".into(), format!("{n}px")));
         }
     }
+    // A cell's `valign` (or its row's, since vertical-align doesn't inherit) maps
+    // to `vertical-align`; cells honor top/middle/bottom.
+    if matches!(tag, "td" | "th") {
+        let row_valign = doc
+            .node(node)
+            .parent()
+            .and_then(|p| doc.node(p).as_element())
+            .filter(|pe| pe.name.is_html("tr"))
+            .and_then(|pe| pe.attr("valign"));
+        if let Some(v) = e.attr("valign").or(row_valign) {
+            let v = v.trim().to_ascii_lowercase();
+            if matches!(v.as_str(), "top" | "middle" | "bottom") {
+                out.push(("vertical-align".into(), v));
+            }
+        }
+    }
     if matches!(tag, "td" | "th") {
         let mut p = doc.node(node).parent();
         while let Some(pid) = p {

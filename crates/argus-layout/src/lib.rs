@@ -2801,9 +2801,19 @@ impl Ctx<'_> {
         for r in 1..nrows {
             row_y[r] = row_y[r - 1] + row_h[r - 1] + bs;
         }
-        // Real layout at each cell's (x, y).
-        for p in &placed {
-            self.cursor_y = row_y[p.row];
+        // Real layout at each cell's (x, y), vertically aligning content within the
+        // cell's (possibly spanned) row height for `vertical-align: middle/bottom`.
+        for (i, p) in placed.iter().enumerate() {
+            let last = (p.row + p.rspan - 1).min(nrows.saturating_sub(1));
+            let cell_h =
+                row_h[p.row..=last].iter().sum::<f32>() + (last - p.row) as f32 * bs;
+            let free = (cell_h - heights[i]).max(0.0);
+            let dy = match p.style.vertical_align {
+                VerticalAlign::Middle => free / 2.0,
+                VerticalAlign::Bottom => free,
+                _ => 0.0,
+            };
+            self.cursor_y = row_y[p.row] + dy;
             self.layout_block(p.cell, p.style, col_x[p.col], span_w(p.col, p.cspan), None);
         }
         self.cursor_y = table_top + row_h.iter().sum::<f32>() + (nrows as f32 + 1.0) * bs;
@@ -4695,6 +4705,25 @@ mod tests {
         let l_l = layout(&doc_l, &font, 400.0, &ImageSizes::new());
         let hr_l = l_l.rects.iter().max_by(|a, b| a.h.partial_cmp(&b.h).unwrap()).unwrap();
         assert!((hr_l.x - PAGE_MARGIN).abs() < 1.0, "align=left at the left edge: {}", hr_l.x);
+    }
+
+    #[test]
+    fn table_cell_vertical_align() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A tall cell sets the row height; a second cell with valign=bottom drops
+        // its content lower than the default top-aligned cell.
+        let html = "<table><tr>\
+                      <td style=\"height:120px\">tall</td>\
+                      <td valign=\"bottom\">low</td>\
+                    </tr></table>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let tall = l.runs.iter().find(|r| r.text == "tall").unwrap().baseline;
+        let low = l.runs.iter().find(|r| r.text == "low").unwrap().baseline;
+        assert!(low > tall + 30.0, "bottom-aligned content sits lower: {tall} vs {low}");
     }
 
     #[test]
