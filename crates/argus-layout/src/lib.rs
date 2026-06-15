@@ -388,6 +388,9 @@ type DisplayListMark = (usize, usize, usize, usize, usize);
 /// Strip count used to approximate a `linear-gradient` background.
 const GRAD_STEPS: usize = 24;
 
+/// Concentric layers used to fake a Gaussian `box-shadow` blur with flat rects.
+const SHADOW_BLUR_LAYERS: usize = 6;
+
 /// A placed float: the vertical band it occupies and the inner edge that inline
 /// content flows up to (a left float's right edge; a right float's left edge).
 #[derive(Clone, Copy)]
@@ -684,11 +687,19 @@ impl Ctx<'_> {
             });
         }
 
-        // Reserve a box-shadow slot first (painted behind the background), filled in
-        // once the box height is known.
+        // Reserve box-shadow slots first (painted behind the background), filled in
+        // once the box height is known. A blurred shadow uses several fading layers;
+        // a sharp one a single rect.
         let shadow_idx = (style.box_shadow.is_some() && !style.hidden).then(|| {
-            self.rects.push(RectFill::default());
-            self.rects.len() - 1
+            let layers = match style.box_shadow {
+                Some((_, _, blur, _, _)) if blur > 0.0 => SHADOW_BLUR_LAYERS,
+                _ => 1,
+            };
+            let i = self.rects.len();
+            for _ in 0..layers {
+                self.rects.push(RectFill::default());
+            }
+            i
         });
         // Reserve background + border rect slots up front so ancestors paint first.
         // `visibility: hidden` keeps the box's geometry but paints no ink.
@@ -1210,15 +1221,40 @@ impl Ctx<'_> {
         self.cursor_y += style.padding.bottom + style.border.bottom;
         let border_box_h = self.cursor_y - border_box_top;
 
-        if let (Some(i), Some((dx, dy, spread, sc))) = (shadow_idx, style.box_shadow) {
-            self.rects[i] = RectFill {
-                x: border_box_left + dx - spread,
-                y: border_box_top + dy - spread,
-                w: (border_box_w + 2.0 * spread).max(0.0),
-                h: (border_box_h + 2.0 * spread).max(0.0),
-                color: style.fade(sc),
-                radius: style.border_radius,
-            };
+        if let (Some(i), Some((dx, dy, blur, spread, sc))) = (shadow_idx, style.box_shadow) {
+            let sc = style.fade(sc);
+            let cx = border_box_left + dx;
+            let cy = border_box_top + dy;
+            if blur <= 0.0 {
+                // Sharp shadow: a single spread rect behind the box.
+                self.rects[i] = RectFill {
+                    x: cx - spread,
+                    y: cy - spread,
+                    w: (border_box_w + 2.0 * spread).max(0.0),
+                    h: (border_box_h + 2.0 * spread).max(0.0),
+                    color: sc,
+                    radius: style.border_radius,
+                };
+            } else {
+                // Faux blur: concentric rects from the full blur extent inward, each
+                // contributing a fraction of the alpha so the edge fades out. The
+                // innermost (solid) rect sits at the spread box.
+                let n = SHADOW_BLUR_LAYERS;
+                let layer_a = (sc.a as f32 / n as f32).round().max(1.0) as u8;
+                for k in 0..n {
+                    // k = 0 is the outermost/faintest extent, k = n-1 the spread box.
+                    let grow = blur * (1.0 - k as f32 / n as f32);
+                    let ext = spread + grow;
+                    self.rects[i + k] = RectFill {
+                        x: cx - ext,
+                        y: cy - ext,
+                        w: (border_box_w + 2.0 * ext).max(0.0),
+                        h: (border_box_h + 2.0 * ext).max(0.0),
+                        color: argus_geometry::Color { a: layer_a, ..sc },
+                        radius: style.border_radius + grow.max(0.0),
+                    };
+                }
+            }
         }
         if let Some(i) = bg_idx {
             self.rects[i].h = border_box_h;
@@ -4387,6 +4423,34 @@ mod tests {
         // Offset from the page margin (~8) by +4.
         assert!((shadow.x - 12.0).abs() < 2.0, "shadow offset x, got {}", shadow.x);
         assert!((shadow.w - 50.0).abs() < 2.0 && (shadow.h - 30.0).abs() < 2.0, "shadow box size");
+    }
+
+    #[test]
+    fn box_shadow_blur_paints_fading_layers() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A blurred shadow: several translucent red layers, the largest extending
+        // beyond the 50x30 box, none fully opaque (alpha split across layers).
+        let html = "<div style=\"width:50px; height:30px; background:#fff; \
+            box-shadow: 0 0 12px #ff0000\">x</div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let reds: Vec<&RectFill> = l
+            .rects
+            .iter()
+            .filter(|r| r.color.r > 200 && r.color.g < 60 && r.color.b < 60)
+            .collect();
+        assert!(reds.len() >= 4, "blur emits multiple layers, got {}", reds.len());
+        assert!(
+            reds.iter().all(|r| r.color.a < 255),
+            "blur layers are translucent"
+        );
+        assert!(
+            reds.iter().any(|r| r.w > 50.0 + 12.0),
+            "outermost blur layer extends past the box"
+        );
     }
 
     #[test]

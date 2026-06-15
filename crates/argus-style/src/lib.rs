@@ -312,9 +312,9 @@ pub struct ComputedStyle {
     pub accent_color: Option<Color>,
     /// `text-shadow` as `(offset-x, offset-y, color)` in px (blur ignored); inherited.
     pub text_shadow: Option<(f32, f32, Color)>,
-    /// `box-shadow` as `(offset-x, offset-y, spread, color)` in px (outer only,
-    /// blur ignored); not inherited.
-    pub box_shadow: Option<(f32, f32, f32, Color)>,
+    /// `box-shadow` as `(offset-x, offset-y, blur, spread, color)` in px (outer
+    /// only; blur faux-rendered as fading layers); not inherited.
+    pub box_shadow: Option<(f32, f32, f32, f32, Color)>,
     /// A two-stop `linear-gradient` background (painted as stepped strips).
     pub background_gradient: Option<Gradient>,
     /// Column count for a grid container (from `grid-template-columns`).
@@ -2184,10 +2184,10 @@ fn parse_radial_gradient(v: &str, current: Color) -> Option<Gradient> {
     })
 }
 
-/// Parse a (single, outer) `box-shadow` into `(offset-x, offset-y, spread, color)`
-/// in px. The lengths are offset-x, offset-y, blur (ignored), spread (in order); a
+/// Parse a (single, outer) `box-shadow` into `(offset-x, offset-y, blur, spread,
+/// color)` in px. The lengths are offset-x, offset-y, blur, spread (in order); a
 /// color token sets the color (default black). `inset` shadows are skipped.
-fn parse_box_shadow(v: &str, fs: f32) -> Option<(f32, f32, f32, Color)> {
+fn parse_box_shadow(v: &str, fs: f32) -> Option<(f32, f32, f32, f32, Color)> {
     let layer = v.split(',').next()?.trim();
     if layer == "none" || layer.split_whitespace().any(|t| t == "inset") {
         return None;
@@ -2202,8 +2202,9 @@ fn parse_box_shadow(v: &str, fs: f32) -> Option<(f32, f32, f32, Color)> {
         }
     }
     if lengths.len() >= 2 {
+        let blur = lengths.get(2).copied().unwrap_or(0.0).max(0.0);
         let spread = lengths.get(3).copied().unwrap_or(0.0);
-        Some((lengths[0], lengths[1], spread, color))
+        Some((lengths[0], lengths[1], blur, spread, color))
     } else {
         None
     }
