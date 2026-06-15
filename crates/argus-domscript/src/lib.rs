@@ -290,6 +290,14 @@ function __argus_el(tgt) {
       if (k === "remove") {
         return function() { __argus_ops.push({op: "remove", tgt: tgt}); };
       }
+      // Programmatic activation: el.click() fires registered click handlers.
+      if (k === "click") {
+        return function() { __argus_dispatch(tgt.kind, tgt.val, "click"); };
+      }
+      // focus/blur/scrollIntoView: accepted no-ops (no real viewport here).
+      if (k === "focus" || k === "blur" || k === "scrollIntoView") {
+        return function() {};
+      }
       if (k === "insertAdjacentHTML") {
         return function(pos, html) {
           __argus_ops.push({op: "insertAdjacentHTML", tgt: tgt,
@@ -2089,6 +2097,22 @@ mod tests {
             .collect();
         assert_eq!(kids, vec!["ab", "be"], "afterbegin first, beforeend last");
         assert_eq!(text_of(&doc, "t"), "ABmidBE");
+    }
+
+    #[test]
+    fn programmatic_click_fires_handlers() {
+        let mut doc = argus_html::parse(
+            "<button id=\"b\">x</button><span id=\"out\">0</span>\
+             <script>\
+               document.getElementById('b').addEventListener('click', function(){\
+                 document.getElementById('out').textContent = 'clicked';\
+               });\
+               document.getElementById('b').click();   /* programmatic */\
+               document.getElementById('b').focus();    /* no-op, must not throw */\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        assert_eq!(text_of(&doc, "out"), "clicked");
     }
 
     #[test]
