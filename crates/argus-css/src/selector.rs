@@ -1,8 +1,8 @@
 //! Selector parsing, specificity, and matching against the DOM.
 //!
 //! Supports type, universal, class, id, and attribute (`[a]`/`[a=v]`/`~=`/`^=`/
-//! `$=`/`*=`, plus the `[a=v i]` ASCII case-insensitive flag) selectors in compound
-//! selectors, joined by descendant (whitespace)
+//! `$=`/`*=`/`|=`, plus the `[a=v i]` ASCII case-insensitive flag) selectors in
+//! compound selectors, joined by descendant (whitespace)
 //! and child (`>`) combinators. Evaluated pseudo-classes: `:first-child`,
 //! `:last-child`, `:only-child`, `:nth-child(an+b)`, `:nth-last-child`,
 //! `:first/last/only-of-type`, `:nth-of-type`, `:nth-last-of-type`, `:not(...)`,
@@ -37,6 +37,9 @@ pub enum AttrMatch {
     Suffix(String),
     /// `[a*=v]`
     Substring(String),
+    /// `[a|=v]` — equals `v`, or begins with `v` immediately followed by `-`
+    /// (the language-subtag match).
+    DashMatch(String),
 }
 
 /// An attribute selector, e.g. `[type="text"]`.
@@ -449,7 +452,8 @@ fn parse_attr(tokens: &[Token], i: &mut usize) -> Option<AttrSel> {
         return None;
     }
     let op = match op_char {
-        '=' | '|' => AttrMatch::Exact(value),
+        '=' => AttrMatch::Exact(value),
+        '|' => AttrMatch::DashMatch(value),
         '~' => AttrMatch::Includes(value),
         '^' => AttrMatch::Prefix(value),
         '$' => AttrMatch::Suffix(value),
@@ -569,6 +573,10 @@ fn attr_matches(e: &argus_dom::ElementData, sel: &AttrSel) -> bool {
         AttrMatch::Prefix(v) => !v.is_empty() && val.starts_with(&fold(v)),
         AttrMatch::Suffix(v) => !v.is_empty() && val.ends_with(&fold(v)),
         AttrMatch::Substring(v) => !v.is_empty() && val.contains(&fold(v)),
+        AttrMatch::DashMatch(v) => {
+            let v = fold(v);
+            val == v || val.starts_with(&format!("{v}-"))
+        }
     }
 }
 
@@ -785,6 +793,16 @@ mod tests {
         assert!(matches(&doc, li2, &sel("[data-k~=v2]")));
         assert!(!matches(&doc, li2, &sel("[data-k~=v3]")));
         assert!(matches(&doc, li2, &sel("[data-k^=v1]")));
+        // |= dash-match: lang="en-US" matches [lang|=en], plain "en" too, but not "english".
+        let en_us = doc.create_element(QualName::html("p"), vec![Attribute::new("lang", "en-US")]);
+        doc.append(root, en_us);
+        let en = doc.create_element(QualName::html("p"), vec![Attribute::new("lang", "en")]);
+        doc.append(root, en);
+        let english = doc.create_element(QualName::html("p"), vec![Attribute::new("lang", "english")]);
+        doc.append(root, english);
+        assert!(matches(&doc, en_us, &sel("[lang|=en]")));
+        assert!(matches(&doc, en, &sel("[lang|=en]")));
+        assert!(!matches(&doc, english, &sel("[lang|=en]")));
         assert!(matches(&doc, li1, &sel("li:first-child")));
         assert!(!matches(&doc, li2, &sel("li:first-child")));
         assert!(matches(&doc, li3, &sel("li:last-child")));
