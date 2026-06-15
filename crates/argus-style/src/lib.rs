@@ -8,13 +8,14 @@
 //! font, color/background, the box model, text-align). See
 //! `docs/subsystems/style.md`.
 
-use argus_css::{matches, parse_color, parse_declaration_block, parse_length, parse_stylesheet};
+use argus_css::{matches, parse_declaration_block, parse_length, parse_stylesheet};
 use argus_css::{Specificity, Stylesheet};
 use argus_dom::{Document, NodeData, NodeId};
 use argus_geometry::Color;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+pub use argus_css::parse_color;
 pub use argus_css::Length;
 pub use argus_css::PseudoElement;
 pub use argus_css::Stylesheet as AuthorStylesheet;

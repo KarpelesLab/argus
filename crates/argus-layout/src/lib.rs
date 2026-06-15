@@ -818,6 +818,22 @@ impl Ctx<'_> {
                     radius,
                 });
             }
+            // `<input type=color>`: fill the inner box with the value's color swatch.
+            if e.name.is_html("input") && ty == "color" && !style.hidden {
+                let swatch = e
+                    .attr("value")
+                    .and_then(argus_style::parse_color)
+                    .unwrap_or(argus_geometry::Color::BLACK);
+                let inset = 2.0;
+                self.rects.push(RectFill {
+                    x: border_box_left + inset,
+                    y: border_box_top + inset,
+                    w: (border_box_w - 2.0 * inset).max(0.0),
+                    h: (border_box_h - 2.0 * inset).max(0.0),
+                    color: swatch,
+                    radius: 0.0,
+                });
+            }
         }
 
         // `outline`: four rects just outside the border box (no layout effect).
@@ -2834,6 +2850,23 @@ mod tests {
             line_count("overflow-wrap: break-word") > 1,
             "break-word splits the long word across lines"
         );
+    }
+
+    #[test]
+    fn input_type_color_renders_a_swatch() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // <input type=color value=#ff0000> paints a red swatch rect.
+        let html = "<input type=\"color\" value=\"#ff0000\" style=\"width:30px; height:20px\">";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let red = l
+            .rects
+            .iter()
+            .any(|r| r.color.r > 200 && r.color.g < 60 && r.color.b < 60 && r.w > 10.0);
+        assert!(red, "expected a red color swatch");
     }
 
     #[test]
