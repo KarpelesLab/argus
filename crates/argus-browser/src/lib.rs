@@ -546,6 +546,68 @@ pub fn dump_json(url: Option<&str>) -> io::Result<String> {
     Ok(extract_json(&doc, url))
 }
 
+/// Headless automation: fetch a page and return its DOM as a nested JSON tree
+/// (`{tag, attrs, children}`, text nodes as `{text}`) — a CDP-style structured
+/// snapshot. Used by `--dump-domtree`.
+pub fn dump_domtree(url: Option<&str>) -> io::Result<String> {
+    log::set_role(Role::Browser);
+    let mut net = spawn_child(Role::NetService)?;
+    proto::parent_handshake(net.channel(), Size::new(800, 600))?;
+    let html = resolve_html(&net, url);
+    proto::send(net.channel(), Msg::Shutdown, &[])?;
+    net.wait()?;
+    let mut doc = argus_html::parse(&html);
+    argus_domscript::apply_scripts_with_url(&mut doc, url);
+    let mut out = String::new();
+    // Serialize the document's element children (skipping the synthetic root).
+    let root = doc.root();
+    out.push('[');
+    let mut first = true;
+    for c in doc.children(root) {
+        if let Some(node) = dom_node_json(&doc, c) {
+            if !first {
+                out.push(',');
+            }
+            out.push_str(&node);
+            first = false;
+        }
+    }
+    out.push_str("]\n");
+    Ok(out)
+}
+
+/// One DOM node as JSON: elements become `{"tag","attrs","children"}`; non-blank
+/// text nodes become `{"text":"…"}`; whitespace-only text and comments are
+/// dropped. Returns `None` for skipped nodes.
+fn dom_node_json(doc: &argus_dom::Document, id: argus_dom::NodeId) -> Option<String> {
+    use argus_dom::NodeData;
+    match &doc.node(id).data {
+        NodeData::Text(t) => {
+            let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+            (!t.is_empty()).then(|| format!("{{\"text\":\"{}\"}}", json_escape(&t)))
+        }
+        NodeData::Element(e) => {
+            let mut attrs: Vec<_> = e.attrs.iter().collect();
+            attrs.sort_by(|a, b| a.name.cmp(&b.name));
+            let attr_json: Vec<String> = attrs
+                .iter()
+                .map(|a| format!("\"{}\":\"{}\"", json_escape(&a.name), json_escape(&a.value)))
+                .collect();
+            let children: Vec<String> = doc
+                .children(id)
+                .filter_map(|c| dom_node_json(doc, c))
+                .collect();
+            Some(format!(
+                "{{\"tag\":\"{}\",\"attrs\":{{{}}},\"children\":[{}]}}",
+                json_escape(&e.name.local),
+                attr_json.join(","),
+                children.join(",")
+            ))
+        }
+        _ => None,
+    }
+}
+
 /// Escape a string for inclusion in a JSON double-quoted value.
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -1387,8 +1449,8 @@ fn verify_uniform(fb: &Framebuffer) -> io::Result<Color> {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_forms, extract_json, extract_links, extract_meta, page_title, render_text,
-        resolve_url, History,
+        dom_node_json, extract_forms, extract_json, extract_links, extract_meta, page_title,
+        render_text, resolve_url, History,
     };
 
     #[test]
@@ -1461,6 +1523,24 @@ mod tests {
         assert_eq!(lines[2], "External\thttps://other.example/x");
         assert_eq!(lines[3], "proto-relative\thttps://cdn.example/lib.js");
         assert_eq!(lines.len(), 4, "only <a href> elements are listed");
+    }
+
+    #[test]
+    fn dom_node_json_serializes_tree() {
+        let doc = argus_html::parse("<div id=\"a\" class=\"c\">hi <b>x</b></div>");
+        // Find the <div> (under html>body).
+        fn find<'a>(doc: &'a argus_dom::Document, id: argus_dom::NodeId, tag: &str) -> Option<argus_dom::NodeId> {
+            if matches!(&doc.node(id).data, argus_dom::NodeData::Element(e) if e.name.is_html(tag)) {
+                return Some(id);
+            }
+            doc.children(id).find_map(|c| find(doc, c, tag))
+        }
+        let div = find(&doc, doc.root(), "div").unwrap();
+        let json = dom_node_json(&doc, div).unwrap();
+        // Attrs are sorted; the text and nested <b> appear as children.
+        assert!(json.starts_with("{\"tag\":\"div\",\"attrs\":{\"class\":\"c\",\"id\":\"a\"}"), "{json}");
+        assert!(json.contains("{\"text\":\"hi\"}"), "{json}");
+        assert!(json.contains("{\"tag\":\"b\",\"attrs\":{},\"children\":[{\"text\":\"x\"}]}"), "{json}");
     }
 
     #[test]
