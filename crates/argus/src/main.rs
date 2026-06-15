@@ -117,6 +117,17 @@ fn main() {
             }
             return;
         }
+        // `--dump-json`: print a structured JSON summary (title/headings/links).
+        if has_flag("--dump-json") {
+            match argus_browser::dump_json(url.as_deref()) {
+                Ok(j) => print!("{j}"),
+                Err(err) => {
+                    eprintln!("[browser] dump-json failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
     }
 
     let result = match role {

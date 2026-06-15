@@ -531,6 +531,114 @@ pub fn dump_headings(url: Option<&str>) -> io::Result<String> {
     Ok(extract_headings(&doc))
 }
 
+/// Headless automation: fetch a page and return a structured JSON summary
+/// (`{title, headings:[{level,text}], links:[{text,href}]}`) for machine-readable
+/// pipelines. Used by `--dump-json`.
+pub fn dump_json(url: Option<&str>) -> io::Result<String> {
+    log::set_role(Role::Browser);
+    let mut net = spawn_child(Role::NetService)?;
+    proto::parent_handshake(net.channel(), Size::new(800, 600))?;
+    let html = resolve_html(&net, url);
+    proto::send(net.channel(), Msg::Shutdown, &[])?;
+    net.wait()?;
+    let mut doc = argus_html::parse(&html);
+    argus_domscript::apply_scripts_with_url(&mut doc, url);
+    Ok(extract_json(&doc, url))
+}
+
+/// Escape a string for inclusion in a JSON double-quoted value.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Build a JSON object `{title, headings, links}` from the document. Pure (no I/O),
+/// unit-testable; `base` resolves relative link hrefs.
+fn extract_json(doc: &argus_dom::Document, base: Option<&str>) -> String {
+    use argus_dom::{Document, NodeData, NodeId};
+
+    fn text_of(doc: &Document, id: NodeId) -> String {
+        fn go(doc: &Document, id: NodeId, out: &mut String) {
+            match &doc.node(id).data {
+                NodeData::Text(t) => out.push_str(t),
+                _ => {
+                    for c in doc.children(id) {
+                        go(doc, c, out);
+                    }
+                }
+            }
+        }
+        let mut s = String::new();
+        go(doc, id, &mut s);
+        s.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    let mut title = String::new();
+    let mut headings: Vec<(u8, String)> = Vec::new();
+    let mut links: Vec<(String, String)> = Vec::new();
+    fn walk(
+        doc: &Document,
+        id: NodeId,
+        base: Option<&str>,
+        title: &mut String,
+        headings: &mut Vec<(u8, String)>,
+        links: &mut Vec<(String, String)>,
+    ) {
+        if let NodeData::Element(e) = &doc.node(id).data {
+            let tag = &*e.name.local;
+            match tag {
+                "title" if title.is_empty() => *title = text_of(doc, id),
+                "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
+                    let level = tag.as_bytes()[1] - b'0';
+                    headings.push((level, text_of(doc, id)));
+                }
+                "a" => {
+                    if let Some(href) = e.attr("href") {
+                        links.push((text_of(doc, id), resolve_url(base, href)));
+                    }
+                }
+                _ => {}
+            }
+        }
+        for c in doc.children(id) {
+            walk(doc, c, base, title, headings, links);
+        }
+    }
+    walk(doc, doc.root(), base, &mut title, &mut headings, &mut links);
+
+    let hs: Vec<String> = headings
+        .iter()
+        .map(|(l, t)| format!("{{\"level\":{l},\"text\":\"{}\"}}", json_escape(t)))
+        .collect();
+    let ls: Vec<String> = links
+        .iter()
+        .map(|(t, h)| {
+            format!(
+                "{{\"text\":\"{}\",\"href\":\"{}\"}}",
+                json_escape(t),
+                json_escape(h)
+            )
+        })
+        .collect();
+    format!(
+        "{{\"title\":\"{}\",\"headings\":[{}],\"links\":[{}]}}\n",
+        json_escape(&title),
+        hs.join(","),
+        ls.join(",")
+    )
+}
+
 /// Collect `<h1>`–`<h6>` as `Hn: text` lines, indented two spaces per level below
 /// the first heading's level. Pure (no I/O) so it's unit-testable.
 fn extract_headings(doc: &argus_dom::Document) -> String {
@@ -1279,7 +1387,8 @@ fn verify_uniform(fb: &Framebuffer) -> io::Result<Color> {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_forms, extract_links, extract_meta, page_title, render_text, resolve_url, History,
+        extract_forms, extract_json, extract_links, extract_meta, page_title, render_text,
+        resolve_url, History,
     };
 
     #[test]
@@ -1352,6 +1461,24 @@ mod tests {
         assert_eq!(lines[2], "External\thttps://other.example/x");
         assert_eq!(lines[3], "proto-relative\thttps://cdn.example/lib.js");
         assert_eq!(lines.len(), 4, "only <a href> elements are listed");
+    }
+
+    #[test]
+    fn extract_json_emits_structured_summary() {
+        let doc = argus_html::parse(
+            "<title>My \"Page\"</title>\
+             <h1>Top</h1><h2>Sub</h2>\
+             <a href=\"/x\">Link</a>",
+        );
+        let out = extract_json(&doc, Some("https://site.example/"));
+        // Title is JSON-escaped; headings carry their level; the href is resolved.
+        assert!(out.contains("\"title\":\"My \\\"Page\\\"\""), "{out}");
+        assert!(out.contains("{\"level\":1,\"text\":\"Top\"}"), "{out}");
+        assert!(out.contains("{\"level\":2,\"text\":\"Sub\"}"), "{out}");
+        assert!(
+            out.contains("{\"text\":\"Link\",\"href\":\"https://site.example/x\"}"),
+            "{out}"
+        );
     }
 
     #[test]
