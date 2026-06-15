@@ -136,7 +136,8 @@ blue link</a> all flow inside this paragraph with correct spacing.</p>\
 <li>Square bullet</li><li>Another square</li>\
 </ul>\
 <p style=\"text-transform: uppercase\">text-transform makes this uppercase.</p>\
-<p>Inline features: H<sub>2</sub>O, E = mc<sup>2</sup>, and <small>small print</small>.</p>\
+<p>Inline features: H<sub>2</sub>O, E = mc<sup>2</sup>, <small>small print</small>, \
+<mark>highlighted text</mark>, and inline <code>code()</code>.</p>\
 <h3>A table</h3>\
 <table class=\"tbl\"><thead><tr><th>Subsystem</th><th>Crate</th><th>Status</th></tr></thead>\
 <tbody>\

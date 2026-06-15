@@ -148,6 +148,8 @@ struct InlineWord {
     text: String,
     font_size: f32,
     color: argus_geometry::Color,
+    /// Background paint behind this word (`a == 0` = none), for inline highlights.
+    background: argus_geometry::Color,
     /// Whether whitespace precedes this word (a break opportunity + a space glyph).
     space_before: bool,
     /// Whether this word is underlined (`text-decoration: underline`).
@@ -476,6 +478,7 @@ impl Ctx<'_> {
                         text: word.to_string(),
                         font_size: style.font_size,
                         color,
+                        background: argus_geometry::Color::TRANSPARENT,
                         space_before: i > 0,
                         underline: false,
                         strike: false,
@@ -1080,10 +1083,13 @@ impl Ctx<'_> {
                     VerticalAlign::Baseline => 0.0,
                 };
                 // `visibility: hidden` keeps the words' space but paints nothing.
-                let color = if style.hidden {
-                    argus_geometry::Color::TRANSPARENT
+                let (color, background) = if style.hidden {
+                    (
+                        argus_geometry::Color::TRANSPARENT,
+                        argus_geometry::Color::TRANSPARENT,
+                    )
                 } else {
-                    style.fade(style.color)
+                    (style.fade(style.color), style.fade(style.background_color))
                 };
                 let mut first = true;
                 for word in t.split_whitespace() {
@@ -1091,6 +1097,7 @@ impl Ctx<'_> {
                         text: transform_text(word, style.text_transform),
                         font_size: style.font_size,
                         color,
+                        background,
                         // Words within a text node are separated by whitespace.
                         space_before: *pending_space || !first,
                         underline: style.underline && !style.hidden,
@@ -1117,6 +1124,7 @@ impl Ctx<'_> {
                         text: String::new(),
                         font_size: style.font_size,
                         color: style.fade(style.color),
+                        background: argus_geometry::Color::TRANSPARENT,
                         space_before: false,
                         underline: false,
                         strike: false,
@@ -1245,6 +1253,17 @@ impl Ctx<'_> {
                 }
                 let word_w = self.font.measure(&w.text, w.font_size);
                 let wb = baseline + w.baseline_shift;
+                // Inline background (e.g. <mark>, highlighted span) paints behind the
+                // glyphs, covering the line box around this word.
+                if w.background.a > 0 {
+                    self.rects.push(rect(
+                        pen_x,
+                        line_top + w.baseline_shift,
+                        word_w,
+                        line_h,
+                        w.background,
+                    ));
+                }
                 self.runs.push(TextRun {
                     x: pen_x,
                     baseline: wb,
@@ -1389,6 +1408,24 @@ mod tests {
             up < base,
             "superscript {up} should sit above baseline {base}"
         );
+    }
+
+    #[test]
+    fn inline_background_paints_behind_words() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A <mark> (UA yellow background) paints a rect behind its word; the
+        // surrounding plain text does not.
+        let doc = parse("<p>plain <mark>highlighted</mark> plain</p>");
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let yellow = l
+            .rects
+            .iter()
+            .filter(|r| r.color.r == 0xFE && r.color.g == 0xF0 && r.color.b == 0x8A)
+            .count();
+        assert_eq!(yellow, 1, "exactly the marked word gets a highlight rect");
     }
 
     #[test]

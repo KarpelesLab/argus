@@ -248,6 +248,8 @@ s, del, strike { text-decoration: line-through }
 sub { vertical-align: sub; font-size: 0.75em }
 sup { vertical-align: super; font-size: 0.75em }
 small { font-size: 0.83em }
+mark { background-color: #fef08a }
+code, kbd, samp { background-color: #eef0f2 }
 ul, ol, blockquote, figure, pre { margin: 1em 0 }
 pre { white-space: pre }
 ul { list-style-type: disc }
