@@ -2186,8 +2186,29 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
                 }
             }
             Event::KeyChar { ch } => {
-                proto::send(procs[tabs.active_index()].channel(), Msg::InputKey { ch }, &[])?;
-                show_active!();
+                let ch_chan = procs[tabs.active_index()].channel();
+                proto::send(ch_chan, Msg::InputKey { ch }, &[])?;
+                // Enter may submit a form: content replies with a ClickResult whose
+                // non-empty url is the GET submission target (skip any StorageChanged
+                // first, as with a click).
+                let resp = loop {
+                    match proto::recv(ch_chan)?.0 {
+                        Msg::StorageChanged { data } => {
+                            let _ = std::fs::write(store::path(), &data);
+                        }
+                        other => break other,
+                    }
+                };
+                match resp {
+                    Msg::ClickResult { url } if !url.is_empty() => {
+                        let target = resolve_url(active_target(&tabs).as_deref(), &url);
+                        log!("submitting form -> {target}");
+                        tabs.active_mut().history.push(target);
+                        tabs.active_mut().scroll_y = 0;
+                        reload_active!();
+                    }
+                    _ => show_active!(),
+                }
             }
             Event::Back => {
                 if tabs.active_mut().history.back().is_some() {

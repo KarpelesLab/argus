@@ -611,6 +611,168 @@ fn form_urlencode(s: &str) -> String {
     out
 }
 
+/// Whether `e` is a submit control (`<button>` of default/submit type, or
+/// `<input type=submit|image>`).
+fn is_submit_control(e: &ElementData) -> bool {
+    if e.name.is_html("button") {
+        // A `<button>`'s default type is `submit`.
+        !matches!(e.attr("type"), Some("button") | Some("reset"))
+    } else if e.name.is_html("input") {
+        matches!(e.attr("type"), Some("submit") | Some("image"))
+    } else {
+        false
+    }
+}
+
+/// Walk up from `id` to the nearest enclosing `<form>` element.
+fn enclosing_form(doc: &Document, id: NodeId) -> Option<NodeId> {
+    let mut cur = doc.node(id).parent();
+    loop {
+        let f = cur?;
+        if doc.node(f).as_element().is_some_and(|e| e.name.is_html("form")) {
+            return Some(f);
+        }
+        cur = doc.node(f).parent();
+    }
+}
+
+/// The submitted value of a `<select>`: the chosen option's `value` attribute, or
+/// its visible text when it has none ("selected, else first option").
+fn selected_option_value(doc: &Document, select: NodeId) -> String {
+    let mut first: Option<NodeId> = None;
+    fn walk(doc: &Document, id: NodeId, first: &mut Option<NodeId>) -> Option<NodeId> {
+        for c in doc.children(id) {
+            if let NodeData::Element(e) = &doc.node(c).data {
+                if e.name.is_html("option") {
+                    if first.is_none() {
+                        *first = Some(c);
+                    }
+                    if e.attr("selected").is_some() {
+                        return Some(c);
+                    }
+                }
+            }
+            if let Some(found) = walk(doc, c, first) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    let Some(opt) = walk(doc, select, &mut first).or(first) else {
+        return String::new();
+    };
+    if let Some(v) = doc.node(opt).as_element().and_then(|e| e.attr("value")) {
+        return v.to_string();
+    }
+    let mut text = String::new();
+    collect_text(doc, opt, &mut text);
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Append each successful form control's `name=value` pair (document order),
+/// recursing through the form subtree. `submit_id` is the activated submit, so
+/// only it (not other submit buttons in the form) contributes its own pair.
+fn collect_form_fields(
+    doc: &Document,
+    node: NodeId,
+    submit_id: Option<NodeId>,
+    out: &mut Vec<(String, String)>,
+) {
+    for c in doc.children(node) {
+        if let Some(e) = doc.node(c).as_element() {
+            let named = e.attr("name").filter(|n| !n.is_empty());
+            if let Some(name) = named.filter(|_| e.attr("disabled").is_none()) {
+                if e.name.is_html("input") {
+                    match e.attr("type").unwrap_or("text") {
+                        "checkbox" | "radio" => {
+                            if e.attr("checked").is_some() {
+                                out.push((name.to_string(), e.attr("value").unwrap_or("on").to_string()));
+                            }
+                        }
+                        "submit" | "image" => {
+                            if Some(c) == submit_id {
+                                out.push((name.to_string(), e.attr("value").unwrap_or("").to_string()));
+                            }
+                        }
+                        // Buttons/reset/file controls are never submitted by value.
+                        "button" | "reset" | "file" => {}
+                        _ => out.push((name.to_string(), e.attr("value").unwrap_or("").to_string())),
+                    }
+                } else if e.name.is_html("select") {
+                    out.push((name.to_string(), selected_option_value(doc, c)));
+                } else if e.name.is_html("textarea") {
+                    let mut s = String::new();
+                    collect_text(doc, c, &mut s);
+                    out.push((name.to_string(), s));
+                } else if e.name.is_html("button")
+                    && Some(c) == submit_id
+                    && !matches!(e.attr("type"), Some("button") | Some("reset"))
+                {
+                    out.push((name.to_string(), e.attr("value").unwrap_or("").to_string()));
+                }
+            }
+        }
+        collect_form_fields(doc, c, submit_id, out);
+    }
+}
+
+/// Build a `method=get` form's `action?query` submission URL by serializing its
+/// successful controls. `submit_id` (when given) is the activated submit whose own
+/// `name=value` is included. Returns `None` for `POST` forms.
+fn build_get_url(doc: &Document, form: NodeId, submit_id: Option<NodeId>) -> Option<String> {
+    let fe = doc.node(form).as_element()?;
+    if fe.attr("method").is_some_and(|m| m.eq_ignore_ascii_case("post")) {
+        return None; // POST needs a request body — left to a later slice.
+    }
+    let action = fe.attr("action").unwrap_or("");
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    collect_form_fields(doc, form, submit_id, &mut pairs);
+    let query = pairs
+        .iter()
+        .map(|(k, v)| format!("{}={}", form_urlencode(k), form_urlencode(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+    if query.is_empty() {
+        return Some(action.to_string());
+    }
+    // `action` may already carry a query string (`search?lang=en`).
+    let sep = if action.contains('?') { '&' } else { '?' };
+    Some(format!("{action}{sep}{query}"))
+}
+
+/// If `id` is a submit control inside a `method=get` `<form>`, the GET submission
+/// URL that activating it produces (the control's own `name=value` included).
+/// `None` for non-submit elements, POST forms, or controls outside any form.
+pub fn form_get_url(doc: &Document, id: NodeId) -> Option<String> {
+    if !doc.node(id).as_element().is_some_and(is_submit_control) {
+        return None;
+    }
+    let form = enclosing_form(doc, id)?;
+    build_get_url(doc, form, Some(id))
+}
+
+/// The GET submission URL for *implicit* submission of the `method=get` `<form>`
+/// containing the control `field_id` — i.e. pressing Enter in a text field. The
+/// form's first submit control (if any) is treated as the activated one, matching
+/// browser default submission. `None` if the field is outside a form or the form
+/// is POST.
+pub fn form_get_url_for_field(doc: &Document, field_id: NodeId) -> Option<String> {
+    let form = enclosing_form(doc, field_id)?;
+    // The first submit control in the form is the implicit default submit.
+    fn first_submit(doc: &Document, node: NodeId) -> Option<NodeId> {
+        for c in doc.children(node) {
+            if doc.node(c).as_element().is_some_and(is_submit_control) {
+                return Some(c);
+            }
+            if let Some(found) = first_submit(doc, c) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    build_get_url(doc, form, first_submit(doc, form))
+}
+
 /// Lay `doc` out into a display list for a viewport `viewport_width` pixels wide,
 /// given the intrinsic sizes of any images.
 pub fn layout(doc: &Document, font: &Font, viewport_width: f32, images: &ImageSizes) -> Layout {
@@ -1551,7 +1713,7 @@ impl Ctx<'_> {
         // non-submit controls yield `None`. Pushed before any inline-block shift so
         // the region tracks the button's final position.
         if !style.hidden {
-            if let Some(href) = self.form_get_url(id) {
+            if let Some(href) = form_get_url(self.doc, id) {
                 self.links.push(LinkBox {
                     x: border_box_left,
                     y: border_box_top,
@@ -2488,130 +2650,6 @@ impl Ctx<'_> {
             collect(self.doc, opt, &mut text);
         }
         text.split_whitespace().collect::<Vec<_>>().join(" ")
-    }
-
-    /// The submitted value of a `<select>`: the chosen option's `value` attribute,
-    /// or its visible text when it has none. Mirrors `selected_option_text`'s
-    /// "selected, else first option" choice.
-    fn selected_option_value(&self, select: NodeId) -> String {
-        let mut first: Option<NodeId> = None;
-        fn walk(doc: &Document, id: NodeId, first: &mut Option<NodeId>) -> Option<NodeId> {
-            for c in doc.children(id) {
-                if let NodeData::Element(e) = &doc.node(c).data {
-                    if e.name.is_html("option") {
-                        if first.is_none() {
-                            *first = Some(c);
-                        }
-                        if e.attr("selected").is_some() {
-                            return Some(c);
-                        }
-                    }
-                }
-                if let Some(found) = walk(doc, c, first) {
-                    return Some(found);
-                }
-            }
-            None
-        }
-        let Some(opt) = walk(self.doc, select, &mut first).or(first) else {
-            return String::new();
-        };
-        if let Some(v) = self.doc.node(opt).as_element().and_then(|e| e.attr("value")) {
-            return v.to_string();
-        }
-        let mut text = String::new();
-        collect_text(self.doc, opt, &mut text);
-        text.split_whitespace().collect::<Vec<_>>().join(" ")
-    }
-
-    /// If `id` is a submit control inside a `method=get` `<form>`, build the
-    /// `action?query` URL by serializing the form's successful controls as
-    /// `application/x-www-form-urlencoded` (the activated submit's own
-    /// `name=value` included). Returns `None` for non-submit elements, `POST`
-    /// forms (no request-body channel yet), or controls outside any form — so the
-    /// caller only treats real GET submit buttons as navigation.
-    fn form_get_url(&self, id: NodeId) -> Option<String> {
-        let btn = self.doc.node(id).as_element()?;
-        let is_submit = if btn.name.is_html("button") {
-            // A `<button>`'s default type is `submit`.
-            !matches!(btn.attr("type"), Some("button") | Some("reset"))
-        } else if btn.name.is_html("input") {
-            matches!(btn.attr("type"), Some("submit") | Some("image"))
-        } else {
-            false
-        };
-        if !is_submit {
-            return None;
-        }
-        // Walk up to the enclosing <form>.
-        let mut cur = self.doc.node(id).parent();
-        let form = loop {
-            let f = cur?;
-            if self.doc.node(f).as_element().is_some_and(|e| e.name.is_html("form")) {
-                break f;
-            }
-            cur = self.doc.node(f).parent();
-        };
-        let fe = self.doc.node(form).as_element()?;
-        if fe.attr("method").is_some_and(|m| m.eq_ignore_ascii_case("post")) {
-            return None; // POST needs a request body — left to a later slice.
-        }
-        let action = fe.attr("action").unwrap_or("");
-        let mut pairs: Vec<(String, String)> = Vec::new();
-        self.collect_form_fields(form, id, &mut pairs);
-        let query = pairs
-            .iter()
-            .map(|(k, v)| format!("{}={}", form_urlencode(k), form_urlencode(v)))
-            .collect::<Vec<_>>()
-            .join("&");
-        if query.is_empty() {
-            return Some(action.to_string());
-        }
-        // `action` may already carry a query string (`search?lang=en`).
-        let sep = if action.contains('?') { '&' } else { '?' };
-        Some(format!("{action}{sep}{query}"))
-    }
-
-    /// Append each successful form control's `name=value` pair (document order),
-    /// recursing through the form subtree. `submit_id` is the activated submit so
-    /// only it (not other submit buttons) contributes its own pair.
-    fn collect_form_fields(&self, node: NodeId, submit_id: NodeId, out: &mut Vec<(String, String)>) {
-        for c in self.doc.children(node) {
-            if let Some(e) = self.doc.node(c).as_element() {
-                let named = e.attr("name").filter(|n| !n.is_empty());
-                if let Some(name) = named.filter(|_| e.attr("disabled").is_none()) {
-                    if e.name.is_html("input") {
-                        match e.attr("type").unwrap_or("text") {
-                            "checkbox" | "radio" => {
-                                if e.attr("checked").is_some() {
-                                    out.push((name.to_string(), e.attr("value").unwrap_or("on").to_string()));
-                                }
-                            }
-                            "submit" | "image" => {
-                                if c == submit_id {
-                                    out.push((name.to_string(), e.attr("value").unwrap_or("").to_string()));
-                                }
-                            }
-                            // Buttons/reset/file controls are never submitted by value.
-                            "button" | "reset" | "file" => {}
-                            _ => out.push((name.to_string(), e.attr("value").unwrap_or("").to_string())),
-                        }
-                    } else if e.name.is_html("select") {
-                        out.push((name.to_string(), self.selected_option_value(c)));
-                    } else if e.name.is_html("textarea") {
-                        let mut s = String::new();
-                        collect_text(self.doc, c, &mut s);
-                        out.push((name.to_string(), s));
-                    } else if e.name.is_html("button")
-                        && c == submit_id
-                        && !matches!(e.attr("type"), Some("button") | Some("reset"))
-                    {
-                        out.push((name.to_string(), e.attr("value").unwrap_or("").to_string()));
-                    }
-                }
-            }
-            self.collect_form_fields(c, submit_id, out);
-        }
     }
 
     /// Lay out a `display: flex` container. In the default `row` direction the
@@ -4667,6 +4705,48 @@ mod tests {
         let la = layout(&amp, &font, 400.0, &ImageSizes::new());
         let href = &la.links.iter().find(|l| l.href.starts_with("/s")).unwrap().href;
         assert_eq!(href, "/s?k=a%26b%3Dc", "ampersand/equals encoded");
+    }
+
+    #[test]
+    fn enter_in_a_field_submits_the_forms_get_url() {
+        // Recursively find an element by its `id` attribute.
+        fn by_id(doc: &Document, node: NodeId, want: &str) -> Option<NodeId> {
+            for c in doc.children(node) {
+                if doc.node(c).as_element().and_then(|e| e.attr("id")) == Some(want) {
+                    return Some(c);
+                }
+                if let Some(found) = by_id(doc, c, want) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+
+        // Pressing Enter in `q` submits the form, including the first submit's
+        // own name=value (implicit submission), as the browser would.
+        let doc = parse(
+            "<form action=\"/s\"><input id=\"q\" name=\"q\" value=\"hi there\">\
+             <input type=\"submit\" name=\"go\" value=\"Go\"></form>",
+        );
+        let q = by_id(&doc, doc.root(), "q").unwrap();
+        assert_eq!(
+            form_get_url_for_field(&doc, q).as_deref(),
+            Some("/s?q=hi+there&go=Go")
+        );
+
+        // A form with no submit control still submits its fields on Enter.
+        let doc2 = parse("<form action=\"/a\"><input id=\"n\" name=\"n\" value=\"7\"></form>");
+        let n = by_id(&doc2, doc2.root(), "n").unwrap();
+        assert_eq!(form_get_url_for_field(&doc2, n).as_deref(), Some("/a?n=7"));
+
+        // A field outside any form, and a POST form, yield no GET URL.
+        let doc3 = parse("<input id=\"loose\" name=\"x\" value=\"1\">");
+        let loose = by_id(&doc3, doc3.root(), "loose").unwrap();
+        assert_eq!(form_get_url_for_field(&doc3, loose), None);
+
+        let doc4 = parse("<form method=\"post\" action=\"/p\"><input id=\"pf\" name=\"x\" value=\"1\"></form>");
+        let pf = by_id(&doc4, doc4.root(), "pf").unwrap();
+        assert_eq!(form_get_url_for_field(&doc4, pf), None, "POST → no GET submit");
     }
 
     #[test]

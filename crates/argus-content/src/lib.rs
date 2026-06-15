@@ -164,7 +164,11 @@ pub fn run(channel: Channel) -> io::Result<()> {
                 proto::send(&channel, Msg::ClickResult { url }, &[])?;
             }
             Msg::InputKey { ch } => {
-                content.type_key(ch);
+                // Enter in a focused field may submit its form (GET); reply with the
+                // resulting navigation URL (empty = just typed, no navigation),
+                // mirroring the InputClick → ClickResult contract.
+                let url = content.type_key(ch).unwrap_or_default();
+                proto::send(&channel, Msg::ClickResult { url }, &[])?;
             }
             Msg::Shutdown => {
                 log!("shutting down");
@@ -449,10 +453,16 @@ impl Content {
     }
 
     /// Apply a typed key to the focused field: update its value and the document.
-    fn type_key(&mut self, ch: u32) {
-        let Some(id) = self.focused.clone() else {
-            return;
-        };
+    /// Returns the GET submission URL when Enter is pressed inside a `method=get`
+    /// form (the browser then navigates), else `None`.
+    fn type_key(&mut self, ch: u32) -> Option<String> {
+        let id = self.focused.clone()?;
+        // Enter (CR/LF) implicitly submits the focused field's form.
+        if ch == 0x0D || ch == 0x0A {
+            let doc = self.doc.as_ref()?;
+            let node = find_element_by_id(doc, &id)?;
+            return argus_layout::form_get_url_for_field(doc, node);
+        }
         let current = self
             .input_values
             .get(&id)
@@ -469,6 +479,7 @@ impl Content {
         let next = edit_value(&current, ch);
         self.input_values.insert(id, next);
         self.apply_input_values();
+        None
     }
 
     /// Re-apply user-typed values to the document's inputs (so typing survives
