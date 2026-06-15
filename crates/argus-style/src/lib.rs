@@ -115,14 +115,62 @@ pub enum GradientDir {
     ToTop,
 }
 
-/// A two-stop gradient background — axis-aligned `linear-gradient` (using `dir`),
-/// or a `radial-gradient` (`radial = true`; `from` is the center, `to` the edge).
+/// The most color stops we track per gradient (keeps [`Gradient`] `Copy`).
+pub const GRAD_MAX_STOPS: usize = 8;
+
+/// A gradient background — axis-aligned `linear-gradient` (using `dir`), or a
+/// `radial-gradient` (`radial = true`; `from` is the center, `to` the edge).
+///
+/// `stops[..n_stops]` holds `(color, position)` pairs with positions in `0.0..=1.0`
+/// along the gradient axis; `from`/`to` mirror the first/last stop for the radial
+/// path and simple two-stop consumers.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Gradient {
     pub dir: GradientDir,
     pub from: Color,
     pub to: Color,
     pub radial: bool,
+    pub stops: [(Color, f32); GRAD_MAX_STOPS],
+    pub n_stops: u8,
+}
+
+impl Gradient {
+    /// Color at fraction `t` (`0.0..=1.0`) along the axis, interpolating between the
+    /// two bracketing stops. Falls back to `from`→`to` when fewer than two stops.
+    pub fn color_at(&self, t: f32) -> Color {
+        let n = self.n_stops as usize;
+        if n < 2 {
+            return lerp_color(self.from, self.to, t.clamp(0.0, 1.0));
+        }
+        let stops = &self.stops[..n];
+        if t <= stops[0].1 {
+            return stops[0].0;
+        }
+        if t >= stops[n - 1].1 {
+            return stops[n - 1].0;
+        }
+        for w in stops.windows(2) {
+            let (c0, p0) = w[0];
+            let (c1, p1) = w[1];
+            if t <= p1 {
+                let span = (p1 - p0).max(f32::EPSILON);
+                return lerp_color(c0, c1, (t - p0) / span);
+            }
+        }
+        stops[n - 1].0
+    }
+}
+
+/// Linear interpolation between two colors at fraction `t` (`0.0..=1.0`).
+pub fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color {
+        r: l(a.r, b.r),
+        g: l(a.g, b.g),
+        b: l(a.b, b.b),
+        a: l(a.a, b.a),
+    }
 }
 
 /// `float` — take a box out of flow to the left/right, with content flowing past.
@@ -1896,31 +1944,7 @@ fn parse_linear_gradient(v: &str) -> Option<Gradient> {
     let start = v.find("linear-gradient(")? + "linear-gradient(".len();
     let rest = &v[start..];
     let inner = &rest[..rest.find(')').unwrap_or(rest.len())];
-    // Split top-level commas (none nested here beyond color funcs, which we keep
-    // whole by tracking parens).
-    let mut parts: Vec<String> = Vec::new();
-    let mut depth = 0i32;
-    let mut cur = String::new();
-    for ch in inner.chars() {
-        match ch {
-            '(' => {
-                depth += 1;
-                cur.push(ch);
-            }
-            ')' => {
-                depth -= 1;
-                cur.push(ch);
-            }
-            ',' if depth == 0 => {
-                parts.push(cur.trim().to_string());
-                cur.clear();
-            }
-            _ => cur.push(ch),
-        }
-    }
-    if !cur.trim().is_empty() {
-        parts.push(cur.trim().to_string());
-    }
+    let parts = split_top_level_commas(inner);
     if parts.is_empty() {
         return None;
     }
@@ -1949,18 +1973,104 @@ fn parse_linear_gradient(v: &str) -> Option<Gradient> {
         };
         color_parts = &parts[1..];
     }
-    // Each color stop may carry a trailing position; take the color token.
-    let color_of = |p: &str| -> Option<Color> {
-        p.split_whitespace().find_map(parse_color)
-    };
-    let from = color_of(color_parts.first()?)?;
-    let to = color_of(color_parts.last()?)?;
+    let (stops, n_stops) = parse_gradient_stops(color_parts)?;
     Some(Gradient {
         dir,
-        from,
-        to,
+        from: stops[0].0,
+        to: stops[n_stops as usize - 1].0,
         radial: false,
+        stops,
+        n_stops,
     })
+}
+
+/// Split on commas that sit at paren depth zero, keeping color functions
+/// (`rgb(…)`, `oklch(…)`) intact. Trims and drops empty segments.
+fn split_top_level_commas(inner: &str) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    for ch in inner.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            ',' if depth == 0 => {
+                parts.push(cur.trim().to_string());
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+    }
+    if !cur.trim().is_empty() {
+        parts.push(cur.trim().to_string());
+    }
+    parts.retain(|p| !p.is_empty());
+    parts
+}
+
+/// Parse an ordered list of `<color> [<position%>]` stops into a fixed array with
+/// monotonic positions in `0.0..=1.0`. Stops without an explicit position are
+/// spaced evenly between their positioned neighbors (CSS gradient stop rules).
+fn parse_gradient_stops(parts: &[String]) -> Option<([(Color, f32); GRAD_MAX_STOPS], u8)> {
+    // Collect (color, explicit-position?) pairs, capped to the array size.
+    let mut raw: Vec<(Color, Option<f32>)> = Vec::new();
+    for p in parts {
+        let color = p.split_whitespace().find_map(parse_color)?;
+        let pos = p
+            .split_whitespace()
+            .find_map(|t| t.strip_suffix('%'))
+            .and_then(|n| n.trim().parse::<f32>().ok())
+            .map(|pct| (pct / 100.0).clamp(0.0, 1.0));
+        raw.push((color, pos));
+        if raw.len() == GRAD_MAX_STOPS {
+            break;
+        }
+    }
+    if raw.len() < 2 {
+        return None;
+    }
+    // Anchor the endpoints, then fill gaps by even interpolation between anchors.
+    let n = raw.len();
+    if raw[0].1.is_none() {
+        raw[0].1 = Some(0.0);
+    }
+    if raw[n - 1].1.is_none() {
+        raw[n - 1].1 = Some(1.0);
+    }
+    let mut i = 0;
+    while i < n {
+        if raw[i].1.is_some() {
+            i += 1;
+            continue;
+        }
+        // Find the next positioned stop and distribute evenly across the gap.
+        let prev = raw[i - 1].1.unwrap();
+        let mut j = i;
+        while raw[j].1.is_none() {
+            j += 1;
+        }
+        let next = raw[j].1.unwrap();
+        let span = next - prev;
+        let count = (j - i + 1) as f32;
+        for (k, idx) in (i..j).enumerate() {
+            raw[idx].1 = Some(prev + span * (k as f32 + 1.0) / count);
+        }
+        i = j;
+    }
+    // Enforce non-decreasing positions (later stops never precede earlier ones).
+    let mut out = [(Color::TRANSPARENT, 0.0f32); GRAD_MAX_STOPS];
+    let mut last = 0.0f32;
+    for (idx, (c, p)) in raw.iter().enumerate() {
+        last = p.unwrap().max(last);
+        out[idx] = (*c, last);
+    }
+    Some((out, n as u8))
 }
 
 /// Parse a CSS `<angle>` to degrees: a bare number or `deg`, or a `grad`/`rad`/
@@ -1978,26 +2088,27 @@ fn parse_angle_deg(s: &str) -> Option<f32> {
     }
 }
 
-/// Parse a two-stop `radial-gradient(...)` — the first color is the center, the
-/// last the edge. Any shape/position prefix is ignored.
+/// Parse a `radial-gradient(...)` — the first color is the center, the last the
+/// edge. A leading shape/position prefix (`circle`, `at center`, …) carries no
+/// color and is dropped before reading the stops.
 fn parse_radial_gradient(v: &str) -> Option<Gradient> {
     let start = v.find("radial-gradient(")? + "radial-gradient(".len();
     let rest = &v[start..];
     let inner = &rest[..rest.find(')').unwrap_or(rest.len())];
-    let colors: Vec<Color> = inner
-        .split(',')
-        .filter_map(|p| p.split_whitespace().find_map(parse_color))
+    // Keep only segments that name a color (drops the optional shape prefix).
+    let color_parts: Vec<String> = split_top_level_commas(inner)
+        .into_iter()
+        .filter(|p| p.split_whitespace().any(|t| parse_color(t).is_some()))
         .collect();
-    if colors.len() >= 2 {
-        Some(Gradient {
-            dir: GradientDir::ToBottom,
-            from: colors[0],
-            to: *colors.last().unwrap(),
-            radial: true,
-        })
-    } else {
-        None
-    }
+    let (stops, n_stops) = parse_gradient_stops(&color_parts)?;
+    Some(Gradient {
+        dir: GradientDir::ToBottom,
+        from: stops[0].0,
+        to: stops[n_stops as usize - 1].0,
+        radial: true,
+        stops,
+        n_stops,
+    })
 }
 
 /// Parse a (single, outer) `box-shadow` into `(offset-x, offset-y, spread, color)`
@@ -2609,5 +2720,39 @@ mod tests {
         );
         assert_eq!(cs2.inset_top, Some(Length::Px(5.0)));
         assert_eq!(cs2.inset_left, Some(Length::Px(5.0)));
+    }
+
+    #[test]
+    fn linear_gradient_multi_stop_positions() {
+        // Three stops: red 0%, white at midpoint (default 50%), blue 100%.
+        let g = parse_linear_gradient("linear-gradient(to right, red, white, blue)").unwrap();
+        assert_eq!(g.n_stops, 3);
+        assert_eq!(g.stops[0].1, 0.0);
+        assert!((g.stops[1].1 - 0.5).abs() < 1e-6);
+        assert_eq!(g.stops[2].1, 1.0);
+        // The midpoint color is the middle stop, not a red→blue blend.
+        let mid = g.color_at(0.5);
+        assert_eq!((mid.r, mid.g, mid.b), (255, 255, 255));
+    }
+
+    #[test]
+    fn linear_gradient_explicit_percent_stops() {
+        // A hard stop: red up to 30%, then blue from 30% on.
+        let g = parse_linear_gradient("linear-gradient(red 30%, blue 30%)").unwrap();
+        assert_eq!(g.n_stops, 2);
+        assert!((g.stops[0].1 - 0.3).abs() < 1e-6);
+        assert!((g.stops[1].1 - 0.3).abs() < 1e-6);
+        // Just below the stop is red; at/after the stop is blue.
+        assert_eq!(g.color_at(0.2).r, 255);
+        assert_eq!(g.color_at(0.4).b, 255);
+    }
+
+    #[test]
+    fn radial_gradient_drops_shape_prefix() {
+        // The `circle` prefix carries no color and must not become a stop.
+        let g = parse_radial_gradient("radial-gradient(circle, yellow, green)").unwrap();
+        assert_eq!(g.n_stops, 2);
+        assert_eq!(g.from, parse_color("yellow").unwrap());
+        assert_eq!(g.to, parse_color("green").unwrap());
     }
 }

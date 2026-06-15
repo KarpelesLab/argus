@@ -306,17 +306,6 @@ type DisplayListMark = (usize, usize, usize, usize, usize);
 /// Strip count used to approximate a `linear-gradient` background.
 const GRAD_STEPS: usize = 24;
 
-/// Linearly interpolate between two colors (`t` in `0..=1`).
-fn lerp_color(a: argus_geometry::Color, b: argus_geometry::Color, t: f32) -> argus_geometry::Color {
-    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round().clamp(0.0, 255.0) as u8;
-    argus_geometry::Color {
-        r: l(a.r, b.r),
-        g: l(a.g, b.g),
-        b: l(a.b, b.b),
-        a: l(a.a, b.a),
-    }
-}
-
 /// A placed float: the vertical band it occupies and the inner edge that inline
 /// content flows up to (a left float's right edge; a right float's left edge).
 #[derive(Clone, Copy)]
@@ -1365,7 +1354,7 @@ impl Ctx<'_> {
                     y: y + (h - ih) / 2.0,
                     w: iw,
                     h: ih,
-                    color: lerp_color(g.to, g.from, f),
+                    color: g.color_at(1.0 - f),
                     radius: iw.min(ih) / 2.0,
                 };
             }
@@ -1378,7 +1367,7 @@ impl Ctx<'_> {
             // Fractional position of this strip's center along the gradient axis.
             let t_raw = (k as f32 + 0.5) / n;
             let t = if reversed { 1.0 - t_raw } else { t_raw };
-            let color = lerp_color(g.from, g.to, t);
+            let color = g.color_at(t);
             let rect = if horizontal {
                 let sw = w / n;
                 RectFill {
