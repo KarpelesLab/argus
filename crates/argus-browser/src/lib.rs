@@ -473,6 +473,17 @@ fn aria_states(e: &argus_dom::ElementData) -> String {
     s
 }
 
+/// Whether an element is hidden by the HTML `hidden` attribute or an inline
+/// `display: none` / `visibility: hidden` (the common cases the pure-DOM
+/// extractors can detect without full style resolution).
+fn el_hidden(e: &argus_dom::ElementData) -> bool {
+    e.attr("hidden").is_some()
+        || e.attr("style").is_some_and(|s| {
+            let s: String = s.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase();
+            s.contains("display:none") || s.contains("visibility:hidden")
+        })
+}
+
 /// Build the accessibility tree for a parsed document: each semantic element as an
 /// indented `role "name"` line. Honors an explicit `role` attribute, `aria-label`
 /// (accessible-name override), and `aria-hidden="true"` (prunes the subtree). Pure
@@ -564,8 +575,9 @@ fn a11y_tree(doc: &argus_dom::Document) -> String {
 
     fn walk(doc: &Document, id: NodeId, depth: usize, out: &mut String) {
         if let NodeData::Element(e) = &doc.node(id).data {
-            // `aria-hidden="true"` removes the element and its subtree from the tree.
-            if e.attr("aria-hidden") == Some("true") {
+            // `aria-hidden="true"`, the HTML `hidden` attribute, or inline
+            // display:none/visibility:hidden removes the element and its subtree.
+            if e.attr("aria-hidden") == Some("true") || el_hidden(e) {
                 return;
             }
         }
@@ -1509,7 +1521,7 @@ fn render_text(doc: &argus_dom::Document) -> String {
             }
             NodeData::Element(e) => {
                 let tag = &*e.name.local;
-                if is_hidden(tag) {
+                if is_hidden(tag) || el_hidden(e) {
                     return;
                 }
                 if tag == "br" {
@@ -2267,6 +2279,21 @@ mod tests {
         assert!(text.contains("x\ty"), "cells tab-separated: {text:?}");
         // List items are on their own lines.
         assert!(text.contains("one\ntwo"), "list items: {text:?}");
+    }
+
+    #[test]
+    fn render_text_skips_hidden_elements() {
+        let doc = argus_html::parse(
+            "<p>shown</p>\
+             <p hidden>hiddenattr</p>\
+             <p style=\"display:none\">displaynone</p>\
+             <p style=\"visibility: hidden\">invisible</p>",
+        );
+        let text = render_text(&doc);
+        assert!(text.contains("shown"));
+        assert!(!text.contains("hiddenattr"), "hidden attr dropped:\n{text}");
+        assert!(!text.contains("displaynone"), "display:none dropped:\n{text}");
+        assert!(!text.contains("invisible"), "visibility:hidden dropped:\n{text}");
     }
 
     #[test]
