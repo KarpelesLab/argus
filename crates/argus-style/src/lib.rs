@@ -249,6 +249,9 @@ pub struct ComputedStyle {
     /// `text-overflow: ellipsis` — truncate an overflowing single (`nowrap`) line
     /// with `…` (not inherited).
     pub ellipsis: bool,
+    /// `transform: translate(x, y)` — paints the subtree shifted by `(x, y)` with no
+    /// effect on layout. `%` resolves against the element's own box (not inherited).
+    pub transform_translate: Option<(Length, Length)>,
     /// `list-style-type` for list items (inherited).
     pub list_style: ListStyle,
     /// `text-transform` case mapping (inherited).
@@ -326,6 +329,7 @@ impl ComputedStyle {
             pre_wrap: false,
             break_word: false,
             ellipsis: false,
+            transform_translate: None,
             list_style: ListStyle::Disc,
             text_transform: TextTransform::None,
             box_sizing: BoxSizing::ContentBox,
@@ -1109,6 +1113,9 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     if let Some(v) = map.get("text-overflow") {
         cs.ellipsis = v.trim() == "ellipsis";
     }
+    if let Some(v) = map.get("transform") {
+        cs.transform_translate = parse_transform_translate(v);
+    }
 }
 
 /// Count the columns named by a `grid-template-columns` value (a simplified read
@@ -1162,6 +1169,30 @@ fn parse_grid_tracks(v: &str) -> (u32, [GridTrack; GRID_MAX_TRACKS]) {
         push(parse_one(tok));
     }
     (count.max(1) as u32, tracks)
+}
+
+/// Parse the `translate`/`translateX`/`translateY` part of a `transform` value
+/// into an `(x, y)` length pair. Other functions (scale/rotate/…) are ignored.
+fn parse_transform_translate(v: &str) -> Option<(Length, Length)> {
+    for seg in v.split(')') {
+        let seg = seg.trim();
+        if let Some(args) = seg.strip_prefix("translate(") {
+            let mut it = args.split(',');
+            let x = it.next().and_then(|s| parse_length(s.trim()))?;
+            let y = it
+                .next()
+                .and_then(|s| parse_length(s.trim()))
+                .unwrap_or(Length::Zero);
+            return Some((x, y));
+        }
+        if let Some(args) = seg.strip_prefix("translateX(") {
+            return parse_length(args.trim()).map(|x| (x, Length::Zero));
+        }
+        if let Some(args) = seg.strip_prefix("translateY(") {
+            return parse_length(args.trim()).map(|y| (Length::Zero, y));
+        }
+    }
+    None
 }
 
 /// Parse a `grid-column` value into a span count (columns occupied). Handles

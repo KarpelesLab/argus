@@ -876,6 +876,16 @@ impl Ctx<'_> {
             }
             Position::Static => {}
         }
+
+        // `transform: translate(x, y)` paints the subtree shifted, with no effect on
+        // flow. `%` resolves against the element's own border box.
+        if let Some((tx, ty)) = style.transform_translate {
+            let dx = tx.to_px(style.font_size, border_box_w);
+            let dy = ty.to_px(style.font_size, border_box_h);
+            if dx != 0.0 || dy != 0.0 {
+                self.shift_display_list(ds_start, dx, dy);
+            }
+        }
     }
 
     /// Shift every display-list item appended since `start` by `(dx, dy)`.
@@ -3471,6 +3481,28 @@ borderdisplay0123floatleftrightclearbothfrgrowshrinkwrapspanabsolutefixedrelativ
         let post = texts.iter().position(|t| *t == "POST");
         assert!(pre.is_some() && mid.is_some() && post.is_some(), "runs: {texts:?}");
         assert!(pre < mid && mid < post, "order PRE<mid<POST: {texts:?}");
+    }
+
+    #[test]
+    fn transform_translate_shifts_subtree_without_affecting_flow() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // The first block is translated by (40, 30); its text moves but the second
+        // block (in normal flow) is unaffected — it sits where it would without the
+        // transform.
+        let html = "<div style=\"transform: translate(40px, 30px)\">A</div><div>B</div>";
+        let doc = parse(html);
+        let lay = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let a = lay.runs.iter().find(|r| r.text == "A").unwrap();
+        let b = lay.runs.iter().find(|r| r.text == "B").unwrap();
+        // A shifted right ~40px from the page margin (~8 → ~48).
+        assert!(a.x > 40.0, "A translated right, got {}", a.x);
+        // B sits near the left and just below A's original line (transform didn't
+        // push it down by 30px).
+        assert!(b.x < 20.0, "B unaffected horizontally, got {}", b.x);
+        assert!(b.baseline < a.baseline + 5.0, "B not pushed down by A's transform");
     }
 
     #[test]
