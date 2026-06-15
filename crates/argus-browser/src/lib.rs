@@ -2011,6 +2011,16 @@ fn present_framed(
     Ok(())
 }
 
+/// Spawn a fresh content process for a new tab and handshake it at `vp`. Each tab
+/// owns an isolated, sandboxed content process so its DOM/JS/scroll state is kept
+/// when other tabs are active.
+#[cfg(target_os = "macos")]
+fn spawn_content_tab(vp: Size) -> io::Result<Child> {
+    let child = spawn_child(Role::Content)?;
+    proto::parent_handshake(child.channel(), vp)?;
+    Ok(child)
+}
+
 /// Run the browser in its default mode for this platform: a real window where one
 /// is available, the headless verifier otherwise. `url` selects the page (the
 /// built-in sample when `None`).
@@ -2045,13 +2055,11 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
         content_vp.height
     );
 
-    let mut content = spawn_child(Role::Content)?;
     let mut net = spawn_child(Role::NetService)?;
-    proto::parent_handshake(content.channel(), content_vp)?;
     proto::parent_handshake(net.channel(), content_vp)?;
-    // Per-tab navigation state. The single content process renders whichever tab
-    // is active; switching re-navigates it to the active tab's URL.
+    // Each tab is an isolated content process; `procs[i]` renders `tabs.tabs[i]`.
     let mut tabs = Tabs::new(url.clone().unwrap_or_default());
+    let mut procs: Vec<Child> = vec![spawn_content_tab(content_vp)?];
     // A URL Option for the active tab (empty string = the built-in home page).
     let active_target = |tabs: &Tabs| -> Option<String> {
         let u = tabs.active().url();
@@ -2059,22 +2067,56 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
     };
 
     let html = resolve_html(&net, active_target(&tabs).as_deref());
-    provide_page(&content, &html)?;
+    provide_page(&procs[0], &html)?;
     log!("children handshook; page sent; opening window");
 
     // Present the first frame.
-    let (frame, mut content_height) = request_frame(&content, &net, active_target(&tabs).as_deref())?;
+    let (frame, mut content_height) = request_frame(&procs[0], &net, active_target(&tabs).as_deref())?;
     let title = page_title(&html);
     let window = Window::open(if title.is_empty() { "Argus" } else { &title }, window_size);
     present_framed(&window, &frame, &tabs, window_size)?;
-    log!("window open — tab bar: click a tab to switch, its right edge to close, + to open; Cmd+T/W/Shift+[ ]/1-9 too");
+    log!("window open — per-tab processes; click a tab to switch (state kept), its right edge to close, + to open; Cmd+T/W/Shift+[ ]/1-9 too");
 
-    // Load the active tab's page and present it under the tab bar.
+    // Load the active tab's page into its process and present it.
     macro_rules! reload_active {
         () => {{
-            let (frame, h) = load_page(&content, &net, &window, active_target(&tabs).as_deref())?;
+            let proc = &procs[tabs.active_index()];
+            let (frame, h) = load_page(proc, &net, &window, active_target(&tabs).as_deref())?;
             content_height = h;
             present_framed(&window, &frame, &tabs, window_size)?;
+        }};
+    }
+    // Re-render the active tab's process *without* reloading — it kept its DOM,
+    // JS, and scroll state, so switching back is instant and stateful.
+    macro_rules! show_active {
+        () => {{
+            let proc = &procs[tabs.active_index()];
+            let (frame, h) = request_frame(proc, &net, active_target(&tabs).as_deref())?;
+            content_height = h;
+            present_framed(&window, &frame, &tabs, window_size)?;
+        }};
+    }
+    // Open a new tab: spawn its own content process, then load the home page.
+    macro_rules! open_tab {
+        () => {{
+            tabs.open(String::new());
+            procs.push(spawn_content_tab(content_vp)?);
+            log!("opened tab {} of {} (own process)", tabs.active_index() + 1, tabs.len());
+            reload_active!();
+        }};
+    }
+    // Close tab `i`: refuse if it is the last; else shut down + reap its process.
+    macro_rules! close_tab {
+        ($i:expr) => {{
+            let i = $i;
+            if tabs.close(i) {
+                let _ = proto::send(procs[i].channel(), Msg::Shutdown, &[]);
+                let _ = procs.remove(i).wait();
+                show_active!();
+                true
+            } else {
+                false
+            }
         }};
     }
     loop {
@@ -2082,19 +2124,16 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
             Event::MouseDown { x, y } if y < tabbar::TAB_BAR_H => {
                 // A click in the tab strip switches / closes / opens a tab.
                 match tabbar::hit_test(x, y, tabs.len(), window_size.width) {
-                    Some(tabbar::TabHit::New) => {
-                        tabs.open(String::new());
-                        reload_active!();
-                    }
+                    Some(tabbar::TabHit::New) => open_tab!(),
                     Some(tabbar::TabHit::Switch(i)) if i != tabs.active_index() => {
                         tabs.switch_to(i);
-                        reload_active!();
+                        show_active!();
                     }
                     Some(tabbar::TabHit::Close(i)) => {
-                        if !tabs.close(i) {
+                        let closed = close_tab!(i);
+                        if !closed {
                             break; // refused only for the last tab
                         }
-                        reload_active!();
                     }
                     _ => {}
                 }
@@ -2102,8 +2141,9 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
             Event::MouseDown { x, y } => {
                 // A click in the page area (offset past the tab strip).
                 let y = y - tabbar::TAB_BAR_H;
-                proto::send(content.channel(), Msg::InputClick { x, y }, &[])?;
-                if let Msg::ClickResult { url } = proto::recv(content.channel())?.0 {
+                let ch = procs[tabs.active_index()].channel();
+                proto::send(ch, Msg::InputClick { x, y }, &[])?;
+                if let Msg::ClickResult { url } = proto::recv(ch)?.0 {
                     if !url.is_empty() {
                         let target = resolve_url(active_target(&tabs).as_deref(), &url);
                         log!("navigating to {target}");
@@ -2113,10 +2153,7 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
                     } else {
                         // Non-navigation click: a DOM handler may have changed the
                         // page — re-render.
-                        let (frame, h) =
-                            request_frame(&content, &net, active_target(&tabs).as_deref())?;
-                        content_height = h;
-                        present_framed(&window, &frame, &tabs, window_size)?;
+                        show_active!();
                     }
                 }
             }
@@ -2126,18 +2163,13 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
                 let next = (cur as i64 - dy as i64).clamp(0, max_scroll as i64) as u32;
                 if next != cur {
                     tabs.active_mut().scroll_y = next;
-                    proto::send(content.channel(), Msg::SetScroll { y: next }, &[])?;
-                    let (frame, h) =
-                        request_frame(&content, &net, active_target(&tabs).as_deref())?;
-                    content_height = h;
-                    present_framed(&window, &frame, &tabs, window_size)?;
+                    proto::send(procs[tabs.active_index()].channel(), Msg::SetScroll { y: next }, &[])?;
+                    show_active!();
                 }
             }
             Event::KeyChar { ch } => {
-                proto::send(content.channel(), Msg::InputKey { ch }, &[])?;
-                let (frame, h) = request_frame(&content, &net, active_target(&tabs).as_deref())?;
-                content_height = h;
-                present_framed(&window, &frame, &tabs, window_size)?;
+                proto::send(procs[tabs.active_index()].channel(), Msg::InputKey { ch }, &[])?;
+                show_active!();
             }
             Event::Back => {
                 if tabs.active_mut().history.back().is_some() {
@@ -2151,31 +2183,26 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
                     reload_active!();
                 }
             }
-            Event::NewTab => {
-                tabs.open(String::new());
-                log!("opened tab {} of {}", tabs.active_index() + 1, tabs.len());
-                reload_active!();
-            }
+            Event::NewTab => open_tab!(),
             Event::CloseTab => {
-                if !tabs.close(tabs.active_index()) {
+                if !close_tab!(tabs.active_index()) {
                     log!("closing last tab; shutting down");
                     break;
                 }
-                reload_active!();
             }
             Event::NextTab => {
                 tabs.next();
-                reload_active!();
+                show_active!();
             }
             Event::PrevTab => {
                 tabs.prev();
-                reload_active!();
+                show_active!();
             }
             Event::SwitchTab { index } => {
                 let target = if index == 8 { tabs.len() - 1 } else { index };
                 if target != tabs.active_index() && target < tabs.len() {
                     tabs.switch_to(target);
-                    reload_active!();
+                    show_active!();
                 }
             }
             Event::CloseRequested => {
@@ -2185,9 +2212,12 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
         }
     }
 
-    proto::send(content.channel(), Msg::Shutdown, &[])?;
+    // Shut down every tab's content process and the net service.
+    for mut p in procs {
+        let _ = proto::send(p.channel(), Msg::Shutdown, &[]);
+        let _ = p.wait();
+    }
     proto::send(net.channel(), Msg::Shutdown, &[])?;
-    content.wait()?;
     net.wait()?;
     Ok(())
 }
