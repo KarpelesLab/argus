@@ -4,7 +4,7 @@
 //! codecs: PNG (`oxideav-png`), GIF (`oxideav-gif`), **JPEG** (`oxideav-mjpeg` via
 //! the `oxideav-core` registry, YUV→RGBA through `oxideav-pixfmt`), **WebP**
 //! (`oxideav-webp`, lossless), **QOI** (`oxideav-qoi`), and **ICO/CUR favicons**
-//! (`oxideav-ico`, largest sub-image) — plus uncompressed 8-bit-palette/24/32-bit BMP, **TGA**
+//! (`oxideav-ico`, largest sub-image) — plus uncompressed 1/4/8-bit-palette & 24/32-bit BMP, **TGA**
 //! (Truevision true-color + grayscale, uncompressed + RLE), **Netpbm** (PPM/PGM,
 //! ASCII + binary), **PCX** (RLE 24-bit + 8-bit palette), **TIFF** (baseline
 //! uncompressed + PackBits + LZW + Deflate RGB/RGBA/grayscale, horizontal predictor, both byte orders), all built in, and `data:` URLs.
@@ -218,7 +218,7 @@ fn decode_bmp(bytes: &[u8]) -> Option<DecodedImage> {
     let height_raw = rd_i32(22)?;
     let bpp = rd_u16(28)?;
     let compression = rd_u32(30)?;
-    if compression != 0 || !matches!(bpp, 8 | 24 | 32) || width <= 0 || height_raw == 0 {
+    if compression != 0 || !matches!(bpp, 1 | 4 | 8 | 24 | 32) || width <= 0 || height_raw == 0 {
         return None;
     }
     // Guard against absurd dimensions before allocating (malicious headers).
@@ -229,11 +229,17 @@ fn decode_bmp(bytes: &[u8]) -> Option<DecodedImage> {
     let width = width as usize;
     let height = height_raw.unsigned_abs() as usize;
 
-    // 8-bit images are palette-indexed: read the color table (BGR0 quads) that
-    // follows the DIB header, then look each pixel byte up in it.
-    let palette: Vec<[u8; 3]> = if bpp == 8 {
+    // Sub-8-bit and 8-bit images are palette-indexed: read the color table (BGR0
+    // quads after the DIB header), then look each pixel's index up in it.
+    let indexed = bpp <= 8;
+    let palette: Vec<[u8; 3]> = if indexed {
         let pal_start = 14 + dib_size as usize;
-        let ncolors = rd_u32(46).filter(|&n| n != 0).unwrap_or(256).min(256) as usize;
+        let default_n = 1usize << bpp; // 2 / 16 / 256
+        let ncolors = rd_u32(46)
+            .filter(|&n| n != 0)
+            .map(|n| n as usize)
+            .unwrap_or(default_n)
+            .min(default_n);
         let mut pal = Vec::with_capacity(ncolors);
         for i in 0..ncolors {
             let o = pal_start + i * 4;
@@ -244,8 +250,9 @@ fn decode_bmp(bytes: &[u8]) -> Option<DecodedImage> {
         Vec::new()
     };
 
-    let bytes_pp = (bpp / 8) as usize;
-    let row_size = (width * bytes_pp).div_ceil(4) * 4; // padded to 4 bytes
+    // Rows are padded to a 4-byte boundary; compute the stride in bits so 1/4-bit
+    // indices pack correctly (the formula also yields the right byte stride at 24/32).
+    let row_size = (width * bpp as usize).div_ceil(32) * 4;
 
     let mut rgba = vec![0u8; width * height * 4];
     for row in 0..height {
@@ -253,14 +260,27 @@ fn decode_bmp(bytes: &[u8]) -> Option<DecodedImage> {
         let src_row = if top_down { row } else { height - 1 - row };
         let row_start = data_offset + src_row * row_size;
         for col in 0..width {
-            let p = row_start + col * bytes_pp;
-            let (r, g, b) = if bpp == 8 {
-                let idx = *bytes.get(p)? as usize;
+            let (r, g, b) = if indexed {
+                // Extract the index of `bpp` bits at bit-offset `col * bpp`.
+                let bit = col * bpp as usize;
+                let byte = *bytes.get(row_start + bit / 8)?;
+                let idx = match bpp {
+                    1 => (byte >> (7 - (bit & 7))) & 0x01,
+                    4 => {
+                        if bit & 7 == 0 {
+                            byte >> 4
+                        } else {
+                            byte & 0x0F
+                        }
+                    }
+                    _ => byte, // 8-bit
+                } as usize;
                 let c = palette.get(idx).copied().unwrap_or([0, 0, 0]);
                 (c[0], c[1], c[2])
             } else {
                 // 32bpp in a BITMAPINFOHEADER is BGRX (the 4th byte is padding, not
                 // alpha — that needs V4/V5 headers), so treat every pixel as opaque.
+                let p = row_start + col * (bpp / 8) as usize;
                 (*bytes.get(p + 2)?, *bytes.get(p + 1)?, *bytes.get(p)?)
             };
             let dst = (row * width + col) * 4;
@@ -984,6 +1004,39 @@ mod tests {
         assert_eq!(&img.rgba[0..4], &[255, 0, 0, 255], "(0,0) red");
         assert_eq!(&img.rgba[4..8], &[0, 255, 0, 255], "(1,0) green");
         assert_eq!(&img.rgba[8..12], &[0, 0, 255, 255], "(0,1) blue");
+        assert_eq!(&img.rgba[12..16], &[255, 255, 255, 255], "(1,1) white");
+    }
+
+    #[test]
+    fn decodes_a_1bit_mono_bmp() {
+        // A 2x2 1-bit BMP, palette 0=black/1=white, bottom-up.
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(b"BM");
+        b.extend_from_slice(&70u32.to_le_bytes()); // file size (approx)
+        b.extend_from_slice(&0u32.to_le_bytes()); // reserved
+        b.extend_from_slice(&62u32.to_le_bytes()); // pixel offset = 14+40+2*4
+        b.extend_from_slice(&40u32.to_le_bytes()); // DIB size
+        b.extend_from_slice(&2i32.to_le_bytes()); // width
+        b.extend_from_slice(&2i32.to_le_bytes()); // height (bottom-up)
+        b.extend_from_slice(&1u16.to_le_bytes()); // planes
+        b.extend_from_slice(&1u16.to_le_bytes()); // bpp
+        b.extend_from_slice(&0u32.to_le_bytes()); // compression
+        b.extend_from_slice(&0u32.to_le_bytes()); // image size
+        b.extend_from_slice(&0u32.to_le_bytes()); // x ppm
+        b.extend_from_slice(&0u32.to_le_bytes()); // y ppm
+        b.extend_from_slice(&2u32.to_le_bytes()); // colors used = 2
+        b.extend_from_slice(&0u32.to_le_bytes()); // colors important
+        b.extend_from_slice(&[0, 0, 0, 0]); // index 0 = black
+        b.extend_from_slice(&[255, 255, 255, 0]); // index 1 = white
+        // Each row's 2 pixels live in the top 2 bits; padded to 4 bytes; bottom first.
+        b.extend_from_slice(&[0b0100_0000, 0, 0, 0]); // bottom: black, white
+        b.extend_from_slice(&[0b1000_0000, 0, 0, 0]); // top: white, black
+
+        let img = decode(&b).expect("decode 1-bit bmp");
+        assert_eq!((img.width, img.height), (2, 2));
+        assert_eq!(&img.rgba[0..4], &[255, 255, 255, 255], "(0,0) white");
+        assert_eq!(&img.rgba[4..8], &[0, 0, 0, 255], "(1,0) black");
+        assert_eq!(&img.rgba[8..12], &[0, 0, 0, 255], "(0,1) black");
         assert_eq!(&img.rgba[12..16], &[255, 255, 255, 255], "(1,1) white");
     }
 
