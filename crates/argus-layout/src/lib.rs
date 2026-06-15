@@ -2718,12 +2718,15 @@ impl Ctx<'_> {
         // Explicit `<col>`/`<colgroup>` widths pin those columns; the rest share
         // the leftover table width by their content (or equally). With no `<col>`
         // declared this reduces exactly to content-proportional auto widths.
+        // `border-spacing` (or `cellspacing`) inserts a gap before, between, and
+        // after the columns/rows; with the default 0 the table is gapless.
+        let bs = style.border_spacing.max(0.0);
         let col_explicit = self.collect_col_widths(id, cols, style.font_size, table_w);
         let explicit_total: f32 = col_explicit.iter().flatten().sum();
         let auto_cols = (0..cols).filter(|&c| col_explicit[c].is_none());
         let auto_nat_total: f32 = auto_cols.clone().map(|c| col_nat[c]).sum();
         let auto_count = auto_cols.count();
-        let remaining = (table_w - explicit_total).max(0.0);
+        let remaining = (table_w - explicit_total - (cols as f32 + 1.0) * bs).max(0.0);
         let col_w: Vec<f32> = (0..cols)
             .map(|c| {
                 if let Some(w) = col_explicit[c] {
@@ -2736,12 +2739,15 @@ impl Ctx<'_> {
             })
             .collect();
         let mut col_x = vec![table_left; cols];
-        let mut acc = table_left;
+        let mut acc = table_left + bs;
         for (c, w) in col_w.iter().enumerate() {
             col_x[c] = acc;
-            acc += w;
+            acc += w + bs;
         }
-        let span_w = |c: usize, cspan: usize| -> f32 { col_w[c..c + cspan].iter().sum() };
+        // A colspanning cell also covers the inter-column gaps it bridges.
+        let span_w = |c: usize, cspan: usize| -> f32 {
+            col_w[c..c + cspan].iter().sum::<f32>() + cspan.saturating_sub(1) as f32 * bs
+        };
 
         // Measure each cell's height (lay out at a throwaway origin, then truncate).
         let table_top = self.cursor_y;
@@ -2780,16 +2786,16 @@ impl Ctx<'_> {
                 }
             }
         }
-        let mut row_y = vec![table_top; nrows.max(1)];
+        let mut row_y = vec![table_top + bs; nrows.max(1)];
         for r in 1..nrows {
-            row_y[r] = row_y[r - 1] + row_h[r - 1];
+            row_y[r] = row_y[r - 1] + row_h[r - 1] + bs;
         }
         // Real layout at each cell's (x, y).
         for p in &placed {
             self.cursor_y = row_y[p.row];
             self.layout_block(p.cell, p.style, col_x[p.col], span_w(p.col, p.cspan), None);
         }
-        self.cursor_y = table_top + row_h.iter().sum::<f32>();
+        self.cursor_y = table_top + row_h.iter().sum::<f32>() + (nrows as f32 + 1.0) * bs;
         if style.caption_side_bottom {
             render_caption(self);
         }
@@ -4656,6 +4662,29 @@ mod tests {
         let left_gap = hr.x - PAGE_MARGIN;
         let right_gap = (PAGE_MARGIN + content_w) - (hr.x + hr.w);
         assert!((left_gap - right_gap).abs() < 2.0, "centered: {left_gap} vs {right_gap}");
+    }
+
+    #[test]
+    fn table_cellspacing_gaps_columns() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Same two-column table with and without cellspacing: the gap pushes the
+        // second column's content further right.
+        let cols_x = |html: &str| -> (f32, f32) {
+            let doc = parse(html);
+            let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+            let a = l.runs.iter().find(|r| r.text == "a").unwrap().x;
+            let b = l.runs.iter().find(|r| r.text == "b").unwrap().x;
+            (a, b)
+        };
+        let (a0, b0) = cols_x("<table style=\"width:200px\"><tr><td>a</td><td>b</td></tr></table>");
+        let (a1, b1) =
+            cols_x("<table style=\"width:200px\" cellspacing=\"20\"><tr><td>a</td><td>b</td></tr></table>");
+        // Both columns shift right (a leading gap, then a gap before the second).
+        assert!((a1 - a0 - 20.0).abs() < 1.0, "first column indented by one gap: {a0} -> {a1}");
+        assert!(b1 > b0 + 5.0, "second column pushed further right: {b0} -> {b1}");
     }
 
     #[test]

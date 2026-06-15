@@ -324,6 +324,9 @@ pub struct ComputedStyle {
     pub text_indent: f32,
     /// `word-spacing` extra pixels added between words (inherited).
     pub word_spacing: f32,
+    /// `border-spacing` (or the `cellspacing` attr) between table cells, in pixels
+    /// (inherited; the table layout reads it). Defaults to 0.
+    pub border_spacing: f32,
     /// `vertical-align` for inline content (not inherited).
     pub vertical_align: VerticalAlign,
     /// Column `gap` between flex/grid items in pixels (not inherited).
@@ -415,6 +418,7 @@ impl ComputedStyle {
             line_height: 1.2,
             text_indent: 0.0,
             word_spacing: 0.0,
+            border_spacing: 0.0,
             vertical_align: VerticalAlign::Baseline,
             gap: 0.0,
             row_gap: 0.0,
@@ -624,6 +628,9 @@ fn presentational_hints(doc: &Document, node: NodeId) -> Vec<(String, String)> {
                 out.push(("border".into(), format!("{n}px solid #808080")));
             }
         }
+        if let Some(n) = e.attr("cellspacing").and_then(|v| v.trim().parse::<f32>().ok()) {
+            out.push(("border-spacing".into(), format!("{n}px")));
+        }
     }
     if matches!(tag, "td" | "th") {
         let mut p = doc.node(node).parent();
@@ -761,6 +768,7 @@ pub fn computed_style(
         line_height: parent.line_height,         // line-height inherits
         text_indent: parent.text_indent,         // text-indent inherits
         word_spacing: parent.word_spacing,       // word-spacing inherits
+        border_spacing: parent.border_spacing,   // border-spacing inherits
         hidden: parent.hidden,                   // visibility inherits
         ..ComputedStyle::initial()
     };
@@ -1205,6 +1213,17 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     if let Some(v) = map.get("word-spacing").filter(|v| v.as_str() != "normal") {
         if let Some(px) = parse_length(v).map(|l| l.to_px(cs.font_size, 0.0)) {
             cs.word_spacing = px;
+        }
+    }
+    // `border-spacing` (the first/horizontal value if two are given).
+    if let Some(v) = map.get("border-spacing") {
+        if let Some(px) = v
+            .split_whitespace()
+            .next()
+            .and_then(parse_length)
+            .map(|l| l.to_px(cs.font_size, 0.0))
+        {
+            cs.border_spacing = px.max(0.0);
         }
     }
     if let Some(v) = map.get("line-height") {
