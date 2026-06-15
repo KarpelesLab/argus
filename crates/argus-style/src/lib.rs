@@ -202,6 +202,8 @@ pub struct ComputedStyle {
     pub underline: bool,
     /// `text-decoration: line-through`.
     pub strike: bool,
+    /// `text-decoration: overline`.
+    pub overline: bool,
     /// Column count for a grid container (from `grid-template-columns`).
     pub grid_columns: u32,
     /// Per-column track sizes (parallel to `grid_columns`, capped at
@@ -311,6 +313,7 @@ impl ComputedStyle {
             text_align: TextAlign::Left,
             underline: false,
             strike: false,
+            overline: false,
             grid_columns: 1,
             grid_tracks: [GridTrack::Auto; GRID_MAX_TRACKS],
             grid_column_span: 1,
@@ -712,6 +715,7 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     {
         cs.underline = v.split_whitespace().any(|t| t == "underline");
         cs.strike = v.split_whitespace().any(|t| t == "line-through");
+        cs.overline = v.split_whitespace().any(|t| t == "overline");
     }
     if let Some(v) = map
         .get("list-style-type")

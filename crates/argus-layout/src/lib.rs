@@ -174,6 +174,8 @@ struct InlineWord {
     underline: bool,
     /// Whether this word has a strike-through (`text-decoration: line-through`).
     strike: bool,
+    /// Whether this word has an overline (`text-decoration: overline`).
+    overline: bool,
     /// The hyperlink target, if this word is inside an `<a href>`.
     href: Option<Rc<str>>,
     /// Force a line break before this word (an `<br>` element).
@@ -568,6 +570,7 @@ impl Ctx<'_> {
                         space_before: i > 0,
                         underline: false,
                         strike: false,
+                        overline: false,
                         href: None,
                         hard_break: false,
                         baseline_shift: 0.0,
@@ -2026,6 +2029,7 @@ impl Ctx<'_> {
                 space_before: *pending_space || !first,
                 underline: style.underline && !style.hidden,
                 strike: style.strike && !style.hidden,
+                overline: style.overline && !style.hidden,
                 href: None,
                 hard_break: false,
                 baseline_shift: 0.0,
@@ -2076,6 +2080,7 @@ impl Ctx<'_> {
                         space_before: *pending_space || !first,
                         underline: style.underline && !style.hidden,
                         strike: style.strike && !style.hidden,
+                        overline: style.overline && !style.hidden,
                         href: if style.hidden { None } else { link.clone() },
                         hard_break: false,
                         baseline_shift: shift,
@@ -2102,6 +2107,7 @@ impl Ctx<'_> {
                         space_before: false,
                         underline: false,
                         strike: false,
+                        overline: false,
                         href: link.clone(),
                         hard_break: true,
                         baseline_shift: 0.0,
@@ -2317,6 +2323,12 @@ impl Ctx<'_> {
                     let sy = wb - self.font.ascent_px(w.font_size) * 0.32;
                     let sh = (w.font_size / 16.0).max(1.0);
                     self.rects.push(rect(pen_x, sy, word_w, sh, w.color));
+                }
+                if w.overline {
+                    // A line at the top of the glyph box (just above the ascent).
+                    let oy = wb - self.font.ascent_px(w.font_size);
+                    let oh = (w.font_size / 16.0).max(1.0);
+                    self.rects.push(rect(pen_x, oy, word_w, oh, w.color));
                 }
                 if let Some(href) = &w.href {
                     self.links.push(LinkBox {
@@ -2655,6 +2667,26 @@ mod tests {
             1,
             "nowrap stays on one line"
         );
+    }
+
+    #[test]
+    fn text_decoration_overline_draws_a_line_above_text() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let has_line_above = |css: &str| -> bool {
+            let html = format!("<p style=\"{css}\">hi</p>");
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+            let baseline = l.runs.iter().find(|r| r.text == "hi").unwrap().baseline;
+            // A thin rect well above the baseline = the overline.
+            l.rects
+                .iter()
+                .any(|r| r.w > 0.0 && r.h < 3.0 && r.y < baseline - 4.0)
+        };
+        assert!(has_line_above("text-decoration: overline"), "overline drawn above text");
+        assert!(!has_line_above(""), "no overline without the decoration");
     }
 
     #[test]
