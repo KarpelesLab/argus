@@ -439,8 +439,8 @@ h6 { font-size: 0.67em; font-weight: bold; margin: 2.33em 0 }
 p { margin: 1em 0 }
 b, strong { font-weight: bold }
 i, em, cite, var, dfn, address { font-style: italic }
-q::before { content: \"\\201C\" }
-q::after { content: \"\\201D\" }
+q::before { content: open-quote }
+q::after { content: close-quote }
 a { color: #0645ad; text-decoration: underline }
 u, ins { text-decoration: underline }
 s, del, strike { text-decoration: line-through }
@@ -667,9 +667,15 @@ fn resolve_content(doc: &Document, node: NodeId, v: &str) -> String {
                 continue;
             }
         }
-        // Otherwise treat the (possibly quoted) leading run up to the next token.
+        // Otherwise the leading token is a (possibly quoted) string or a quote
+        // keyword (`open-quote`/`close-quote` render curly quotes).
         let (head, tail) = split_content_token(rest);
-        out.push_str(&unquote_content(head));
+        match head {
+            "open-quote" => out.push('\u{201C}'),
+            "close-quote" => out.push('\u{201D}'),
+            "no-open-quote" | "no-close-quote" => {}
+            _ => out.push_str(&unquote_content(head)),
+        }
         rest = tail.trim_start();
         if head.is_empty() {
             break;

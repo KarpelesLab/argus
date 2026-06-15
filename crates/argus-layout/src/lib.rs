@@ -4106,6 +4106,21 @@ borderdisplay0123floatleftrightclearbothfrgrowshrinkwrapspanabsolutefixedrelativ
     }
 
     #[test]
+    fn open_close_quote_keywords_render_curly_quotes() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Author rule using the open-quote/close-quote keywords directly.
+        let html = "<style>.q::before{content:open-quote} .q::after{content:close-quote}</style>\
+                    <span class=\"q\">hi</span>";
+        let doc = parse(html);
+        let lay = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let joined: String = lay.runs.iter().map(|r| r.text.as_str()).collect();
+        assert!(joined.contains('\u{201C}') && joined.contains('\u{201D}'), "got {joined:?}");
+    }
+
+    #[test]
     fn q_element_gets_curly_quotes_via_css_escapes() {
         let Some(font) = system_font() else {
             eprintln!("no system font; skipping");
