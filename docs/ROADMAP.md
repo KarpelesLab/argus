@@ -18,11 +18,11 @@ co-equal embedding, not an afterthought).
 |-------|-------|
 | 0 — Foundations / multi-process | ✅ complete (sandbox, IPC, shared-mem framebuffer, AppKit window, CI) |
 | 1 — Static document to pixels | ✅ essentially complete (HTML→DOM, CSS cascade + box model, block/inline layout, lists/hr, text shaping + raster, networking over rsurl, images) |
-| 2 — Scripting & dynamic DOM | 🟡 page `<script>` runs in kataan; **synchronous DOM bindings now work** via a JS-side shim + reconciliation — no kataan host-callback API needed (ES6 Proxy/`Object.defineProperty`/`JSON` suffice). Supports `document.getElementById`/`querySelector` (full selector engine)/`createElement`/`body`/`write`, and element `textContent`/`innerHTML`/`className`/`classList`/`setAttribute`/`style.*`/scoped `querySelector`/`appendChild`/`remove`; the shared `argus-domscript` crate makes `--dump-dom`/`--dump-text`/`--dump-a11y` reflect the post-script DOM too. **Interactive click events also work** — `addEventListener('click')`/`onclick` handlers fire and accumulate JS + DOM state via deterministic event replay (the windowed browser hit-tests id'd elements and re-runs the history). **`setTimeout`/`setInterval`** callbacks run too (drained synchronously, delay-ordered, no wall clock), and **`localStorage`** (persisted across navigations within the session) **/`sessionStorage`**. **Keyboard text input** works — click a text field to focus it and type (backspace deletes); typed values survive event replay. Real-time timers, promises/microtasks, other continuous events (mousemove/keydown handlers), on-disk storage across browser restarts, and reading back computed layout still want a real embedding API ([upstream/kataan.md](upstream/kataan.md)) |
+| 2 — Scripting & dynamic DOM | 🟡 page `<script>` runs in kataan; **synchronous DOM bindings now work** via a JS-side shim + reconciliation — no kataan host-callback API needed (ES6 Proxy/`Object.defineProperty`/`JSON` suffice). Supports `document.getElementById`/`querySelector` (full selector engine)/`createElement`/`body`/`write`, and element `textContent`/`innerHTML`/`className`/`classList`/`setAttribute`/`style.*`/scoped `querySelector`/`appendChild`/`remove`; the shared `argus-domscript` crate makes `--dump-dom`/`--dump-text`/`--dump-a11y` reflect the post-script DOM too. **Interactive click events also work** — `addEventListener('click')`/`onclick` handlers fire and accumulate JS + DOM state via deterministic event replay (the windowed browser hit-tests id'd elements and re-runs the history). **`setTimeout`/`setInterval`** callbacks run too (drained synchronously, delay-ordered, no wall clock), and **`localStorage`** (persisted across navigations within the session) **/`sessionStorage`**. **Keyboard text input** works — click a text field to focus it and type (backspace deletes); typed values survive event replay. **Promises/microtasks and `async`/`await` now work** — DOM writes inside `Promise.then`/awaited continuations are reconciled, because scripts run through `argus_script::run_with_followup`, which drains kataan's event loop (microtasks + async tails) before the recorded ops are read back. Real-time (wall-clock) timers, other continuous events (mousemove/keydown handlers), on-disk storage across browser restarts, and reading back computed layout still want a real embedding API ([upstream/kataan.md](upstream/kataan.md)) |
 | 3 — Chrome, navigation & services | 🟡 links → fetch → re-render, URL + subresource resolution, **scroll-wheel**, **persistent cookie jar**, **conservative HTTP cache** (Cache-Control-aware), **CSP meta** enforcement (inline-script `script-src`), **back/forward history** (Cmd+`[`/`]`). Tabs (multi-tab UI), header-delivered CSP + more directives, cache revalidation (ETag/Expires) remain |
 | 4 — Layout & CSS breadth | 🟡 box model, **box-sizing**, **min/max-width**, **line-height**, text-align (incl. **justify**), **text-transform**, **white-space: pre/nowrap**, **visibility**, **`<br>`**, **vertical-align (sub/sup)**, **position: relative**, **`@media` queries** (min/max-width), **custom properties (`var()`)**, attribute + `:first/last-child` + **`:nth-child`** + **`:not()`** selectors (with descendant/child combinators), lists + **list-style-type**, `<hr>`, **tables**, **form controls** (input/textarea/button render with their value), **flexbox**, **grid** + **gap**, underline + **line-through**, **border-radius**, **opacity**. Floats, absolute/fixed positioning, `flex-grow`/`justify`/`align`, grid spans/`fr`, web fonts, complex text remain |
 | 5 — Web platform & headless | 🟡 headless surfaces: `--dump-page`, `--dump-dom`, `--dump-a11y`, **`--dump-text`**, `--eval` (JS). Web API breadth (needs JS bindings), full CDP, storage remain |
-| 6 — Media & richer rendering | 🟡 PNG + GIF (oxideav) + **uncompressed BMP** image decode. JPEG/WebP/AVIF (blocked on oxideav codecs shipping), `<video>`/`<audio>`, animations, GPU compositor remain |
+| 6 — Media & richer rendering | 🟡 PNG + GIF + **JPEG** (oxideav-mjpeg registry decoder, YUV→RGBA via oxideav-pixfmt) + **WebP** (oxideav-webp) + **uncompressed BMP** image decode. AVIF, `<video>`/`<audio>`, animations, GPU compositor remain |
 | 7 — Hardening / perf / conformance | 🟡 started — parser + **full layout-pipeline** robustness tests (random inputs) + cargo-fuzz harness (html/css/**layout**), accessibility tree. WPT, perf, sandbox hardening remain |
 
 Honest scope note: **`document`/`window` bindings now work** without any kataan
@@ -30,10 +30,13 @@ changes — kataan supports enough JS (ES6 `Proxy` traps, `Object.defineProperty
 `JSON`, closures) to model the DOM in JS-space and reconcile mutations back into the
 real tree (`crates/argus-domscript`). **Discrete event handling works too**:
 `addEventListener('click')` handlers fire and state accumulates via *deterministic
-event replay* (re-run the script + full interaction history each event). What still
+event replay* (re-run the script + full interaction history each event).
+**Asynchronous JS now reconciles too**: `setTimeout` (shim-queued, delay-ordered) and
+native promises/microtasks/`async`-`await` both run before the DOM ops are read back
+(via `argus_script::run_with_followup`, which drains kataan's event loop). What still
 needs a real **embedding API** ([upstream/kataan.md](upstream/kataan.md)) is the
-genuinely *asynchronous* surface — timers (`setTimeout`), microtasks/promises,
-continuous input events, and reading back computed geometry — plus performance (replay
+*wall-clock* asynchronous surface — real-time timers, continuous input events
+(mousemove/keydown), and reading back computed geometry — plus performance (replay
 is O(history)). Phases 4–7 are a large, multi-cycle effort beyond the current
 foundation.
 
@@ -111,7 +114,7 @@ testing + DOM event dispatch), incremental style/layout/paint invalidation.
 **Exit criteria:**
 - [ ] A kataan realm per document with Argus-supplied global + `document` (NOT kataan's `std` host runtime — sandbox-safe bindings only).
 - [ ] DOM/CSSOM bindings: element/attribute/text APIs, live collections, node↔wrapper map integrated with kataan GC (no leaks/dangles under a stress test).
-- [ ] WHATWG event loop: tasks, microtask checkpoint (Promises), `setTimeout`/`setInterval`, `requestAnimationFrame`, and the "update the rendering" step ordering.
+- [~] WHATWG event loop: microtask checkpoint (Promises) + `async`/`await` + `setTimeout`/`setInterval` drain before reconciliation (via kataan's event loop through `run_with_followup`); `requestAnimationFrame` and full wall-clock "update the rendering" step ordering still want the embedding API.
 - [ ] Input events hit-test against the paint tree and dispatch capture/target/bubble DOM events with correct coordinates/modifiers/default actions.
 - [ ] DOM mutation triggers minimal restyle → relayout of dirty subtrees → damage-based repaint (not full-page).
 - [ ] `<script>` execution integrates with the parser (blocking/`async`/`defer`).
@@ -169,7 +172,7 @@ gradients/backgrounds/borders/filters in `argus-gfx`, scroll handling in the com
 - [ ] Absolute/fixed/sticky positioning, floats, stacking contexts, overflow/scroll containers correct.
 - [ ] Custom properties, cascade layers, `@scope`, media/container queries, `:has()` and the full selector set.
 - [ ] Web fonts (`@font-face`) load via the net service with correct reflow/swap; bidi + at least one complex script shape correctly.
-- [ ] Images decode (`argus-image`) and render at correct intrinsic/object-fit sizing; gradients, multiple backgrounds, border-radius, box-shadow, basic filters.
+- [~] Images decode (`argus-image`: PNG/GIF/JPEG/WebP/BMP via oxideav) and render at correct intrinsic sizing; gradients, border-radius present. object-fit, multiple backgrounds, box-shadow, filters remain.
 - [ ] Smooth scrolling recomposites without relayout/repaint of static content.
 
 **De-risks:** the long tail of CSS correctness and the in-house complex-text effort.
