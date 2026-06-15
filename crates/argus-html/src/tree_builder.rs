@@ -1105,4 +1105,32 @@ mod tests {
             let _ = doc.serialize();
         }
     }
+
+    #[test]
+    fn adoption_agency_survives_formatting_soup() {
+        // The adoption agency does index arithmetic over the open stack + active
+        // formatting list; random (mis)nested formatting/block sequences must never
+        // panic or hang (the outer loop is bounded, the inner loop terminates).
+        let mut seed = 0x1234_5678_9ABC_DEF0u64;
+        let mut rng = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        // Start and end tags for formatting + block elements that drive the AAA.
+        const TAGS: &[&str] = &[
+            "<b>", "</b>", "<i>", "</i>", "<a>", "</a>", "<font>", "</font>", "<nobr>", "</nobr>",
+            "<p>", "</p>", "<div>", "</div>", "<table>", "</table>", "<tr>", "<td>", "<h1>", "x",
+        ];
+        for _ in 0..3000 {
+            let n = (rng() % 40) as usize;
+            let mut s = String::new();
+            for _ in 0..n {
+                s.push_str(TAGS[(rng() as usize) % TAGS.len()]);
+            }
+            let doc = parse(&s);
+            let _ = doc.serialize(); // must not panic
+        }
+    }
 }
