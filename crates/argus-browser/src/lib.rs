@@ -423,6 +423,10 @@ fn implicit_role(tag: &str) -> Option<&'static str> {
         "td" => "cell",
         "th" => "columnheader",
         "form" => "form",
+        "hr" => "separator",
+        "meter" => "meter",
+        "menu" => "list",
+        "datalist" => "listbox",
         _ => return None,
     })
 }
@@ -436,6 +440,8 @@ fn input_role(ty: &str) -> Option<&'static str> {
         "button" | "submit" | "reset" | "image" => "button",
         "search" => "searchbox",
         "range" => "slider",
+        "number" => "spinbutton",
+        "email" | "tel" | "url" | "text" | "password" => "textbox",
         "hidden" => return None,
         _ => "textbox",
     })
@@ -1804,6 +1810,21 @@ mod tests {
         assert!(tree.contains("button \"Menu\" [expanded=true]"), "expanded button:\n{tree}");
         assert!(tree.contains("listbox \"Country\""), "select→listbox:\n{tree}");
         assert!(tree.contains("option"), "option role:\n{tree}");
+    }
+
+    #[test]
+    fn a11y_tree_separator_meter_and_spinbutton_roles() {
+        let doc = argus_html::parse(
+            "<hr>\
+             <meter value=\"0.6\" aria-label=\"Disk\"></meter>\
+             <input type=\"number\" aria-label=\"Qty\">\
+             <input type=\"email\" aria-label=\"Email\">",
+        );
+        let tree = super::a11y_tree(&doc);
+        assert!(tree.contains("separator"), "hr→separator:\n{tree}");
+        assert!(tree.contains("meter \"Disk\""), "meter role:\n{tree}");
+        assert!(tree.contains("spinbutton \"Qty\""), "number→spinbutton:\n{tree}");
+        assert!(tree.contains("textbox \"Email\""), "email→textbox:\n{tree}");
     }
 
     #[test]
