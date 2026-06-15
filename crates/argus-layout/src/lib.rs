@@ -164,12 +164,25 @@ fn list_marker(style: ListStyle, index: u32) -> Option<Marker> {
         ListStyle::Square => Marker::Square,
         ListStyle::Decimal => Marker::Text(format!("{index}.")),
         ListStyle::DecimalLeadingZero => Marker::Text(format!("{index:02}.")),
+        ListStyle::LowerGreek => Marker::Text(format!("{}.", greek_marker(index))),
         ListStyle::LowerAlpha => Marker::Text(format!("{}.", alpha_marker(index, false))),
         ListStyle::UpperAlpha => Marker::Text(format!("{}.", alpha_marker(index, true))),
         ListStyle::LowerRoman => Marker::Text(format!("{}.", roman_marker(index, false))),
         ListStyle::UpperRoman => Marker::Text(format!("{}.", roman_marker(index, true))),
         ListStyle::None => return None,
     })
+}
+
+/// Lowercase Greek list marker for `n` (1→α … 24→ω, skipping final sigma);
+/// outside 1..=24 it falls back to the decimal number.
+fn greek_marker(n: u32) -> String {
+    if (1..=24).contains(&n) {
+        // α..ρ are contiguous (U+03B1..U+03C1); from σ (U+03C3) skip final sigma.
+        let cp = if n <= 17 { 0x03B0 + n } else { 0x03B1 + n };
+        char::from_u32(cp).map(String::from).unwrap_or_else(|| n.to_string())
+    } else {
+        n.to_string()
+    }
 }
 
 /// Bijective base-26 alphabetic counter: 1→a, 26→z, 27→aa.
@@ -4585,6 +4598,11 @@ mod tests {
         assert_eq!(
             markers("<ol style=\"list-style-type: decimal-leading-zero\"><li>a</li><li>b</li></ol>"),
             vec!["01.", "02."]
+        );
+        // lower-greek: α, β, … and σ at position 18 (skipping final sigma ς).
+        assert_eq!(
+            markers("<ol style=\"list-style-type: lower-greek\"><li>a</li><li>b</li></ol>"),
+            vec!["α.", "β."]
         );
     }
 

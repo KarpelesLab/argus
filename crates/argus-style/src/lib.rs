@@ -56,6 +56,8 @@ pub enum ListStyle {
     UpperAlpha,
     LowerRoman,
     UpperRoman,
+    /// `lower-greek` — α, β, γ, … ω (skipping final sigma).
+    LowerGreek,
     None,
 }
 
@@ -548,6 +550,7 @@ fn parse_list_style(token: &str) -> Option<ListStyle> {
         "square" => ListStyle::Square,
         "decimal" => ListStyle::Decimal,
         "decimal-leading-zero" => ListStyle::DecimalLeadingZero,
+        "lower-greek" => ListStyle::LowerGreek,
         "lower-alpha" | "lower-latin" => ListStyle::LowerAlpha,
         "upper-alpha" | "upper-latin" => ListStyle::UpperAlpha,
         "lower-roman" => ListStyle::LowerRoman,
