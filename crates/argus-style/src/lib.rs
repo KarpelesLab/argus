@@ -1272,9 +1272,9 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         .or_else(|| map.get("background"))
     {
         if v.contains("linear-gradient(") {
-            cs.background_gradient = parse_linear_gradient(v);
+            cs.background_gradient = parse_linear_gradient(v, cs.color);
         } else if v.contains("radial-gradient(") {
-            cs.background_gradient = parse_radial_gradient(v);
+            cs.background_gradient = parse_radial_gradient(v, cs.color);
         }
     }
     if let Some(v) = map.get("text-align") {
@@ -1988,7 +1988,7 @@ fn parse_text_shadow(v: &str, text_color: Color, fs: f32) -> Option<(f32, f32, C
 /// from a `to <side>` keyword or an angle (snapped to the nearest axis); the first
 /// and last color stops become the endpoints. Returns `None` if under two colors
 /// parse.
-fn parse_linear_gradient(v: &str) -> Option<Gradient> {
+fn parse_linear_gradient(v: &str, current: Color) -> Option<Gradient> {
     let start = v.find("linear-gradient(")? + "linear-gradient(".len();
     let rest = &v[start..];
     let inner = &rest[..rest.find(')').unwrap_or(rest.len())];
@@ -2021,7 +2021,7 @@ fn parse_linear_gradient(v: &str) -> Option<Gradient> {
         };
         color_parts = &parts[1..];
     }
-    let (stops, n_stops) = parse_gradient_stops(color_parts)?;
+    let (stops, n_stops) = parse_gradient_stops(color_parts, current)?;
     Some(Gradient {
         dir,
         from: stops[0].0,
@@ -2030,6 +2030,16 @@ fn parse_linear_gradient(v: &str) -> Option<Gradient> {
         stops,
         n_stops,
     })
+}
+
+/// Resolve a gradient-stop color token, handling the `currentColor` keyword
+/// (`current`) in addition to the normal color syntaxes.
+fn stop_color(tok: &str, current: Color) -> Option<Color> {
+    if tok.eq_ignore_ascii_case("currentcolor") {
+        Some(current)
+    } else {
+        parse_color(tok)
+    }
 }
 
 /// Map a `text-decoration-style` keyword to its enum, or `None` if not one.
@@ -2077,11 +2087,14 @@ fn split_top_level_commas(inner: &str) -> Vec<String> {
 /// Parse an ordered list of `<color> [<position%>]` stops into a fixed array with
 /// monotonic positions in `0.0..=1.0`. Stops without an explicit position are
 /// spaced evenly between their positioned neighbors (CSS gradient stop rules).
-fn parse_gradient_stops(parts: &[String]) -> Option<([(Color, f32); GRAD_MAX_STOPS], u8)> {
+fn parse_gradient_stops(
+    parts: &[String],
+    current: Color,
+) -> Option<([(Color, f32); GRAD_MAX_STOPS], u8)> {
     // Collect (color, explicit-position?) pairs, capped to the array size.
     let mut raw: Vec<(Color, Option<f32>)> = Vec::new();
     for p in parts {
-        let color = p.split_whitespace().find_map(parse_color)?;
+        let color = p.split_whitespace().find_map(|t| stop_color(t, current))?;
         let pos = p
             .split_whitespace()
             .find_map(|t| t.strip_suffix('%'))
@@ -2151,16 +2164,16 @@ fn parse_angle_deg(s: &str) -> Option<f32> {
 /// Parse a `radial-gradient(...)` — the first color is the center, the last the
 /// edge. A leading shape/position prefix (`circle`, `at center`, …) carries no
 /// color and is dropped before reading the stops.
-fn parse_radial_gradient(v: &str) -> Option<Gradient> {
+fn parse_radial_gradient(v: &str, current: Color) -> Option<Gradient> {
     let start = v.find("radial-gradient(")? + "radial-gradient(".len();
     let rest = &v[start..];
     let inner = &rest[..rest.find(')').unwrap_or(rest.len())];
     // Keep only segments that name a color (drops the optional shape prefix).
     let color_parts: Vec<String> = split_top_level_commas(inner)
         .into_iter()
-        .filter(|p| p.split_whitespace().any(|t| parse_color(t).is_some()))
+        .filter(|p| p.split_whitespace().any(|t| stop_color(t, current).is_some()))
         .collect();
-    let (stops, n_stops) = parse_gradient_stops(&color_parts)?;
+    let (stops, n_stops) = parse_gradient_stops(&color_parts, current)?;
     Some(Gradient {
         dir: GradientDir::ToBottom,
         from: stops[0].0,
@@ -2551,7 +2564,7 @@ mod tests {
             "linear-gradient(0.25turn, red, blue)",
             "linear-gradient(100grad, red, blue)",
         ] {
-            let g = parse_linear_gradient(v).expect(v);
+            let g = parse_linear_gradient(v, Color::BLACK).expect(v);
             assert_eq!(g.dir, GradientDir::ToRight, "{v}");
         }
     }
@@ -2785,7 +2798,7 @@ mod tests {
     #[test]
     fn linear_gradient_multi_stop_positions() {
         // Three stops: red 0%, white at midpoint (default 50%), blue 100%.
-        let g = parse_linear_gradient("linear-gradient(to right, red, white, blue)").unwrap();
+        let g = parse_linear_gradient("linear-gradient(to right, red, white, blue)", Color::BLACK).unwrap();
         assert_eq!(g.n_stops, 3);
         assert_eq!(g.stops[0].1, 0.0);
         assert!((g.stops[1].1 - 0.5).abs() < 1e-6);
@@ -2798,7 +2811,7 @@ mod tests {
     #[test]
     fn linear_gradient_explicit_percent_stops() {
         // A hard stop: red up to 30%, then blue from 30% on.
-        let g = parse_linear_gradient("linear-gradient(red 30%, blue 30%)").unwrap();
+        let g = parse_linear_gradient("linear-gradient(red 30%, blue 30%)", Color::BLACK).unwrap();
         assert_eq!(g.n_stops, 2);
         assert!((g.stops[0].1 - 0.3).abs() < 1e-6);
         assert!((g.stops[1].1 - 0.3).abs() < 1e-6);
@@ -2810,9 +2823,30 @@ mod tests {
     #[test]
     fn radial_gradient_drops_shape_prefix() {
         // The `circle` prefix carries no color and must not become a stop.
-        let g = parse_radial_gradient("radial-gradient(circle, yellow, green)").unwrap();
+        let g = parse_radial_gradient("radial-gradient(circle, yellow, green)", Color::BLACK).unwrap();
         assert_eq!(g.n_stops, 2);
         assert_eq!(g.from, parse_color("yellow").unwrap());
         assert_eq!(g.to, parse_color("green").unwrap());
+    }
+
+    #[test]
+    fn gradient_currentcolor_resolves_to_text_color() {
+        let red = Color { r: 255, g: 0, b: 0, a: 255 };
+        // `currentColor` in a stop takes the element's resolved text color.
+        let g = parse_linear_gradient("linear-gradient(currentColor, transparent)", red).unwrap();
+        assert_eq!(g.from, red);
+        // And it resolves end-to-end through the cascade with `color` set.
+        let mut doc = Document::new();
+        let d = one(&mut doc, "div", vec![]);
+        let cs = computed_style(
+            &doc,
+            d,
+            &ComputedStyle::initial(),
+            &parse_stylesheet(
+                "div { color: #00ff00; background: linear-gradient(currentColor, #000) }",
+            ),
+        );
+        let grad = cs.background_gradient.expect("gradient parsed");
+        assert_eq!(grad.from, Color { r: 0, g: 255, b: 0, a: 255 });
     }
 }
