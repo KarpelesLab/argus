@@ -243,10 +243,11 @@ fn decode_bmp(bytes: &[u8]) -> Option<DecodedImage> {
     })
 }
 
-/// Decode a TGA (Truevision Targa) true-color image: uncompressed (type 2) or
-/// RLE (type 10), 24-bit BGR or 32-bit BGRA. Color-mapped/grayscale variants are
-/// not handled. TGA has no leading magic, so this is tried last and validates the
-/// header structurally (bounded reads fail closed on malformed data).
+/// Decode a TGA (Truevision Targa) image: uncompressed (type 2) or RLE (type 10)
+/// true-color (24-bit BGR / 32-bit BGRA), or uncompressed (type 3) / RLE (type 11)
+/// 8-bit grayscale. Color-mapped variants are not handled. TGA has no leading
+/// magic, so this is tried last and validates the header structurally (bounded
+/// reads fail closed on malformed data).
 fn decode_tga(bytes: &[u8]) -> Option<DecodedImage> {
     if bytes.len() < 18 {
         return None;
@@ -261,8 +262,12 @@ fn decode_tga(bytes: &[u8]) -> Option<DecodedImage> {
     let depth = bytes[16] as usize;
     let descriptor = bytes[17];
 
-    // Only uncompressed (2) / RLE (10) true-color, 24- or 32-bit.
-    if (img_type != 2 && img_type != 10) || (depth != 24 && depth != 32) || cmap_type > 1 {
+    // Uncompressed (2) / RLE (10) true-color at 24/32-bit, or uncompressed (3) /
+    // RLE (11) grayscale at 8-bit. (Color-mapped variants aren't handled.)
+    let truecolor = (img_type == 2 || img_type == 10) && (depth == 24 || depth == 32);
+    let grayscale = (img_type == 3 || img_type == 11) && depth == 8;
+    let rle = img_type == 10 || img_type == 11;
+    if (!truecolor && !grayscale) || cmap_type > 1 {
         return None;
     }
     if width == 0 || height == 0 || (width as u64) * (height as u64) > 64_000_000 {
@@ -279,10 +284,17 @@ fn decode_tga(bytes: &[u8]) -> Option<DecodedImage> {
     // Pixels in stored order (first stored pixel first); flipped to top-down below.
     let mut px = vec![0u8; npx * 4];
     let read_pixel = |bytes: &[u8], p: &mut usize, out: &mut [u8]| -> Option<()> {
-        let b = *bytes.get(*p)?;
-        let g = *bytes.get(*p + 1)?;
-        let r = *bytes.get(*p + 2)?;
-        let a = if bpp == 4 { *bytes.get(*p + 3)? } else { 0xFF };
+        let (r, g, b, a) = if bpp == 1 {
+            // 8-bit grayscale: one luminance byte, opaque.
+            let l = *bytes.get(*p)?;
+            (l, l, l, 0xFF)
+        } else {
+            let b = *bytes.get(*p)?;
+            let g = *bytes.get(*p + 1)?;
+            let r = *bytes.get(*p + 2)?;
+            let a = if bpp == 4 { *bytes.get(*p + 3)? } else { 0xFF };
+            (r, g, b, a)
+        };
         out[0] = r;
         out[1] = g;
         out[2] = b;
@@ -292,7 +304,7 @@ fn decode_tga(bytes: &[u8]) -> Option<DecodedImage> {
     };
 
     let mut idx = 0;
-    if img_type == 2 {
+    if !rle {
         while idx < npx {
             read_pixel(bytes, &mut p, &mut px[idx * 4..idx * 4 + 4])?;
             idx += 1;
@@ -452,6 +464,18 @@ mod tests {
         assert_eq!(&img.rgba[4..8], &[255, 255, 255, 255], "(1,0) white");
         assert_eq!(&img.rgba[8..12], &[255, 0, 0, 255], "(0,1) red");
         assert_eq!(&img.rgba[12..16], &[0, 255, 0, 255], "(1,1) green");
+    }
+
+    #[test]
+    fn decodes_grayscale_tga() {
+        // 2x1 uncompressed 8-bit grayscale TGA, top-down. Two luminance bytes 0 and
+        // 200 → black then mid-gray, each opaque with R=G=B=L.
+        let mut b = tga_header(3, 2, 1, 8, 0x20);
+        b.extend_from_slice(&[0, 200]);
+        let img = decode(&b).expect("decode gray tga");
+        assert_eq!((img.width, img.height), (2, 1));
+        assert_eq!(&img.rgba[0..4], &[0, 0, 0, 255], "black");
+        assert_eq!(&img.rgba[4..8], &[200, 200, 200, 255], "mid-gray");
     }
 
     #[test]
