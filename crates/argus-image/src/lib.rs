@@ -835,10 +835,33 @@ pub fn decode_data_url(url: &str) -> Option<DecodedImage> {
     let bytes = if meta.contains(";base64") {
         base64_decode(payload.trim())?
     } else {
-        // Percent/plain text data URLs aren't images we handle here.
-        payload.as_bytes().to_vec()
+        // Plain payload: undo percent-encoding (`%xx`) into raw bytes.
+        percent_decode(payload)
     };
     decode(&bytes)
+}
+
+/// Percent-decode a `data:` URL payload: each `%xx` becomes the byte `0xXX`; a
+/// malformed escape (or a stray `%`) is kept verbatim. `+` is left as-is (data
+/// URLs don't use form-encoding).
+fn percent_decode(s: &str) -> Vec<u8> {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            let hi = (b[i + 1] as char).to_digit(16);
+            let lo = (b[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    out
 }
 
 /// Minimal standard-alphabet base64 decoder (ignores whitespace and padding).
@@ -1291,6 +1314,24 @@ mod tests {
         assert_eq!(base64_decode("TWFu").unwrap(), b"Man");
         // "hello" → "aGVsbG8="
         assert_eq!(base64_decode("aGVsbG8=").unwrap(), b"hello");
+    }
+
+    #[test]
+    fn percent_decode_handles_escapes() {
+        assert_eq!(percent_decode("A%42C"), b"ABC"); // %42 = 'B'
+        assert_eq!(percent_decode("%00%ff"), vec![0x00, 0xFF]);
+        // Malformed/trailing escapes are kept literally.
+        assert_eq!(percent_decode("a%zz%4"), b"a%zz%4");
+    }
+
+    #[test]
+    fn decodes_percent_encoded_netpbm_data_url() {
+        // A 1x1 white PPM (`P6 1 1 255 \xff\xff\xff`) with the binary pixel bytes
+        // percent-encoded in a non-base64 data URL.
+        let url = "data:image/x-portable-pixmap,P6%201%201%20255%20%ff%ff%ff";
+        let img = decode_data_url(url).expect("decode percent-encoded ppm");
+        assert_eq!((img.width, img.height), (1, 1));
+        assert_eq!(&img.rgba[0..4], &[255, 255, 255, 255]);
     }
 
     #[test]
