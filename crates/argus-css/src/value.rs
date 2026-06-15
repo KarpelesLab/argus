@@ -220,6 +220,9 @@ pub fn parse_color(s: &str) -> Option<Color> {
     if let Some(inner) = s.strip_prefix("hsla(").and_then(|s| s.strip_suffix(')')) {
         return parse_hsl(inner);
     }
+    if let Some(inner) = s.strip_prefix("hwb(").and_then(|s| s.strip_suffix(')')) {
+        return parse_hwb(inner);
+    }
     let sb = s.as_bytes();
     if sb.len() > 10 && sb[..10].eq_ignore_ascii_case(b"color-mix(") && s.ends_with(')') {
         return parse_color_mix(&s[10..s.len() - 1]);
@@ -324,6 +327,39 @@ fn parse_hue(s: &str) -> Option<f32> {
     } else {
         s.trim_end_matches("deg").trim().parse::<f32>().ok()
     }
+}
+
+/// Parse `hwb(H W% B%[ / A])` (hue-whiteness-blackness) to RGBA. When W+B ≥ 100%
+/// the result is a gray of `W/(W+B)`; otherwise the pure hue is scaled into the
+/// `[W, 1-B]` range.
+fn parse_hwb(inner: &str) -> Option<Color> {
+    let parts: Vec<&str> = inner
+        .split(['/', ',', ' '])
+        .filter(|p| !p.trim().is_empty())
+        .collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let h = parse_hue(parts[0].trim())?.rem_euclid(360.0);
+    let pct = |s: &str| -> Option<f32> {
+        Some(s.trim().trim_end_matches('%').trim().parse::<f32>().ok()? / 100.0)
+    };
+    let w = pct(parts[1])?.clamp(0.0, 1.0);
+    let b = pct(parts[2])?.clamp(0.0, 1.0);
+    let a = if parts.len() >= 4 {
+        parse_alpha(parts[3])?
+    } else {
+        255
+    };
+    let (r, g, bl) = if w + b >= 1.0 {
+        let v = ((w / (w + b)) * 255.0).round() as u8;
+        (v, v, v)
+    } else {
+        let (pr, pg, pb) = hsl_to_rgb(h, 1.0, 0.5); // pure hue
+        let f = |c: u8| (((c as f32 / 255.0) * (1.0 - w - b) + w) * 255.0).round() as u8;
+        (f(pr), f(pg), f(pb))
+    };
+    Some(Color::rgba(r, g, bl, a))
 }
 
 /// Convert HSL (`h` in degrees, `s`/`l` in `0..=1`) to 8-bit RGB.
@@ -621,6 +657,14 @@ mod tests {
         // Angle units for hue: 0.5turn and 200grad are both 180° (cyan).
         assert_eq!(parse_color("hsl(0.5turn, 100%, 50%)"), Some(Color::rgb(0, 255, 255)));
         assert_eq!(parse_color("hsl(200grad, 100%, 50%)"), Some(Color::rgb(0, 255, 255)));
+    }
+
+    #[test]
+    fn hwb_colors() {
+        assert_eq!(parse_color("hwb(0 0% 0%)"), Some(Color::rgb(255, 0, 0)));
+        assert_eq!(parse_color("hwb(0 50% 50%)"), Some(Color::rgb(128, 128, 128)));
+        assert_eq!(parse_color("hwb(120 0% 100%)"), Some(Color::rgb(0, 0, 0)));
+        assert_eq!(parse_color("hwb(200 100% 0%)"), Some(Color::rgb(255, 255, 255)));
     }
 
     #[test]
