@@ -52,7 +52,7 @@ all inside a sandboxed content process.</p>\
 <ul id=\"js-list\"><li>placeholder (replaced by innerHTML)</li></ul>\
 <div id=\"counter-btn\" class=\"pill\" style=\"width: 140px\">Click me</div>\
 <p>clicked <strong id=\"counter\">0</strong> times (try it in the window).</p>\
-<input value=\"an editable text field\">\
+<input id=\"field\" value=\"click me and type\">\
 <input placeholder=\"...or a grey placeholder\">\
 <select><option>First choice</option><option selected>Selected choice (rendered)</option></select>\
 <input type=\"checkbox\" checked>\
