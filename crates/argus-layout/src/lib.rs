@@ -605,6 +605,15 @@ impl Ctx<'_> {
                 self.cursor_y = target;
             }
         }
+        // `aspect-ratio` with a definite width and auto height derives the height.
+        if style.height.is_none() {
+            if let (Some(ratio), Some(_)) = (style.aspect_ratio, style.width) {
+                let target = content_top + (content_w / ratio).max(0.0);
+                if self.cursor_y < target {
+                    self.cursor_y = target;
+                }
+            }
+        }
 
         self.cursor_y += style.padding.bottom + style.border.bottom;
         let border_box_h = self.cursor_y - border_box_top;
@@ -2062,6 +2071,27 @@ mod tests {
         assert!(
             two.x > one.x + 100.0,
             "second item should be in the next column"
+        );
+    }
+
+    #[test]
+    fn aspect_ratio_derives_height_from_width() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A 200px-wide block with aspect-ratio 2/1 is ~100px tall, so the next
+        // block starts around y=100.
+        let html = "<div style=\"width:200px; aspect-ratio:2/1\"></div><div>b</div>";
+        let doc = parse(html);
+        let lay = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let b = lay.runs.iter().find(|r| r.text == "b").unwrap();
+        // The 100px aspect height (200/2) pushes b down well past where it would sit
+        // with a zero-height first block (~20: body margin + text ascent).
+        assert!(
+            b.baseline > 100.0 && b.baseline < 140.0,
+            "second block should start ~100px down (200/2 + offsets), got {}",
+            b.baseline
         );
     }
 

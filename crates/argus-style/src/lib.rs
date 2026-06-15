@@ -136,6 +136,9 @@ pub struct ComputedStyle {
     pub height: Option<Length>,
     /// `min-height` — a block grows to at least this (resolved during layout).
     pub min_height: Option<Length>,
+    /// `aspect-ratio` as width÷height; a definite-width block derives its height
+    /// from it when `height` is auto (resolved during layout).
+    pub aspect_ratio: Option<f32>,
     pub text_align: TextAlign,
     /// `text-decoration: underline`.
     pub underline: bool,
@@ -202,6 +205,7 @@ impl ComputedStyle {
             max_width: None,
             height: None,
             min_height: None,
+            aspect_ratio: None,
             text_align: TextAlign::Left,
             underline: false,
             strike: false,
@@ -711,6 +715,9 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             parse_length(v)
         };
     }
+    if let Some(v) = map.get("aspect-ratio") {
+        cs.aspect_ratio = parse_aspect_ratio(v);
+    }
     if let Some(v) = map.get("grid-template-columns") {
         cs.grid_columns = grid_track_count(v);
     }
@@ -865,6 +872,20 @@ fn is_bold(v: &str) -> bool {
 
 fn color_in(v: &str) -> Option<Color> {
     parse_color(v).or_else(|| v.split_whitespace().find_map(parse_color))
+}
+
+/// Parse an `aspect-ratio` value to width÷height. Accepts `W / H`, `W/H`, or a bare
+/// ratio `R`. `auto` (or a non-positive result) yields `None`.
+fn parse_aspect_ratio(v: &str) -> Option<f32> {
+    let v = v.trim();
+    if v.eq_ignore_ascii_case("auto") {
+        return None;
+    }
+    let (w, h) = match v.split_once('/') {
+        Some((a, b)) => (a.trim().parse::<f32>().ok()?, b.trim().parse::<f32>().ok()?),
+        None => (v.parse::<f32>().ok()?, 1.0),
+    };
+    (w > 0.0 && h > 0.0).then_some(w / h)
 }
 
 /// Whether a value contains the `currentColor` keyword (case-insensitive).
