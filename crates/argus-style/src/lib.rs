@@ -307,6 +307,8 @@ pub struct ComputedStyle {
     pub box_sizing: BoxSizing,
     /// `caption-side: bottom` — render a table `<caption>` below the rows.
     pub caption_side_bottom: bool,
+    /// `object-fit: contain` — scale an image to fit its box preserving aspect.
+    pub object_fit_contain: bool,
     /// `line-height` as a multiple of `font-size` (inherited).
     pub line_height: f32,
     /// `text-indent` for the first line, in pixels (inherited).
@@ -396,6 +398,7 @@ impl ComputedStyle {
             text_transform: TextTransform::None,
             box_sizing: BoxSizing::ContentBox,
             caption_side_bottom: false,
+            object_fit_contain: false,
             line_height: 1.2,
             text_indent: 0.0,
             word_spacing: 0.0,
@@ -931,6 +934,9 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     }
     if let Some(v) = map.get("caption-side") {
         cs.caption_side_bottom = v.trim() == "bottom";
+    }
+    if let Some(v) = map.get("object-fit") {
+        cs.object_fit_contain = matches!(v.trim(), "contain" | "scale-down");
     }
     // `gap` shorthand: `<row-gap> [<column-gap>]` (column defaults to row).
     if let Some(v) = map.get("gap").or_else(|| map.get("grid-gap")) {

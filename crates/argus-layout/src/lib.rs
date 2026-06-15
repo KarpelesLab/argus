@@ -1309,13 +1309,27 @@ impl Ctx<'_> {
             h = if iw == 0 { 0.0 } else { ih as f32 };
         }
         if w > 0.0 && h > 0.0 {
+            // `object-fit: contain` scales the image to fit the w×h box preserving
+            // its intrinsic aspect ratio, centered (the box still reserves w×h).
+            let (ix, iy, dw, dh) = if istyle.object_fit_contain
+                && iw > 0
+                && ih > 0
+                && attr_w.is_some()
+                && attr_h.is_some()
+            {
+                let scale = (w / iw as f32).min(h / ih as f32);
+                let (fw, fh) = (iw as f32 * scale, ih as f32 * scale);
+                (x + (w - fw) / 2.0, self.cursor_y + (h - fh) / 2.0, fw, fh)
+            } else {
+                (x, self.cursor_y, w, h)
+            };
             // `visibility: hidden` reserves the image's box but paints nothing.
             if !hidden {
                 self.images.push(ImageBox {
-                    x,
-                    y: self.cursor_y,
-                    w,
-                    h,
+                    x: ix,
+                    y: iy,
+                    w: dw,
+                    h: dh,
                     src: src.to_string(),
                 });
             }
@@ -4157,6 +4171,33 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         let end = first_baseline("flex-end");
         assert!(center > start + 80.0, "center pushes down: {start} -> {center}");
         assert!(end > center + 80.0, "flex-end further down: {center} -> {end}");
+    }
+
+    #[test]
+    fn object_fit_contain_letterboxes_image() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Intrinsic 100x50 (2:1) image in a 100x100 box with object-fit:contain →
+        // fitted to 100x50, centered vertically (y offset ~25); without contain it
+        // stretches to fill 100x100.
+        let mut sizes = ImageSizes::new();
+        sizes.insert("a.png".to_string(), (100, 50));
+        let render = |css: &str| -> (f32, f32, f32) {
+            let html = format!(
+                "<img src=\"a.png\" width=\"100\" height=\"100\" style=\"{css}\">"
+            );
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 400.0, &sizes);
+            let im = &l.images[0];
+            (im.w, im.h, im.y)
+        };
+        let (sw, sh, _) = render("");
+        assert!((sw - 100.0).abs() < 1.0 && (sh - 100.0).abs() < 1.0, "stretched fill {sw}x{sh}");
+        let (cw, ch, cy) = render("object-fit: contain");
+        assert!((cw - 100.0).abs() < 1.0 && (ch - 50.0).abs() < 1.0, "contained {cw}x{ch}");
+        assert!(cy > 10.0, "letterboxed (centered vertically), y={cy}");
     }
 
     #[test]
