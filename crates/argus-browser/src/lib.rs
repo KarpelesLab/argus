@@ -456,6 +456,69 @@ pub fn dump_links(url: Option<&str>) -> io::Result<String> {
     Ok(extract_links(&doc, url))
 }
 
+/// Headless automation: fetch a page and return its **heading outline** — each
+/// `<h1>`–`<h6>` as a level-indented line. Used by `--dump-headings` (document
+/// structure / accessibility analysis).
+pub fn dump_headings(url: Option<&str>) -> io::Result<String> {
+    log::set_role(Role::Browser);
+    let mut net = spawn_child(Role::NetService)?;
+    proto::parent_handshake(net.channel(), Size::new(800, 600))?;
+    let html = resolve_html(&net, url);
+    proto::send(net.channel(), Msg::Shutdown, &[])?;
+    net.wait()?;
+    let mut doc = argus_html::parse(&html);
+    argus_domscript::apply_scripts(&mut doc);
+    Ok(extract_headings(&doc))
+}
+
+/// Collect `<h1>`–`<h6>` as `Hn: text` lines, indented two spaces per level below
+/// the first heading's level. Pure (no I/O) so it's unit-testable.
+fn extract_headings(doc: &argus_dom::Document) -> String {
+    use argus_dom::{NodeData, NodeId};
+
+    fn text_of(doc: &argus_dom::Document, id: NodeId, out: &mut String) {
+        match &doc.node(id).data {
+            NodeData::Text(t) => out.push_str(t),
+            _ => {
+                for c in doc.children(id) {
+                    text_of(doc, c, out);
+                }
+            }
+        }
+    }
+    fn level(tag: &str) -> Option<u8> {
+        match tag {
+            "h1" => Some(1),
+            "h2" => Some(2),
+            "h3" => Some(3),
+            "h4" => Some(4),
+            "h5" => Some(5),
+            "h6" => Some(6),
+            _ => None,
+        }
+    }
+    fn walk(doc: &argus_dom::Document, id: NodeId, top: &mut Option<u8>, out: &mut String) {
+        if let NodeData::Element(e) = &doc.node(id).data {
+            if let Some(lvl) = level(&e.name.local) {
+                let base = *top.get_or_insert(lvl);
+                let indent = lvl.saturating_sub(base) as usize;
+                let mut t = String::new();
+                text_of(doc, id, &mut t);
+                let text = t.split_whitespace().collect::<Vec<_>>().join(" ");
+                out.push_str(&"  ".repeat(indent));
+                out.push_str(&format!("H{lvl}: {text}\n"));
+            }
+        }
+        for c in doc.children(id) {
+            walk(doc, c, top, out);
+        }
+    }
+    let mut out = String::new();
+    let mut top = None;
+    walk(doc, doc.root(), &mut top, &mut out);
+    out
+}
+
 /// Collect `<a href>` links as `text<TAB>resolved-href` lines, in document order.
 /// Pure (no I/O) so it's unit-testable; `base` resolves relative hrefs.
 fn extract_links(doc: &argus_dom::Document, base: Option<&str>) -> String {
@@ -966,6 +1029,19 @@ mod tests {
         assert!(tree.contains("alert \"Heads up\""), "role attr:\n{tree}");
         // aria-hidden prunes the element.
         assert!(!tree.contains("secret"), "aria-hidden should prune:\n{tree}");
+    }
+
+    #[test]
+    fn extract_headings_outline() {
+        let doc = argus_html::parse(
+            "<h1>Title</h1><h2>Section A</h2><h3>Sub</h3><h2>Section B</h2>",
+        );
+        let out = super::extract_headings(&doc);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "H1: Title");
+        assert_eq!(lines[1], "  H2: Section A");
+        assert_eq!(lines[2], "    H3: Sub");
+        assert_eq!(lines[3], "  H2: Section B");
     }
 
     #[test]

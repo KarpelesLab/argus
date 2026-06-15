@@ -84,6 +84,17 @@ fn main() {
             }
             return;
         }
+        // `--dump-headings`: print the page's heading outline and exit.
+        if has_flag("--dump-headings") {
+            match argus_browser::dump_headings(url.as_deref()) {
+                Ok(h) => print!("{h}"),
+                Err(err) => {
+                    eprintln!("[browser] dump-headings failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
     }
 
     let result = match role {
