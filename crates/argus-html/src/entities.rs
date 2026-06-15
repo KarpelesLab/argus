@@ -1,9 +1,11 @@
 //! Character-reference decoding.
 //!
-//! Phase 1 handles numeric references (`&#123;` / `&#x1F;`) and a common subset of
-//! named references. The full named-entity table (~2200 entries) and the
-//! without-semicolon legacy matching rules are deferred — noted in
-//! `docs/subsystems/dom.md` — but the entry point is shaped to grow into them.
+//! Phase 1 handles numeric references (`&#123;` / `&#x1F;`), the common
+//! punctuation/symbol names, and the **full Latin-1 supplement** named set
+//! (`&eacute;`, `&uuml;`, `&ntilde;`, `&szlig;`, …). The remainder of the
+//! ~2200-entry table and the without-semicolon legacy matching rules are
+//! deferred — noted in `docs/subsystems/dom.md` — but the entry point is shaped
+//! to grow into them.
 
 /// Consume a character reference beginning at `input[*pos] == '&'`, advancing
 /// `*pos` past it and returning the decoded text. If the `&` does not begin a
@@ -171,6 +173,84 @@ fn named(name: &str) -> Option<&'static str> {
         "le" => "≤",
         "ge" => "≥",
         "micro" => "µ",
+        // The Latin-1 supplement named entities (U+00A1–U+00FF) — the accented
+        // letters and symbols common in French/German/Spanish/Portuguese text.
+        "iexcl" => "\u{00A1}",
+        "curren" => "\u{00A4}",
+        "brvbar" => "\u{00A6}",
+        "uml" => "\u{00A8}",
+        "ordf" => "\u{00AA}",
+        "not" => "\u{00AC}",
+        "macr" => "\u{00AF}",
+        "sup2" => "\u{00B2}",
+        "sup3" => "\u{00B3}",
+        "acute" => "\u{00B4}",
+        "cedil" => "\u{00B8}",
+        "sup1" => "\u{00B9}",
+        "ordm" => "\u{00BA}",
+        "iquest" => "\u{00BF}",
+        "Agrave" => "\u{00C0}",
+        "Aacute" => "\u{00C1}",
+        "Acirc" => "\u{00C2}",
+        "Atilde" => "\u{00C3}",
+        "Auml" => "\u{00C4}",
+        "Aring" => "\u{00C5}",
+        "AElig" => "\u{00C6}",
+        "Ccedil" => "\u{00C7}",
+        "Egrave" => "\u{00C8}",
+        "Eacute" => "\u{00C9}",
+        "Ecirc" => "\u{00CA}",
+        "Euml" => "\u{00CB}",
+        "Igrave" => "\u{00CC}",
+        "Iacute" => "\u{00CD}",
+        "Icirc" => "\u{00CE}",
+        "Iuml" => "\u{00CF}",
+        "ETH" => "\u{00D0}",
+        "Ntilde" => "\u{00D1}",
+        "Ograve" => "\u{00D2}",
+        "Oacute" => "\u{00D3}",
+        "Ocirc" => "\u{00D4}",
+        "Otilde" => "\u{00D5}",
+        "Ouml" => "\u{00D6}",
+        "Oslash" => "\u{00D8}",
+        "Ugrave" => "\u{00D9}",
+        "Uacute" => "\u{00DA}",
+        "Ucirc" => "\u{00DB}",
+        "Uuml" => "\u{00DC}",
+        "Yacute" => "\u{00DD}",
+        "THORN" => "\u{00DE}",
+        "szlig" => "\u{00DF}",
+        "agrave" => "\u{00E0}",
+        "aacute" => "\u{00E1}",
+        "acirc" => "\u{00E2}",
+        "atilde" => "\u{00E3}",
+        "auml" => "\u{00E4}",
+        "aring" => "\u{00E5}",
+        "aelig" => "\u{00E6}",
+        "ccedil" => "\u{00E7}",
+        "egrave" => "\u{00E8}",
+        "eacute" => "\u{00E9}",
+        "ecirc" => "\u{00EA}",
+        "euml" => "\u{00EB}",
+        "igrave" => "\u{00EC}",
+        "iacute" => "\u{00ED}",
+        "icirc" => "\u{00EE}",
+        "iuml" => "\u{00EF}",
+        "eth" => "\u{00F0}",
+        "ntilde" => "\u{00F1}",
+        "ograve" => "\u{00F2}",
+        "oacute" => "\u{00F3}",
+        "ocirc" => "\u{00F4}",
+        "otilde" => "\u{00F5}",
+        "ouml" => "\u{00F6}",
+        "oslash" => "\u{00F8}",
+        "ugrave" => "\u{00F9}",
+        "uacute" => "\u{00FA}",
+        "ucirc" => "\u{00FB}",
+        "uuml" => "\u{00FC}",
+        "yacute" => "\u{00FD}",
+        "thorn" => "\u{00FE}",
+        "yuml" => "\u{00FF}",
         _ => return None,
     })
 }
@@ -194,6 +274,19 @@ mod tests {
         assert_eq!(decode("&#0;"), "\u{FFFD}");
         assert_eq!(decode("&notareal;"), "&"); // unknown name → literal &
         assert_eq!(decode("&amp"), "&"); // no semicolon (subset requires it)
+    }
+
+    #[test]
+    fn latin1_named_entities() {
+        assert_eq!(decode("&eacute;"), "é");
+        assert_eq!(decode("&Uuml;"), "Ü");
+        assert_eq!(decode("&ntilde;"), "ñ");
+        assert_eq!(decode("&szlig;"), "ß");
+        assert_eq!(decode("&ccedil;"), "ç");
+        assert_eq!(decode("&iquest;"), "¿");
+        assert_eq!(decode("&AElig;"), "Æ");
+        // Case-sensitive: the accented-letter names differ by case.
+        assert_ne!(decode("&Eacute;"), decode("&eacute;"));
     }
 
     #[test]
