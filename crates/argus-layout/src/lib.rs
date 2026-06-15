@@ -877,8 +877,15 @@ impl Ctx<'_> {
             Position::Static => {}
         }
 
-        // `transform: translate(x, y)` paints the subtree shifted, with no effect on
-        // flow. `%` resolves against the element's own border box.
+        // `transform`: paint the subtree scaled (about its center) and/or shifted,
+        // with no effect on flow. `%` translate resolves against the border box.
+        if let Some((sx, sy)) = style.transform_scale {
+            if sx != 1.0 || sy != 1.0 {
+                let cx = border_box_left + border_box_w / 2.0;
+                let cy = border_box_top + border_box_h / 2.0;
+                self.scale_display_list(ds_start, sx, sy, cx, cy);
+            }
+        }
         if let Some((tx, ty)) = style.transform_translate {
             let dx = tx.to_px(style.font_size, border_box_w);
             let dy = ty.to_px(style.font_size, border_box_h);
@@ -909,6 +916,41 @@ impl Ctx<'_> {
         for b in &mut self.bounds[start.4..] {
             b.x += dx;
             b.y += dy;
+        }
+    }
+
+    /// Scale every display-list item appended since `start` by `(sx, sy)` about the
+    /// point `(ox, oy)` — positions, sizes, and text size all scale (for
+    /// `transform: scale`). Text size uses the horizontal factor.
+    fn scale_display_list(&mut self, start: DisplayListMark, sx: f32, sy: f32, ox: f32, oy: f32) {
+        for r in &mut self.rects[start.0..] {
+            r.x = ox + (r.x - ox) * sx;
+            r.y = oy + (r.y - oy) * sy;
+            r.w *= sx;
+            r.h *= sy;
+        }
+        for r in &mut self.runs[start.1..] {
+            r.x = ox + (r.x - ox) * sx;
+            r.baseline = oy + (r.baseline - oy) * sy;
+            r.size_px *= sx;
+        }
+        for im in &mut self.images[start.2..] {
+            im.x = ox + (im.x - ox) * sx;
+            im.y = oy + (im.y - oy) * sy;
+            im.w *= sx;
+            im.h *= sy;
+        }
+        for l in &mut self.links[start.3..] {
+            l.x = ox + (l.x - ox) * sx;
+            l.y = oy + (l.y - oy) * sy;
+            l.w *= sx;
+            l.h *= sy;
+        }
+        for b in &mut self.bounds[start.4..] {
+            b.x = ox + (b.x - ox) * sx;
+            b.y = oy + (b.y - oy) * sy;
+            b.w *= sx;
+            b.h *= sy;
         }
     }
 
@@ -3481,6 +3523,27 @@ borderdisplay0123floatleftrightclearbothfrgrowshrinkwrapspanabsolutefixedrelativ
         let post = texts.iter().position(|t| *t == "POST");
         assert!(pre.is_some() && mid.is_some() && post.is_some(), "runs: {texts:?}");
         assert!(pre < mid && mid < post, "order PRE<mid<POST: {texts:?}");
+    }
+
+    #[test]
+    fn transform_scale_grows_box_about_its_center() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A 100px box with a background, scaled 2x about its center. The background
+        // rect should double in size and keep the same center.
+        let html = "<div style=\"width:100px; height:40px; background:#f00; transform: scale(2)\"></div>";
+        let doc = parse(html);
+        let lay = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let bg = lay
+            .rects
+            .iter()
+            .find(|r| r.color.a > 0 && r.w > 150.0)
+            .expect("scaled background rect");
+        // Border box was ~100x40 → scaled to ~200x80.
+        assert!((bg.w - 200.0).abs() < 2.0, "width doubled, got {}", bg.w);
+        assert!((bg.h - 80.0).abs() < 2.0, "height doubled, got {}", bg.h);
     }
 
     #[test]

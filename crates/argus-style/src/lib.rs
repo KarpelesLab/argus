@@ -252,6 +252,9 @@ pub struct ComputedStyle {
     /// `transform: translate(x, y)` — paints the subtree shifted by `(x, y)` with no
     /// effect on layout. `%` resolves against the element's own box (not inherited).
     pub transform_translate: Option<(Length, Length)>,
+    /// `transform: scale(x, y)` — paints the subtree scaled about its center, with
+    /// no effect on layout (not inherited).
+    pub transform_scale: Option<(f32, f32)>,
     /// `list-style-type` for list items (inherited).
     pub list_style: ListStyle,
     /// `text-transform` case mapping (inherited).
@@ -330,6 +333,7 @@ impl ComputedStyle {
             break_word: false,
             ellipsis: false,
             transform_translate: None,
+            transform_scale: None,
             list_style: ListStyle::Disc,
             text_transform: TextTransform::None,
             box_sizing: BoxSizing::ContentBox,
@@ -1115,6 +1119,7 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     }
     if let Some(v) = map.get("transform") {
         cs.transform_translate = parse_transform_translate(v);
+        cs.transform_scale = parse_transform_scale(v);
     }
 }
 
@@ -1190,6 +1195,27 @@ fn parse_transform_translate(v: &str) -> Option<(Length, Length)> {
         }
         if let Some(args) = seg.strip_prefix("translateY(") {
             return parse_length(args.trim()).map(|y| (Length::Zero, y));
+        }
+    }
+    None
+}
+
+/// Parse the `scale`/`scaleX`/`scaleY` part of a `transform` value into an
+/// `(sx, sy)` factor pair. `scale(s)` is uniform; other functions are ignored.
+fn parse_transform_scale(v: &str) -> Option<(f32, f32)> {
+    for seg in v.split(')') {
+        let seg = seg.trim();
+        if let Some(args) = seg.strip_prefix("scale(") {
+            let mut it = args.split(',');
+            let x: f32 = it.next()?.trim().parse().ok()?;
+            let y: f32 = it.next().and_then(|s| s.trim().parse().ok()).unwrap_or(x);
+            return Some((x, y));
+        }
+        if let Some(args) = seg.strip_prefix("scaleX(") {
+            return args.trim().parse().ok().map(|x| (x, 1.0));
+        }
+        if let Some(args) = seg.strip_prefix("scaleY(") {
+            return args.trim().parse().ok().map(|y| (1.0, y));
         }
     }
     None
