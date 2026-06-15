@@ -484,6 +484,7 @@ ul { list-style-type: disc }
 ol { list-style-type: decimal }
 ul, ol { padding-left: 40px }
 blockquote { margin: 1em 40px }
+figure { margin: 1em 40px }
 dd { margin-left: 40px }
 fieldset { display: block; border: 1px solid #a0a0a0; padding: 8px 10px; margin: 0 2px }
 legend { display: block; font-weight: bold; padding: 0 4px }
@@ -2073,6 +2074,16 @@ mod tests {
         let cs = computed_style(&doc, dd, &ComputedStyle::initial(), &Stylesheet::default());
         assert_eq!(cs.display, Display::Block);
         assert_eq!(cs.margin.left, 40.0, "dd is indented by the UA default");
+    }
+
+    #[test]
+    fn ua_figure_is_indented() {
+        let mut doc = Document::new();
+        let fig = one(&mut doc, "figure", vec![]);
+        let cs = computed_style(&doc, fig, &ComputedStyle::initial(), &Stylesheet::default());
+        assert_eq!(cs.display, Display::Block);
+        assert_eq!(cs.margin.left, 40.0, "figure indents 40px like browsers");
+        assert_eq!(cs.margin.right, 40.0);
     }
 
     #[test]
