@@ -12,6 +12,8 @@ oxideav-png = "0.1"
 oxideav-gif = "0.0"
 oxideav-webp = "0.2"
 oxideav-mjpeg = "0.1"
+oxideav-qoi = "0.0"
+oxideav-ico = "0.0"
 oxideav-core = "0.1"
 oxideav-pixfmt = "0.1"
 

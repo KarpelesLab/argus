@@ -3,9 +3,10 @@
 //! Decodes image bytes into RGBA8 for the renderer, using the first-party oxideav
 //! codecs: PNG (`oxideav-png`), GIF (`oxideav-gif`), **JPEG** (`oxideav-mjpeg` via
 //! the `oxideav-core` registry, YUV→RGBA through `oxideav-pixfmt`), **WebP**
-//! (`oxideav-webp`, lossless), uncompressed 24/32-bit BMP (built in), and `data:`
-//! URLs. AVIF and lossy-WebP (VP8) decode here once those codecs land. See
-//! `docs/subsystems/media.md`.
+//! (`oxideav-webp`, lossless), **QOI** (`oxideav-qoi`), and **ICO/CUR favicons**
+//! (`oxideav-ico`, largest sub-image) — plus uncompressed 24/32-bit BMP (built in)
+//! and `data:` URLs. AVIF, TIFF, TGA, and lossy-WebP (VP8) decode here once that
+//! glue lands. See `docs/subsystems/media.md`.
 
 /// A decoded image: `width * height * 4` straight-alpha RGBA bytes.
 #[derive(Clone, Debug)]
@@ -42,12 +43,74 @@ pub fn decode(bytes: &[u8]) -> Option<DecodedImage> {
         return decode_bmp(bytes);
     }
     if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        return decode_jpeg(bytes);
+        return decode_registry(bytes, "mjpeg", oxideav_mjpeg::register_codecs);
     }
     if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         return decode_webp(bytes);
     }
+    if bytes.starts_with(b"qoif") {
+        return decode_qoi(bytes);
+    }
+    // ICO: reserved=0, type=1 (CUR is type 2, which we also accept — same layout).
+    if bytes.starts_with(&[0x00, 0x00, 0x01, 0x00]) {
+        return decode_ico(bytes);
+    }
     None
+}
+
+/// Decode a QOI image (lossless). `oxideav-qoi` returns tightly-packed RGB or
+/// RGBA pixels with the true dimensions in the header.
+fn decode_qoi(bytes: &[u8]) -> Option<DecodedImage> {
+    use oxideav_qoi::QoiChannels;
+    let img = oxideav_qoi::parse_qoi(bytes).ok()?;
+    let (w, h) = (img.width, img.height);
+    let rgba = match img.channels {
+        QoiChannels::Rgba => img.pixels,
+        QoiChannels::Rgb => rgb24_to_rgba(&img.pixels, w as usize, h as usize),
+    };
+    Some(DecodedImage {
+        width: w,
+        height: h,
+        rgba,
+    })
+}
+
+/// Decode an ICO/CUR (favicons), returning the largest sub-image. `oxideav-ico`
+/// yields each entry as top-down, tightly-packed RGBA already.
+fn decode_ico(bytes: &[u8]) -> Option<DecodedImage> {
+    let (_ty, images) = oxideav_ico::read_ico(bytes).ok()?;
+    // Pick the largest entry (best quality for rendering at any size).
+    let best = images
+        .into_iter()
+        .max_by_key(|i| i.width as u64 * i.height as u64)?;
+    if best.pixels.len() < (best.width as usize * best.height as usize * 4) {
+        return None;
+    }
+    Some(DecodedImage {
+        width: best.width,
+        height: best.height,
+        rgba: best.pixels,
+    })
+}
+
+/// Decode an image through the oxideav codec registry: register the one codec,
+/// feed the whole file as a single packet, and convert the decoded frame to RGBA.
+/// This is the uniform path for the still-image codecs (JPEG/QOI/ICO/TIFF/TGA).
+fn decode_registry(
+    bytes: &[u8],
+    codec: &str,
+    register_codecs: fn(&mut oxideav_core::CodecRegistry),
+) -> Option<DecodedImage> {
+    use oxideav_core::{CodecId, CodecParameters, Packet, RuntimeContext, TimeBase};
+
+    let mut ctx = RuntimeContext::new();
+    register_codecs(&mut ctx.codecs);
+    let params = CodecParameters::video(CodecId::new(codec));
+    let mut dec = ctx.codecs.first_decoder(&params).ok()?;
+    dec.send_packet(&Packet::new(0, TimeBase::SECONDS, bytes.to_vec()))
+        .ok()?;
+    let frame = dec.receive_arena_frame().ok()?;
+    frame_to_rgba(&frame)
 }
 
 /// Decode a WebP (lossless; lossy VP8 is reported unsupported by the codec).
@@ -59,21 +122,6 @@ fn decode_webp(bytes: &[u8]) -> Option<DecodedImage> {
         height: frame.height,
         rgba: frame.rgba,
     })
-}
-
-/// Decode a baseline/progressive JPEG via the oxideav codec registry (the still
-/// JPEG decoder lives in `oxideav-mjpeg`), converting the decoded frame to RGBA.
-fn decode_jpeg(bytes: &[u8]) -> Option<DecodedImage> {
-    use oxideav_core::{CodecId, CodecParameters, Packet, RuntimeContext, TimeBase};
-
-    let mut ctx = RuntimeContext::new();
-    oxideav_mjpeg::register(&mut ctx);
-    let params = CodecParameters::video(CodecId::new("mjpeg"));
-    let mut dec = ctx.codecs.first_decoder(&params).ok()?;
-    dec.send_packet(&Packet::new(0, TimeBase::SECONDS, bytes.to_vec()))
-        .ok()?;
-    let frame = dec.receive_arena_frame().ok()?;
-    frame_to_rgba(&frame)
 }
 
 /// Convert a decoded video frame (the common still-image pixel formats) to RGBA8.
@@ -351,6 +399,48 @@ mod tests {
         // A solid gray survives JPEG nearly exactly; alpha is opaque.
         assert!((img.rgba[0] as i32 - 128).abs() < 16, "r={}", img.rgba[0]);
         assert_eq!(img.rgba[3], 255);
+    }
+
+    #[test]
+    fn decodes_a_qoi_roundtrip() {
+        // QOI is lossless: encode a 2x2 RGBA image, decode it back exactly.
+        let src: Vec<u8> = vec![
+            255, 0, 0, 255, // red
+            0, 255, 0, 255, // green
+            0, 0, 255, 255, // blue
+            10, 20, 30, 255, // dark
+        ];
+        let encoded = oxideav_qoi::encode_qoi(2, 2, 4, &src);
+        assert!(encoded.starts_with(b"qoif"), "qoi magic");
+        let img = decode(&encoded).expect("decode qoi");
+        assert_eq!((img.width, img.height), (2, 2));
+        assert_eq!(img.rgba, src);
+    }
+
+    #[test]
+    fn decodes_an_ico_roundtrip() {
+        // A favicon: encode a 2x2 RGBA icon, decode the best-fit image back.
+        let src: Vec<u8> = vec![
+            255, 0, 0, 255, // red
+            0, 255, 0, 255, // green
+            0, 0, 255, 255, // blue
+            255, 255, 0, 255, // yellow
+        ];
+        let icon = oxideav_ico::IconImage::from_rgba(2, 2, src.clone());
+        let Ok(encoded) = oxideav_ico::write_ico(
+            oxideav_ico::IconType::Ico,
+            &[icon],
+            oxideav_ico::WriteOptions::default(),
+        ) else {
+            eprintln!("no ico encoder; skipping");
+            return;
+        };
+        assert!(encoded.starts_with(&[0, 0, 1, 0]), "ico magic");
+        let img = decode(&encoded).expect("decode ico");
+        assert_eq!((img.width, img.height), (2, 2));
+        assert_eq!(img.rgba.len(), 2 * 2 * 4);
+        // Opaque red top-left survives losslessly.
+        assert_eq!(&img.rgba[0..4], &[255, 0, 0, 255]);
     }
 
     #[test]

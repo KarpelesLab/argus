@@ -22,7 +22,7 @@ co-equal embedding, not an afterthought).
 | 3 — Chrome, navigation & services | 🟡 links → fetch → re-render, URL + subresource resolution, **scroll-wheel**, **persistent cookie jar**, **conservative HTTP cache** (Cache-Control-aware), **CSP meta** enforcement (inline-script `script-src`), **back/forward history** (Cmd+`[`/`]`). Tabs (multi-tab UI), header-delivered CSP + more directives, cache revalidation (ETag/Expires) remain |
 | 4 — Layout & CSS breadth | 🟡 box model, **box-sizing**, **min/max-width**, **line-height**, text-align (incl. **justify**), **text-transform**, **white-space: pre/nowrap**, **visibility**, **`<br>`**, **vertical-align (sub/sup)**, **position: relative**, **`@media` queries** (min/max-width), **custom properties (`var()`)**, attribute + `:first/last-child` + **`:nth-child`** + **`:not()`** selectors (with descendant/child combinators), lists + **list-style-type**, `<hr>`, **tables**, **form controls** (input/textarea/button render with their value), **flexbox**, **grid** + **gap**, underline + **line-through**, **border-radius**, **opacity**. Floats, absolute/fixed positioning, `flex-grow`/`justify`/`align`, grid spans/`fr`, web fonts, complex text remain |
 | 5 — Web platform & headless | 🟡 headless surfaces: `--dump-page`, `--dump-dom`, `--dump-a11y`, **`--dump-text`**, `--eval` (JS). Web API breadth (needs JS bindings), full CDP, storage remain |
-| 6 — Media & richer rendering | 🟡 PNG + GIF + **JPEG** (oxideav-mjpeg registry decoder, YUV→RGBA via oxideav-pixfmt) + **WebP** (oxideav-webp) + **uncompressed BMP** image decode. AVIF, `<video>`/`<audio>`, animations, GPU compositor remain |
+| 6 — Media & richer rendering | 🟡 PNG + GIF + **JPEG** (oxideav-mjpeg registry decoder, YUV→RGBA via oxideav-pixfmt) + **WebP** (oxideav-webp) + **QOI** (oxideav-qoi) + **ICO/CUR favicons** (oxideav-ico, largest sub-image) + **uncompressed BMP** image decode. AVIF, TIFF, TGA, `<video>`/`<audio>`, animations, GPU compositor remain |
 | 7 — Hardening / perf / conformance | 🟡 started — parser + **full layout-pipeline** robustness tests (random inputs) + cargo-fuzz harness (html/css/**layout**), accessibility tree. WPT, perf, sandbox hardening remain |
 
 Honest scope note: **`document`/`window` bindings now work** without any kataan
@@ -172,7 +172,7 @@ gradients/backgrounds/borders/filters in `argus-gfx`, scroll handling in the com
 - [ ] Absolute/fixed/sticky positioning, floats, stacking contexts, overflow/scroll containers correct.
 - [ ] Custom properties, cascade layers, `@scope`, media/container queries, `:has()` and the full selector set.
 - [ ] Web fonts (`@font-face`) load via the net service with correct reflow/swap; bidi + at least one complex script shape correctly.
-- [~] Images decode (`argus-image`: PNG/GIF/JPEG/WebP/BMP via oxideav) and render at correct intrinsic sizing; gradients, border-radius present. object-fit, multiple backgrounds, box-shadow, filters remain.
+- [~] Images decode (`argus-image`: PNG/GIF/JPEG/WebP/QOI/ICO/BMP via oxideav) and render at correct intrinsic sizing; gradients, border-radius present. object-fit, multiple backgrounds, box-shadow, filters remain.
 - [ ] Smooth scrolling recomposites without relayout/repaint of static content.
 
 **De-risks:** the long tail of CSS correctness and the in-house complex-text effort.
