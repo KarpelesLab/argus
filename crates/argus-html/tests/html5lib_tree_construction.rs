@@ -1255,4 +1255,54 @@ hi</pre>
 |     <script>
 |       "var x = 1 < 2;"
 |   <body>
+
+#data
+<table>text<tr><td>x</table>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     "text"
+|     <table>
+|       <tbody>
+|         <tr>
+|           <td>
+|             "x"
+
+#data
+<!DOCTYPE html>
+#errors
+#document
+| <!DOCTYPE html>
+| <html>
+|   <head>
+|   <body>
+
+#data
+<p>1<p>2<p>3
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <p>
+|       "1"
+|     <p>
+|       "2"
+|     <p>
+|       "3"
+
+#data
+<b>bold <i>both</i> still</b>
+#errors
+#document
+| <html>
+|   <head>
+|   <body>
+|     <b>
+|       "bold "
+|       <i>
+|         "both"
+|       " still"
 "####;
