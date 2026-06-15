@@ -25,7 +25,7 @@
 //! selectors) / `createElement` / `body` / `write`, and on elements
 //! `textContent`/`innerText`,
 //! `innerHTML`, `className`, `setAttribute`/`getAttribute`/`toggleAttribute`,
-//! `style.<camelCase>`,
+//! `dataset.<camelCase>` (data-* attributes), `style.<camelCase>`,
 //! `classList`, scoped `querySelector`/`querySelectorAll`, `matches`/`closest`,
 //! tree traversal (`parentNode`/`parentElement`, `children`, `childElementCount`,
 //! `first`/`lastElementChild`, `next`/`previousElementSibling`), `tagName`/
@@ -151,6 +151,15 @@ function __read(tgt, seed, k) {
   if (seed && seed[k] != null) return seed[k];
   return null;
 }
+// Convert a `dataset` property name to its `data-*` attribute (camelCase → kebab).
+function __dataAttr(k) {
+  var out = "data-";
+  for (var i = 0; i < k.length; i++) {
+    var ch = k.charAt(i);
+    if (ch >= "A" && ch <= "Z") { out += "-" + ch.toLowerCase(); } else { out += ch; }
+  }
+  return out;
+}
 // `tgt` is {kind:"id"|"sel"|"idx"|"new"|"scoped", val:...}. Seeded reads come from
 // __seed for ids and from the __tree entry for idx handles (querySelectorAll results).
 function __argus_el(tgt) {
@@ -181,6 +190,23 @@ function __argus_el(tgt) {
             return true;
           },
           get: function(t2, k2) { return ""; }
+        });
+      }
+      if (k === "dataset") {
+        // `el.dataset.fooBar` ↔ the `data-foo-bar` attribute.
+        return new Proxy({}, {
+          get: function(t2, k2) {
+            var r = __read(tgt, seed, __dataAttr("" + k2));
+            return r == null ? undefined : r;
+          },
+          set: function(t2, k2, v2) {
+            var name = __dataAttr("" + k2);
+            var sk = __sk(tgt);
+            __argus_state[sk] = __argus_state[sk] || {};
+            __argus_state[sk][name] = "" + v2;
+            __argus_ops.push({op: "attr", tgt: tgt, key: name, value: "" + v2});
+            return true;
+          }
         });
       }
       if (k === "__tgt") return tgt;
@@ -1822,6 +1848,23 @@ mod tests {
         apply_scripts(&mut doc);
         assert!(attr_of(&doc, "d", "open").is_some(), "details opened");
         assert!(attr_of(&doc, "b", "disabled").is_none(), "button enabled");
+    }
+
+    #[test]
+    fn dataset_reads_and_writes_data_attributes() {
+        let mut doc = argus_html::parse(
+            "<div id=\"d\" data-user-id=\"42\">x</div>\
+             <script>\
+               var e = document.getElementById('d');\
+               /* read existing data-user-id via camelCase */\
+               e.setAttribute('data-read', e.dataset.userId);\
+               /* write a new one: dataset.fooBar → data-foo-bar */\
+               e.dataset.fooBar = 'baz';\
+             </script>",
+        );
+        apply_scripts(&mut doc);
+        assert_eq!(attr_of(&doc, "d", "data-read").as_deref(), Some("42"));
+        assert_eq!(attr_of(&doc, "d", "data-foo-bar").as_deref(), Some("baz"));
     }
 
     #[test]
