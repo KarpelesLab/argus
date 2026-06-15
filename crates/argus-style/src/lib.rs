@@ -614,6 +614,25 @@ fn presentational_hints(doc: &Document, node: NodeId) -> Vec<(String, String)> {
     if let Some(bg) = e.attr("bgcolor").and_then(legacy_color) {
         out.push(("background-color".into(), bg));
     }
+    // Legacy `<ol type=1|A|a|I|i>` / `<ul type=disc|circle|square>` list markers.
+    if matches!(tag, "ol" | "ul" | "li") {
+        if let Some(t) = e.attr("type") {
+            let lst = match t.trim() {
+                "1" => Some("decimal"),
+                "A" => Some("upper-alpha"),
+                "a" => Some("lower-alpha"),
+                "I" => Some("upper-roman"),
+                "i" => Some("lower-roman"),
+                "disc" => Some("disc"),
+                "circle" => Some("circle"),
+                "square" => Some("square"),
+                _ => None,
+            };
+            if let Some(lst) = lst {
+                out.push(("list-style-type".into(), lst.into()));
+            }
+        }
+    }
     if tag == "body" {
         if let Some(c) = e.attr("text").and_then(legacy_color) {
             out.push(("color".into(), c));
@@ -2169,6 +2188,11 @@ mod tests {
         let img = one(&mut doc, "img", vec![Attribute::new("align", "right")]);
         let cs3 = computed_style(&doc, img, &ComputedStyle::initial(), &Stylesheet::default());
         assert_eq!(cs3.float, Float::Right);
+
+        // <ol type=A> selects the upper-alpha marker.
+        let ol = one(&mut doc, "ol", vec![Attribute::new("type", "A")]);
+        let cs4 = computed_style(&doc, ol, &ComputedStyle::initial(), &Stylesheet::default());
+        assert_eq!(cs4.list_style, ListStyle::UpperAlpha);
     }
 
     #[test]
