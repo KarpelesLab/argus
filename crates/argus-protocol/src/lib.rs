@@ -178,15 +178,20 @@ pub enum Msg {
     LoadDocument { html: String },
     /// browser → net service: fetch this URL.
     LoadUrl { url: String },
+    /// browser → net service: POST `body` (`application/x-www-form-urlencoded`) to
+    /// this URL — an HTML form submission with `method=post`. Not cached.
+    PostUrl { url: String, body: Vec<u8> },
     /// net service → browser: a fetched resource (`status == 0` means failure).
     ResourceLoaded { status: u16, body: Vec<u8> },
     /// content → browser: fetch a subresource (e.g. an image) at `url`.
     FetchResource { url: String },
     /// browser → content: subresource bytes (empty = not found / error).
     ResourceData { body: Vec<u8> },
-    /// content → browser: result of an [`Msg::InputClick`] — a non-empty `url`
-    /// means a link was hit and the browser should navigate.
-    ClickResult { url: String },
+    /// content → browser: result of an [`Msg::InputClick`]/[`Msg::InputKey`] — a
+    /// non-empty `url` means the browser should navigate there. A non-empty
+    /// `post_body` makes it a `method=post` form submission (POST `post_body` to
+    /// `url`); empty `post_body` is a normal GET navigation.
+    ClickResult { url: String, post_body: Vec<u8> },
     /// browser → child: exit cleanly.
     Shutdown,
 }
@@ -230,6 +235,7 @@ const TAG_INPUT_KEY: u8 = 15;
 const TAG_PROVIDE_MONO_FONT: u8 = 16;
 const TAG_PROVIDE_STORAGE: u8 = 17;
 const TAG_STORAGE_CHANGED: u8 = 18;
+const TAG_POST_URL: u8 = 19;
 
 impl Msg {
     /// Number of file descriptors that accompany this message out-of-band.
@@ -291,6 +297,11 @@ impl Msg {
                 buf.push(TAG_LOAD_URL);
                 put_bytes(&mut buf, url.as_bytes());
             }
+            Msg::PostUrl { url, body } => {
+                buf.push(TAG_POST_URL);
+                put_bytes(&mut buf, url.as_bytes());
+                put_bytes(&mut buf, body);
+            }
             Msg::ResourceLoaded { status, body } => {
                 buf.push(TAG_RESOURCE_LOADED);
                 buf.extend_from_slice(&status.to_le_bytes());
@@ -304,9 +315,10 @@ impl Msg {
                 buf.push(TAG_RESOURCE_DATA);
                 put_bytes(&mut buf, body);
             }
-            Msg::ClickResult { url } => {
+            Msg::ClickResult { url, post_body } => {
                 buf.push(TAG_CLICK_RESULT);
                 put_bytes(&mut buf, url.as_bytes());
+                put_bytes(&mut buf, post_body);
             }
             Msg::SetScroll { y } => {
                 buf.push(TAG_SET_SCROLL);
@@ -358,6 +370,10 @@ impl Msg {
             TAG_LOAD_URL => Msg::LoadUrl {
                 url: String::from_utf8_lossy(c.bytes()?).into_owned(),
             },
+            TAG_POST_URL => Msg::PostUrl {
+                url: String::from_utf8_lossy(c.bytes()?).into_owned(),
+                body: c.bytes()?.to_vec(),
+            },
             TAG_RESOURCE_LOADED => Msg::ResourceLoaded {
                 status: c.u16()?,
                 body: c.bytes()?.to_vec(),
@@ -370,6 +386,7 @@ impl Msg {
             },
             TAG_CLICK_RESULT => Msg::ClickResult {
                 url: String::from_utf8_lossy(c.bytes()?).into_owned(),
+                post_body: c.bytes()?.to_vec(),
             },
             TAG_SET_SCROLL => Msg::SetScroll { y: c.u32()? },
             TAG_INPUT_KEY => Msg::InputKey { ch: c.u32()? },
@@ -474,6 +491,10 @@ mod tests {
         round_trip(Msg::LoadUrl {
             url: "https://example.com/x".to_string(),
         });
+        round_trip(Msg::PostUrl {
+            url: "https://example.com/login".to_string(),
+            body: b"user=a&pass=b".to_vec(),
+        });
         round_trip(Msg::ResourceLoaded {
             status: 200,
             body: vec![60, 104, 49, 62],
@@ -486,6 +507,11 @@ mod tests {
         });
         round_trip(Msg::ClickResult {
             url: "/next".to_string(),
+            post_body: Vec::new(),
+        });
+        round_trip(Msg::ClickResult {
+            url: "/submit".to_string(),
+            post_body: b"q=hi".to_vec(),
         });
         round_trip(Msg::Shutdown);
     }

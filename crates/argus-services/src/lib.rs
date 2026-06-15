@@ -74,6 +74,17 @@ pub fn run(role: Role, channel: Channel) -> io::Result<()> {
                 };
                 proto::send(&channel, Msg::ResourceLoaded { status, body }, &[])?;
             }
+            Ok((Msg::PostUrl { url, body }, _)) if role == Role::NetService => {
+                // Form POST: never cached (POST is not idempotent), always hits the
+                // network. Cookies set by the response thread through the jar.
+                let (status, _headers, resp) = post(&url, &body, &mut jar);
+                log!(
+                    "POST {url} ({} bytes) -> {status} ({} bytes)",
+                    body.len(),
+                    resp.len()
+                );
+                proto::send(&channel, Msg::ResourceLoaded { status, body: resp }, &[])?;
+            }
             Ok((Msg::Shutdown, _)) => {
                 log!("shutting down");
                 return Ok(());
@@ -113,6 +124,32 @@ fn fetch(
         Ok(resp) => (resp.status, resp.headers, resp.body),
         Err(e) => {
             log!("fetch error for {url}: {e}");
+            (0, Vec::new(), Vec::new())
+        }
+    }
+}
+
+/// POST `body` (`application/x-www-form-urlencoded`) to `url`, threading `jar` for
+/// cookies. Returns `(status, headers, body)`; `status == 0` on transport error.
+fn post(
+    url: &str,
+    body: &[u8],
+    jar: &mut rsurl::CookieJar,
+) -> (u16, Vec<(String, String)>, Vec<u8>) {
+    let req = match rsurl::Request::new("POST", url) {
+        Ok(req) => req,
+        Err(e) => {
+            log!("post error for {url}: {e}");
+            return (0, Vec::new(), Vec::new());
+        }
+    };
+    let req = req
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(body.to_vec());
+    match req.send_with_jar(jar) {
+        Ok(resp) => (resp.status, resp.headers, resp.body),
+        Err(e) => {
+            log!("post error for {url}: {e}");
             (0, Vec::new(), Vec::new())
         }
     }

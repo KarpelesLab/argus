@@ -387,6 +387,39 @@ fn fetch_html(net: &Child, url: &str) -> io::Result<String> {
     }
 }
 
+/// POST `body` (`application/x-www-form-urlencoded`) to `url` via the net service
+/// and decode the response HTML — an HTML form submission with `method=post`.
+fn post_html(net: &Child, url: &str, body: &[u8]) -> io::Result<String> {
+    proto::send(
+        net.channel(),
+        Msg::PostUrl {
+            url: url.to_string(),
+            body: body.to_vec(),
+        },
+        &[],
+    )?;
+    let resp = match proto::recv(net.channel())?.0 {
+        Msg::ResourceLoaded { status, body } => {
+            if status == 0 || body.is_empty() {
+                Vec::new()
+            } else {
+                body
+            }
+        }
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("expected ResourceLoaded, got {other:?}"),
+            ))
+        }
+    };
+    if resp.is_empty() {
+        Ok(error_page(url, "form POST failed (network error or empty response)"))
+    } else {
+        Ok(decode_html(&resp))
+    }
+}
+
 /// Decode HTML bytes to a string, honoring a declared charset. UTF-8 is used when
 /// valid (or declared); a declared legacy charset (`windows-1252`/`iso-8859-1`/
 /// `latin-1`) or invalid UTF-8 falls back to windows-1252.
@@ -1984,6 +2017,26 @@ fn load_page(
     request_frame(content, net, target)
 }
 
+/// POST `body` to `url` (an HTML `method=post` form submission), provide the
+/// response page to content, reset scroll, and render a frame. Subresources still
+/// resolve against `url`. The caller records `url` in history (back/forward
+/// re-GET it — the POST body is not replayed).
+#[cfg(target_os = "macos")]
+fn post_page(
+    content: &Child,
+    net: &Child,
+    window: &argus_platform::window::Window,
+    url: &str,
+    body: &[u8],
+) -> io::Result<(Framebuffer, u32)> {
+    let page = post_html(net, url, body).unwrap_or_else(|e| error_page(url, &e.to_string()));
+    let title = page_title(&page);
+    window.set_title(if title.is_empty() { "Argus" } else { &title });
+    provide_page(content, &page)?;
+    proto::send(content.channel(), Msg::SetScroll { y: 0 }, &[])?;
+    request_frame(content, net, Some(url))
+}
+
 /// Composite the page `content` frame beneath the tab strip and present the whole
 /// window. The window is `full`-sized; the content was rendered `TAB_BAR_H` px
 /// shorter, so it sits below the bar.
@@ -2094,6 +2147,19 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
             present_framed(&window, &frame, &tabs, window_size)?;
         }};
     }
+    // Submit a `method=post` form: POST `$body` to `$url` in the active tab's
+    // process, record the action URL in history (back/forward re-GET it), and
+    // present the response.
+    macro_rules! post_active {
+        ($url:expr, $body:expr) => {{
+            let proc = &procs[tabs.active_index()];
+            let (frame, h) = post_page(proc, &net, &window, &$url, &$body)?;
+            tabs.active_mut().history.push($url);
+            tabs.active_mut().scroll_y = 0;
+            content_height = h;
+            present_framed(&window, &frame, &tabs, window_size)?;
+        }};
+    }
     // Re-render the active tab's process *without* reloading — it kept its DOM,
     // JS, and scroll state, so switching back is instant and stateful.
     macro_rules! show_active {
@@ -2161,8 +2227,13 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
                         other => break other,
                     }
                 };
-                if let Msg::ClickResult { url } = click {
-                    if !url.is_empty() {
+                if let Msg::ClickResult { url, post_body } = click {
+                    if !post_body.is_empty() {
+                        // POST form submission: POST the body to the action URL.
+                        let target = resolve_url(active_target(&tabs).as_deref(), &url);
+                        log!("posting form to {target}");
+                        post_active!(target, post_body);
+                    } else if !url.is_empty() {
                         let target = resolve_url(active_target(&tabs).as_deref(), &url);
                         log!("navigating to {target}");
                         tabs.active_mut().history.push(target);
@@ -2200,7 +2271,12 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
                     }
                 };
                 match resp {
-                    Msg::ClickResult { url } if !url.is_empty() => {
+                    Msg::ClickResult { url, post_body } if !post_body.is_empty() => {
+                        let target = resolve_url(active_target(&tabs).as_deref(), &url);
+                        log!("submitting form (POST) -> {target}");
+                        post_active!(target, post_body);
+                    }
+                    Msg::ClickResult { url, .. } if !url.is_empty() => {
                         let target = resolve_url(active_target(&tabs).as_deref(), &url);
                         log!("submitting form -> {target}");
                         tabs.active_mut().history.push(target);

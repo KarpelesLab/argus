@@ -35,6 +35,7 @@ pub fn run(channel: Channel) -> io::Result<()> {
         focused: None,
         input_values: std::collections::HashMap::new(),
         links: Vec::new(),
+        submits: Vec::new(),
         bounds: Vec::new(),
         loaded_web_fonts: std::collections::HashSet::new(),
         scroll_y: 0,
@@ -136,15 +137,32 @@ pub fn run(channel: Channel) -> io::Result<()> {
                 content.scroll_y = y;
             }
             Msg::InputClick { x, y } => {
+                // A GET link (incl. GET submit buttons) navigates by URL.
                 let url = content
                     .links
                     .iter()
                     .find(|l| l.contains(x as f32, y as f32))
                     .map(|l| l.href.clone())
                     .unwrap_or_default();
-                if url.is_empty() {
-                    // Not a link: dispatch a `click` to the deepest id'd element and
-                    // re-run the page's scripts with the full interaction history.
+                // A POST submit button navigates by POSTing the serialized body.
+                let post = content
+                    .submits
+                    .iter()
+                    .find(|s| s.contains(x as f32, y as f32))
+                    .map(|s| (s.action.clone(), s.body.clone()));
+                if !url.is_empty() {
+                    log!("link clicked at ({x}, {y}) -> {url}");
+                    proto::send(&channel, Msg::ClickResult { url, post_body: Vec::new() }, &[])?;
+                } else if let Some((action, body)) = post {
+                    log!("post submit at ({x}, {y}) -> {action}");
+                    proto::send(
+                        &channel,
+                        Msg::ClickResult { url: action, post_body: body.into_bytes() },
+                        &[],
+                    )?;
+                } else {
+                    // Not navigation: dispatch a `click` to the deepest id'd element
+                    // and re-run the page's scripts with the full interaction history.
                     content.dispatch_click(x as f32, y as f32);
                     content.apply_input_values();
                     content.set_focus(x as f32, y as f32);
@@ -158,17 +176,19 @@ pub fn run(channel: Channel) -> io::Result<()> {
                             &[],
                         )?;
                     }
-                } else {
-                    log!("link clicked at ({x}, {y}) -> {url}");
+                    proto::send(
+                        &channel,
+                        Msg::ClickResult { url: String::new(), post_body: Vec::new() },
+                        &[],
+                    )?;
                 }
-                proto::send(&channel, Msg::ClickResult { url }, &[])?;
             }
             Msg::InputKey { ch } => {
-                // Enter in a focused field may submit its form (GET); reply with the
-                // resulting navigation URL (empty = just typed, no navigation),
+                // Enter in a focused field may submit its form: reply with the
+                // navigation (GET url, or a POST action+body), empty = just typed —
                 // mirroring the InputClick → ClickResult contract.
-                let url = content.type_key(ch).unwrap_or_default();
-                proto::send(&channel, Msg::ClickResult { url }, &[])?;
+                let (url, post_body) = content.type_key(ch).unwrap_or_default();
+                proto::send(&channel, Msg::ClickResult { url, post_body }, &[])?;
             }
             Msg::Shutdown => {
                 log!("shutting down");
@@ -197,6 +217,9 @@ struct Content {
     input_values: std::collections::HashMap<String, String>,
     /// Clickable link regions from the last render (in screen coords), for input.
     links: Vec<argus_layout::LinkBox>,
+    /// `method=post` submit-button regions from the last render (screen coords) —
+    /// a click here POSTs the form body instead of navigating by URL.
+    submits: Vec<argus_layout::SubmitRegion>,
     /// Id'd element boxes from the last render (screen coords), for click dispatch.
     bounds: Vec<argus_layout::ElementBound>,
     /// `@font-face` family keys already fetched + registered (avoid re-fetching).
@@ -291,10 +314,14 @@ impl Content {
         for l in &mut layout.links {
             l.y -= scroll;
         }
+        for s in &mut layout.submits {
+            s.y -= scroll;
+        }
         for b in &mut layout.bounds {
             b.y -= scroll;
         }
         self.bounds = layout.bounds;
+        self.submits = layout.submits;
         let list = argus_gfx::DisplayList {
             rects: layout.rects,
             runs: layout.runs,
@@ -453,15 +480,20 @@ impl Content {
     }
 
     /// Apply a typed key to the focused field: update its value and the document.
-    /// Returns the GET submission URL when Enter is pressed inside a `method=get`
-    /// form (the browser then navigates), else `None`.
-    fn type_key(&mut self, ch: u32) -> Option<String> {
+    /// On Enter inside a form, returns the submission navigation as
+    /// `(url, post_body)`: a GET form gives `(action?query, [])`, a POST form gives
+    /// `(action, urlencoded-body)`. Returns `None` for ordinary typing.
+    fn type_key(&mut self, ch: u32) -> Option<(String, Vec<u8>)> {
         let id = self.focused.clone()?;
         // Enter (CR/LF) implicitly submits the focused field's form.
         if ch == 0x0D || ch == 0x0A {
             let doc = self.doc.as_ref()?;
             let node = find_element_by_id(doc, &id)?;
-            return argus_layout::form_get_url_for_field(doc, node);
+            if let Some(url) = argus_layout::form_get_url_for_field(doc, node) {
+                return Some((url, Vec::new()));
+            }
+            let (action, body) = argus_layout::form_post_data_for_field(doc, node)?;
+            return Some((action, body.into_bytes()));
         }
         let current = self
             .input_values

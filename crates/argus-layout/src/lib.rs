@@ -386,7 +386,7 @@ fn clamp_content_width(style: &ComputedStyle, width: f32, avail: f32) -> f32 {
 
 /// A snapshot of the display-list lengths (rects, runs, images, links, bounds),
 /// used to shift everything appended after the mark by a delta.
-type DisplayListMark = (usize, usize, usize, usize, usize);
+type DisplayListMark = (usize, usize, usize, usize, usize, usize);
 
 /// Strip count used to approximate a `linear-gradient` background.
 const GRAD_STEPS: usize = 24;
@@ -561,10 +561,32 @@ pub struct Layout {
     pub images: Vec<ImageBox>,
     /// Clickable hyperlink regions.
     pub links: Vec<LinkBox>,
+    /// `method=post` submit-button regions (GET submits are plain `links`). A
+    /// click here POSTs `body` to `action` instead of navigating by URL.
+    pub submits: Vec<SubmitRegion>,
     /// Border-boxes of id'd elements (deepest last), for click hit-testing.
     pub bounds: Vec<ElementBound>,
     /// Total content height in pixels.
     pub height: f32,
+}
+
+/// A `method=post` submit-button hit region: clicking it POSTs `body`
+/// (`application/x-www-form-urlencoded`) to `action`.
+#[derive(Clone, Debug)]
+pub struct SubmitRegion {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub action: String,
+    pub body: String,
+}
+
+impl SubmitRegion {
+    /// Whether `(px, py)` falls inside this region.
+    pub fn contains(&self, px: f32, py: f32) -> bool {
+        px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
+    }
 }
 
 impl Layout {
@@ -716,28 +738,66 @@ fn collect_form_fields(
     }
 }
 
-/// Build a `method=get` form's `action?query` submission URL by serializing its
-/// successful controls. `submit_id` (when given) is the activated submit whose own
-/// `name=value` is included. Returns `None` for `POST` forms.
-fn build_get_url(doc: &Document, form: NodeId, submit_id: Option<NodeId>) -> Option<String> {
-    let fe = doc.node(form).as_element()?;
-    if fe.attr("method").is_some_and(|m| m.eq_ignore_ascii_case("post")) {
-        return None; // POST needs a request body — left to a later slice.
-    }
-    let action = fe.attr("action").unwrap_or("");
+/// Serialize a form's successful controls as `application/x-www-form-urlencoded`
+/// (the shared GET-query / POST-body wire form). `submit_id` (when given) is the
+/// activated submit whose own `name=value` is included.
+fn encode_form_body(doc: &Document, form: NodeId, submit_id: Option<NodeId>) -> String {
     let mut pairs: Vec<(String, String)> = Vec::new();
     collect_form_fields(doc, form, submit_id, &mut pairs);
-    let query = pairs
+    pairs
         .iter()
         .map(|(k, v)| format!("{}={}", form_urlencode(k), form_urlencode(v)))
         .collect::<Vec<_>>()
-        .join("&");
+        .join("&")
+}
+
+/// Whether the form's `method` is `post` (default is GET).
+fn form_is_post(doc: &Document, form: NodeId) -> bool {
+    doc.node(form)
+        .as_element()
+        .and_then(|e| e.attr("method"))
+        .is_some_and(|m| m.eq_ignore_ascii_case("post"))
+}
+
+/// Build a `method=get` form's `action?query` submission URL by serializing its
+/// successful controls. Returns `None` for `POST` forms (those go through
+/// [`build_post_data`]).
+fn build_get_url(doc: &Document, form: NodeId, submit_id: Option<NodeId>) -> Option<String> {
+    if form_is_post(doc, form) {
+        return None;
+    }
+    let action = doc.node(form).as_element()?.attr("action").unwrap_or("");
+    let query = encode_form_body(doc, form, submit_id);
     if query.is_empty() {
         return Some(action.to_string());
     }
     // `action` may already carry a query string (`search?lang=en`).
     let sep = if action.contains('?') { '&' } else { '?' };
     Some(format!("{action}{sep}{query}"))
+}
+
+/// Build a `method=post` form's `(action, body)` submission data by serializing its
+/// successful controls into a urlencoded body. Returns `None` for GET forms.
+fn build_post_data(doc: &Document, form: NodeId, submit_id: Option<NodeId>) -> Option<(String, String)> {
+    if !form_is_post(doc, form) {
+        return None;
+    }
+    let action = doc.node(form).as_element()?.attr("action").unwrap_or("");
+    Some((action.to_string(), encode_form_body(doc, form, submit_id)))
+}
+
+/// The first submit control in `node`'s subtree — the implicit default submit for
+/// Enter-key submission.
+fn first_submit(doc: &Document, node: NodeId) -> Option<NodeId> {
+    for c in doc.children(node) {
+        if doc.node(c).as_element().is_some_and(is_submit_control) {
+            return Some(c);
+        }
+        if let Some(found) = first_submit(doc, c) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 /// If `id` is a submit control inside a `method=get` `<form>`, the GET submission
@@ -747,30 +807,34 @@ pub fn form_get_url(doc: &Document, id: NodeId) -> Option<String> {
     if !doc.node(id).as_element().is_some_and(is_submit_control) {
         return None;
     }
-    let form = enclosing_form(doc, id)?;
-    build_get_url(doc, form, Some(id))
+    build_get_url(doc, enclosing_form(doc, id)?, Some(id))
+}
+
+/// If `id` is a submit control inside a `method=post` `<form>`, the `(action, body)`
+/// it submits (urlencoded body, the control's own `name=value` included). `None`
+/// for non-submit elements, GET forms, or controls outside any form.
+pub fn form_post_data(doc: &Document, id: NodeId) -> Option<(String, String)> {
+    if !doc.node(id).as_element().is_some_and(is_submit_control) {
+        return None;
+    }
+    build_post_data(doc, enclosing_form(doc, id)?, Some(id))
 }
 
 /// The GET submission URL for *implicit* submission of the `method=get` `<form>`
-/// containing the control `field_id` — i.e. pressing Enter in a text field. The
-/// form's first submit control (if any) is treated as the activated one, matching
-/// browser default submission. `None` if the field is outside a form or the form
-/// is POST.
+/// containing `field_id` — i.e. pressing Enter in a text field. The form's first
+/// submit control (if any) is the implicit activated one, matching browser default
+/// submission. `None` if the field is outside a form or the form is POST.
 pub fn form_get_url_for_field(doc: &Document, field_id: NodeId) -> Option<String> {
     let form = enclosing_form(doc, field_id)?;
-    // The first submit control in the form is the implicit default submit.
-    fn first_submit(doc: &Document, node: NodeId) -> Option<NodeId> {
-        for c in doc.children(node) {
-            if doc.node(c).as_element().is_some_and(is_submit_control) {
-                return Some(c);
-            }
-            if let Some(found) = first_submit(doc, c) {
-                return Some(found);
-            }
-        }
-        None
-    }
     build_get_url(doc, form, first_submit(doc, form))
+}
+
+/// The `(action, body)` for *implicit* submission of the `method=post` `<form>`
+/// containing `field_id` (Enter in a text field). `None` for GET forms or a field
+/// outside any form.
+pub fn form_post_data_for_field(doc: &Document, field_id: NodeId) -> Option<(String, String)> {
+    let form = enclosing_form(doc, field_id)?;
+    build_post_data(doc, form, first_submit(doc, form))
 }
 
 /// Lay `doc` out into a display list for a viewport `viewport_width` pixels wide,
@@ -790,6 +854,7 @@ pub fn layout(doc: &Document, font: &Font, viewport_width: f32, images: &ImageSi
         runs: Vec::new(),
         images: Vec::new(),
         links: Vec::new(),
+        submits: Vec::new(),
         bounds: Vec::new(),
         cursor_y: PAGE_MARGIN,
         floats: Vec::new(),
@@ -814,6 +879,7 @@ pub fn layout(doc: &Document, font: &Font, viewport_width: f32, images: &ImageSi
         runs: ctx.runs,
         images: ctx.images,
         links: ctx.links,
+        submits: ctx.submits,
         bounds: ctx.bounds,
         height: ctx.cursor_y + PAGE_MARGIN,
     }
@@ -843,6 +909,7 @@ struct Ctx<'a> {
     runs: Vec<TextRun>,
     images: Vec<ImageBox>,
     links: Vec<LinkBox>,
+    submits: Vec<SubmitRegion>,
     bounds: Vec<ElementBound>,
     cursor_y: f32,
     /// Active floats (absolute coords) narrowing the inline region of later lines.
@@ -886,6 +953,7 @@ impl Ctx<'_> {
             self.images.len(),
             self.links.len(),
             self.bounds.len(),
+            self.submits.len(),
         );
 
         let border_box_top = self.cursor_y;
@@ -1351,6 +1419,7 @@ impl Ctx<'_> {
                                     self.images.len(),
                                     self.links.len(),
                                     self.bounds.len(),
+                                    self.submits.len(),
                                 );
                                 let saved_y = self.cursor_y;
                                 self.cursor_y = 0.0;
@@ -1363,6 +1432,7 @@ impl Ctx<'_> {
                                     self.images.len(),
                                     self.links.len(),
                                     self.bounds.len(),
+                                    self.submits.len(),
                                 );
                                 let space_before = pending_space;
                                 pending_space = false;
@@ -1721,6 +1791,17 @@ impl Ctx<'_> {
                     h: self.cursor_y - border_box_top,
                     href,
                 });
+            } else if let Some((action, body)) = form_post_data(self.doc, id) {
+                // A POST submit can't be a URL link (it carries a body); record it
+                // as a submit region the content process POSTs on click.
+                self.submits.push(SubmitRegion {
+                    x: border_box_left,
+                    y: border_box_top,
+                    w: border_box_w,
+                    h: self.cursor_y - border_box_top,
+                    action,
+                    body,
+                });
             }
         }
 
@@ -1875,6 +1956,10 @@ impl Ctx<'_> {
             b.x += dx;
             b.y += dy;
         }
+        for s in &mut self.submits[start.5..] {
+            s.x += dx;
+            s.y += dy;
+        }
     }
 
     /// Intersect every display-list item appended since `start` with the clip rect
@@ -1923,6 +2008,10 @@ impl Ctx<'_> {
         for b in &mut self.bounds[start.4..end.4] {
             b.x += dx;
             b.y += dy;
+        }
+        for s in &mut self.submits[start.5..end.5] {
+            s.x += dx;
+            s.y += dy;
         }
     }
 
@@ -2161,6 +2250,7 @@ impl Ctx<'_> {
                 self.images.len(),
                 self.links.len(),
                 self.bounds.len(),
+                self.submits.len(),
             );
             let saved_y = self.cursor_y;
             self.cursor_y = 0.0;
@@ -2172,6 +2262,7 @@ impl Ctx<'_> {
                 self.images.len(),
                 self.links.len(),
                 self.bounds.len(),
+                self.submits.len(),
             );
             let space_before = *pending_space;
             *pending_space = false;
@@ -2738,6 +2829,7 @@ impl Ctx<'_> {
                     self.images.len(),
                     self.links.len(),
                     self.bounds.len(),
+                    self.submits.len(),
                 );
                 self.layout_block(item, istyle, content_left, content_w, None);
                 // Cross-axis offset only applies to fixed-width items (a stretched
@@ -2897,6 +2989,7 @@ impl Ctx<'_> {
                             self.images.len(),
                             self.links.len(),
                             self.bounds.len(),
+                            self.submits.len(),
                         );
                         self.layout_block(items[idx], istyles[idx], cx, bases[idx], None);
                         let h = self.cursor_y - line_top;
@@ -3037,6 +3130,7 @@ impl Ctx<'_> {
                     self.images.len(),
                     self.links.len(),
                     self.bounds.len(),
+                    self.submits.len(),
                 );
                 self.layout_block(item, istyles[i], cx, sizes[i], None);
                 let h = self.cursor_y - row_top;
@@ -3264,6 +3358,7 @@ impl Ctx<'_> {
                 self.images.len(),
                 self.links.len(),
                 self.bounds.len(),
+                self.submits.len(),
             );
             self.cursor_y = 0.0;
             self.layout_block(p.item, p.style, col_x[p.col], p.width, None);
@@ -3273,6 +3368,7 @@ impl Ctx<'_> {
             self.images.truncate(mark.2);
             self.links.truncate(mark.3);
             self.bounds.truncate(mark.4);
+            self.submits.truncate(mark.5);
         }
 
         // Row heights: single-row items set their row's height directly; multi-row
@@ -3492,6 +3588,7 @@ impl Ctx<'_> {
                 self.images.len(),
                 self.links.len(),
                 self.bounds.len(),
+                self.submits.len(),
             );
             self.cursor_y = 0.0;
             self.layout_block(p.cell, p.style, col_x[p.col], span_w(p.col, p.cspan), None);
@@ -3501,6 +3598,7 @@ impl Ctx<'_> {
             self.images.truncate(mark.2);
             self.links.truncate(mark.3);
             self.bounds.truncate(mark.4);
+            self.submits.truncate(mark.5);
         }
         // Row heights: single-row cells set their row; multi-row deficits go to the
         // last spanned row.
@@ -4747,6 +4845,60 @@ mod tests {
         let doc4 = parse("<form method=\"post\" action=\"/p\"><input id=\"pf\" name=\"x\" value=\"1\"></form>");
         let pf = by_id(&doc4, doc4.root(), "pf").unwrap();
         assert_eq!(form_get_url_for_field(&doc4, pf), None, "POST → no GET submit");
+    }
+
+    #[test]
+    fn post_form_emits_a_submit_region_with_body() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        fn by_id(doc: &Document, node: NodeId, want: &str) -> Option<NodeId> {
+            for c in doc.children(node) {
+                if doc.node(c).as_element().and_then(|e| e.attr("id")) == Some(want) {
+                    return Some(c);
+                }
+                if let Some(found) = by_id(doc, c, want) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+
+        // A POST form's submit becomes a SubmitRegion (NOT a GET link), carrying
+        // the urlencoded body and the action.
+        let html = "<form method=\"post\" action=\"/login\">\
+            <input name=\"user\" value=\"al ice\">\
+            <input type=\"password\" name=\"pw\" value=\"p&q\">\
+            <input type=\"submit\" name=\"go\" value=\"In\"></form>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 600.0, &ImageSizes::new());
+        assert!(
+            l.links.iter().all(|l| l.href != "/login"),
+            "POST submit is not a GET link"
+        );
+        assert_eq!(l.submits.len(), 1, "one POST submit region");
+        let s = &l.submits[0];
+        assert_eq!(s.action, "/login");
+        assert_eq!(s.body, "user=al+ice&pw=p%26q&go=In");
+        assert!(s.w > 0.0 && s.h > 0.0, "region has the button's box");
+
+        // Enter in a field of a POST form yields the same (action, body), with the
+        // first submit as the implicit one.
+        let doc2 = parse(
+            "<form method=\"post\" action=\"/a\"><input id=\"u\" name=\"u\" value=\"x\">\
+             <button name=\"s\">Go</button></form>",
+        );
+        let u = by_id(&doc2, doc2.root(), "u").unwrap();
+        assert_eq!(
+            form_post_data_for_field(&doc2, u),
+            Some(("/a".to_string(), "u=x&s=".to_string()))
+        );
+
+        // A GET form emits no submit region (it uses a link instead).
+        let getf = parse("<form action=\"/g\"><input name=\"q\" value=\"1\"><input type=\"submit\"></form>");
+        let lg = layout(&getf, &font, 400.0, &ImageSizes::new());
+        assert!(lg.submits.is_empty(), "GET form → no submit region");
     }
 
     #[test]
