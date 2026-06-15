@@ -1481,6 +1481,41 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     {
         cs.inset_left = Some(v);
     }
+    // Logical inset (horizontal-tb): inline-start/end → left/right, block → top/bottom.
+    // The `-inline`/`-block` shorthands take 1–2 values (start, end).
+    let logical_inset = |v: &str| -> Option<Length> {
+        v.split_whitespace()
+            .next()
+            .filter(|t| !t.eq_ignore_ascii_case("auto"))
+            .and_then(parse_length)
+    };
+    let logical_inset_pair = |v: &str, second: bool| -> Option<Length> {
+        let t: Vec<&str> = v.split_whitespace().collect();
+        let tok = if second { t.get(1).or(t.first()) } else { t.first() }?;
+        (!tok.eq_ignore_ascii_case("auto"))
+            .then(|| parse_length(tok))
+            .flatten()
+    };
+    if let Some(v) = map.get("inset-inline") {
+        cs.inset_left = logical_inset_pair(v, false);
+        cs.inset_right = logical_inset_pair(v, true);
+    }
+    if let Some(v) = map.get("inset-block") {
+        cs.inset_top = logical_inset_pair(v, false);
+        cs.inset_bottom = logical_inset_pair(v, true);
+    }
+    if let Some(v) = map.get("inset-inline-start") {
+        cs.inset_left = logical_inset(v);
+    }
+    if let Some(v) = map.get("inset-inline-end") {
+        cs.inset_right = logical_inset(v);
+    }
+    if let Some(v) = map.get("inset-block-start") {
+        cs.inset_top = logical_inset(v);
+    }
+    if let Some(v) = map.get("inset-block-end") {
+        cs.inset_bottom = logical_inset(v);
+    }
     if let Some(px) = map
         .get("text-indent")
         .and_then(|v| parse_length(v))
@@ -2933,6 +2968,23 @@ mod tests {
         // padding-block-start → top; padding-inline-end → right.
         assert_eq!(cs.padding.top, 5.0);
         assert_eq!(cs.padding.right, 7.0);
+    }
+
+    #[test]
+    fn logical_inset_maps_to_physical() {
+        let mut doc = Document::new();
+        let d = one(&mut doc, "div", vec![]);
+        let cs = computed_style(
+            &doc,
+            d,
+            &ComputedStyle::initial(),
+            &parse_stylesheet(
+                "div { position: absolute; inset-inline: 4px 8px; inset-block-start: 3px }",
+            ),
+        );
+        assert_eq!(cs.inset_left, Some(Length::Px(4.0)));
+        assert_eq!(cs.inset_right, Some(Length::Px(8.0)));
+        assert_eq!(cs.inset_top, Some(Length::Px(3.0)));
     }
 
     #[test]
