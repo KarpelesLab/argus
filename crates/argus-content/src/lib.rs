@@ -75,6 +75,11 @@ pub fn run(channel: Channel) -> io::Result<()> {
                     None => log!("WARNING: monospace font arrived before primary"),
                 }
             }
+            Msg::ProvideStorage { data } => {
+                // Seed persisted localStorage (survives browser restarts).
+                content.storage = proto::decode_storage(&data);
+                log!("seeded localStorage ({} keys)", content.storage.len());
+            }
             Msg::LoadDocument { html } => {
                 log!("loaded document ({} bytes)", html.len());
                 // Parse once, run the page's scripts against a JS-side DOM shim, and
@@ -103,6 +108,16 @@ pub fn run(channel: Channel) -> io::Result<()> {
                 content.focused = None;
                 content.input_values.clear();
                 content.doc = Some(doc);
+                // Report localStorage so the browser can persist it to disk.
+                if !content.storage.is_empty() {
+                    proto::send(
+                        &channel,
+                        Msg::StorageChanged {
+                            data: proto::encode_storage(&content.storage),
+                        },
+                        &[],
+                    )?;
+                }
             }
             Msg::RequestFrame => {
                 let fb = content.render(&channel)?;
@@ -133,6 +148,16 @@ pub fn run(channel: Channel) -> io::Result<()> {
                     content.dispatch_click(x as f32, y as f32);
                     content.apply_input_values();
                     content.set_focus(x as f32, y as f32);
+                    // The click's scripts may have written localStorage — persist it.
+                    if !content.storage.is_empty() {
+                        proto::send(
+                            &channel,
+                            Msg::StorageChanged {
+                                data: proto::encode_storage(&content.storage),
+                            },
+                            &[],
+                        )?;
+                    }
                 } else {
                     log!("link clicked at ({x}, {y}) -> {url}");
                 }
@@ -294,7 +319,8 @@ impl Content {
                     (cy * img.height as f32) as u32,
                     (cw * img.width as f32).max(1.0) as u32,
                     (ch * img.height as f32).max(1.0) as u32,
-                    ib.clip.map(|[x, y, w, h]| [x as i32, y as i32, w as i32, h as i32]),
+                    ib.clip
+                        .map(|[x, y, w, h]| [x as i32, y as i32, w as i32, h as i32]),
                 );
             }
         }
@@ -346,7 +372,11 @@ impl Content {
                 .unwrap_or(bytes);
             if let Some(font) = self.font.take() {
                 self.font = Some(font.with_web_font(key, bytes));
-                log!("loaded web font '{}' ({} bytes)", face.family, face.src_url.len());
+                log!(
+                    "loaded web font '{}' ({} bytes)",
+                    face.family,
+                    face.src_url.len()
+                );
             }
         }
         Ok(())
@@ -484,7 +514,12 @@ fn find_element_by_id(doc: &argus_dom::Document, id: &str) -> Option<argus_dom::
 
 /// Collect the `src` of every `<img>` element in document order.
 fn collect_img_srcs(doc: &argus_dom::Document, viewport_w: f32) -> Vec<String> {
-    fn walk(doc: &argus_dom::Document, id: argus_dom::NodeId, viewport_w: f32, out: &mut Vec<String>) {
+    fn walk(
+        doc: &argus_dom::Document,
+        id: argus_dom::NodeId,
+        viewport_w: f32,
+        out: &mut Vec<String>,
+    ) {
         if let argus_dom::NodeData::Element(e) = &doc.node(id).data {
             if e.name.is_html("img") {
                 // Fetch the same URL layout resolves (`<picture>` source, else
@@ -578,13 +613,17 @@ mod tests {
         }
         let mut tested = false;
         for dir in dir_candidates {
-            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
             for e in rd.flatten() {
                 let p = e.path();
                 if p.extension().and_then(|s| s.to_str()) != Some("woff2") {
                     continue;
                 }
-                let Ok(bytes) = std::fs::read(&p) else { continue };
+                let Ok(bytes) = std::fs::read(&p) else {
+                    continue;
+                };
                 let sfnt = argus_image::woff2_to_sfnt(&bytes)
                     .unwrap_or_else(|| panic!("woff2 decode failed for {p:?}"));
                 let font = argus_gfx::Font::from_bytes(sfnt)

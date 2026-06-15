@@ -14,6 +14,7 @@ use argus_protocol::{self as proto, Msg};
 use argus_util::{log, Role};
 use std::io;
 
+mod store;
 mod tabbar;
 
 /// A small decorative image embedded as a `data:` URL, for the sample page.
@@ -1914,6 +1915,10 @@ fn request_frame(
                 let body = fetch_bytes(net, &target).unwrap_or_default();
                 proto::send(content.channel(), Msg::ResourceData { body }, &[])?;
             }
+            // A content process reported a localStorage change: persist it.
+            Msg::StorageChanged { data } => {
+                let _ = std::fs::write(store::path(), &data);
+            }
             other => break (other, fds),
         }
     };
@@ -2018,6 +2023,9 @@ fn present_framed(
 fn spawn_content_tab(vp: Size) -> io::Result<Child> {
     let child = spawn_child(Role::Content)?;
     proto::parent_handshake(child.channel(), vp)?;
+    // Seed the persisted localStorage so it survives browser restarts.
+    let data = std::fs::read_to_string(store::path()).unwrap_or_default();
+    proto::send(child.channel(), Msg::ProvideStorage { data }, &[])?;
     Ok(child)
 }
 
@@ -2143,7 +2151,17 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
                 let y = y - tabbar::TAB_BAR_H;
                 let ch = procs[tabs.active_index()].channel();
                 proto::send(ch, Msg::InputClick { x, y }, &[])?;
-                if let Msg::ClickResult { url } = proto::recv(ch)?.0 {
+                // The click's scripts may emit a StorageChanged (persist it) before
+                // the ClickResult; skip past it.
+                let click = loop {
+                    match proto::recv(ch)?.0 {
+                        Msg::StorageChanged { data } => {
+                            let _ = std::fs::write(store::path(), &data);
+                        }
+                        other => break other,
+                    }
+                };
+                if let Msg::ClickResult { url } = click {
                     if !url.is_empty() {
                         let target = resolve_url(active_target(&tabs).as_deref(), &url);
                         log!("navigating to {target}");

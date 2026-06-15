@@ -84,6 +84,63 @@ fn unexpected(want: &str, got: Msg) -> io::Error {
     )
 }
 
+/// Encode a `localStorage` map (key→value) to the shared text form carried by
+/// `ProvideStorage`/`StorageChanged` and written to disk: one `key<TAB>value` line
+/// per entry, with `\`, tab and newline escaped. Keys are sorted for stable output.
+pub fn encode_storage(map: &std::collections::HashMap<String, String>) -> String {
+    fn esc(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            match c {
+                '\\' => out.push_str("\\\\"),
+                '\t' => out.push_str("\\t"),
+                '\n' => out.push_str("\\n"),
+                _ => out.push(c),
+            }
+        }
+        out
+    }
+    let mut entries: Vec<(&String, &String)> = map.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let mut out = String::new();
+    for (k, v) in entries {
+        out.push_str(&esc(k));
+        out.push('\t');
+        out.push_str(&esc(v));
+        out.push('\n');
+    }
+    out
+}
+
+/// Decode the [`encode_storage`] text form back into a map (malformed lines skip).
+pub fn decode_storage(text: &str) -> std::collections::HashMap<String, String> {
+    fn unesc(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                match chars.next() {
+                    Some('t') => out.push('\t'),
+                    Some('n') => out.push('\n'),
+                    Some('\\') => out.push('\\'),
+                    Some(other) => out.push(other),
+                    None => out.push('\\'),
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+    let mut map = std::collections::HashMap::new();
+    for line in text.lines() {
+        if let Some((k, v)) = line.split_once('\t') {
+            map.insert(unesc(k), unesc(v));
+        }
+    }
+    map
+}
+
 /// A single Phase 0 message. Direction is by convention (see each variant).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Msg {
@@ -111,6 +168,12 @@ pub enum Msg {
     /// browser → content: a monospace font face (for `font-family: monospace` and
     /// `<code>`/`<pre>`), sent after the primary/fallback fonts.
     ProvideMonoFont { bytes: Vec<u8> },
+    /// browser → content: the persisted `localStorage` (the store's text form),
+    /// seeded into the content process so it survives browser restarts.
+    ProvideStorage { data: String },
+    /// content → browser: the updated `localStorage` (store text form) after a
+    /// script run changed it, so the browser can persist it to disk.
+    StorageChanged { data: String },
     /// browser → content: the HTML document to render.
     LoadDocument { html: String },
     /// browser → net service: fetch this URL.
@@ -165,6 +228,8 @@ const TAG_CLICK_RESULT: u8 = 13;
 const TAG_SET_SCROLL: u8 = 14;
 const TAG_INPUT_KEY: u8 = 15;
 const TAG_PROVIDE_MONO_FONT: u8 = 16;
+const TAG_PROVIDE_STORAGE: u8 = 17;
+const TAG_STORAGE_CHANGED: u8 = 18;
 
 impl Msg {
     /// Number of file descriptors that accompany this message out-of-band.
@@ -209,6 +274,14 @@ impl Msg {
             Msg::ProvideMonoFont { bytes } => {
                 buf.push(TAG_PROVIDE_MONO_FONT);
                 put_bytes(&mut buf, bytes);
+            }
+            Msg::ProvideStorage { data } => {
+                buf.push(TAG_PROVIDE_STORAGE);
+                put_bytes(&mut buf, data.as_bytes());
+            }
+            Msg::StorageChanged { data } => {
+                buf.push(TAG_STORAGE_CHANGED);
+                put_bytes(&mut buf, data.as_bytes());
             }
             Msg::LoadDocument { html } => {
                 buf.push(TAG_LOAD_DOCUMENT);
@@ -272,6 +345,12 @@ impl Msg {
             },
             TAG_PROVIDE_MONO_FONT => Msg::ProvideMonoFont {
                 bytes: c.bytes()?.to_vec(),
+            },
+            TAG_PROVIDE_STORAGE => Msg::ProvideStorage {
+                data: String::from_utf8_lossy(c.bytes()?).into_owned(),
+            },
+            TAG_STORAGE_CHANGED => Msg::StorageChanged {
+                data: String::from_utf8_lossy(c.bytes()?).into_owned(),
             },
             TAG_LOAD_DOCUMENT => Msg::LoadDocument {
                 html: String::from_utf8_lossy(c.bytes()?).into_owned(),
@@ -382,6 +461,12 @@ mod tests {
         });
         round_trip(Msg::ProvideMonoFont {
             bytes: vec![9, 8, 7, 0, 255],
+        });
+        round_trip(Msg::ProvideStorage {
+            data: "k\tv\n".to_string(),
+        });
+        round_trip(Msg::StorageChanged {
+            data: "a\t1\nb\t2\n".to_string(),
         });
         round_trip(Msg::LoadDocument {
             html: "<p>hi & bye</p>".to_string(),
