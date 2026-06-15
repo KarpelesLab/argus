@@ -172,7 +172,7 @@ gradients/backgrounds/borders/filters in `argus-gfx`, scroll handling in the com
 - [ ] Absolute/fixed/sticky positioning, floats, stacking contexts, overflow/scroll containers correct.
 - [ ] Custom properties, cascade layers, `@scope`, media/container queries, `:has()` and the full selector set.
 - [ ] Web fonts (`@font-face`) load via the net service with correct reflow/swap; bidi + at least one complex script shape correctly.
-- [~] Images decode (`argus-image`: PNG/GIF/JPEG/WebP/QOI/ICO/BMP via oxideav) and render at correct intrinsic sizing; gradients, border-radius present. object-fit, multiple backgrounds, box-shadow, filters remain.
+- [~] Images decode (`argus-image`: PNG/GIF/JPEG/WebP/QOI/ICO/BMP/TGA/Netpbm/PCX/TIFF via oxideav; **AVIF wired** through oxideav-avif + oxideav-av1 — graceful-`None` until the upstream AV1 pixel decoder lands, then renders with no further changes) and render at correct intrinsic sizing; gradients, border-radius present. object-fit, multiple backgrounds, box-shadow, filters remain.
 - [ ] Smooth scrolling recomposites without relayout/repaint of static content.
 
 **De-risks:** the long tail of CSS correctness and the in-house complex-text effort.

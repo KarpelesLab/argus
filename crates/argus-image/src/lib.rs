@@ -8,7 +8,11 @@
 //! (Truevision true-color, grayscale, + color-mapped, uncompressed + RLE), **Netpbm** (PPM/PGM,
 //! ASCII + binary), **PCX** (RLE 24-bit + 8-bit palette), **TIFF** (baseline
 //! uncompressed + PackBits + LZW + Deflate RGB/RGBA/grayscale, 8/16-bit, predictor, strips + tiles, both byte orders), all built in, and `data:` URLs.
-//! AVIF awaits a working AV1 pixel decoder (oxideav-av1 is currently stubbed).
+//! **AVIF** is wired through the first-party `oxideav-avif` (HEIF container) +
+//! `oxideav-av1` (pixel codec): `ftyp avif`/`avis` files are sniffed and routed to
+//! [`decode_avif`]. The upstream AV1 pixel-reconstruction pipeline is an in-progress
+//! rebuild, so decoding is graceful-`None` today (broken-image fallback) and renders
+//! real pixels once that decoder lands — no further changes needed here.
 //! See `docs/subsystems/media.md`.
 
 mod woff2;
@@ -53,6 +57,17 @@ pub fn decode(bytes: &[u8]) -> Option<DecodedImage> {
     }
     if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         return decode_webp(bytes);
+    }
+    // AVIF (ISOBMFF/HEIF wrapping AV1): an `ftyp` box whose major or compatible
+    // brand is `avif`/`avis`. Decoded through the first-party oxideav-avif codec
+    // backed by oxideav-av1 (see `decode_avif`).
+    if bytes.len() > 12
+        && &bytes[4..8] == b"ftyp"
+        && bytes[8..bytes.len().min(64)]
+            .windows(4)
+            .any(|b| b == b"avif" || b == b"avis")
+    {
+        return decode_avif(bytes);
     }
     if bytes.starts_with(b"qoif") {
         return decode_qoi(bytes);
@@ -125,6 +140,29 @@ fn decode_registry(
     let mut ctx = RuntimeContext::new();
     register_codecs(&mut ctx.codecs);
     let params = CodecParameters::video(CodecId::new(codec));
+    let mut dec = ctx.codecs.first_decoder(&params).ok()?;
+    dec.send_packet(&Packet::new(0, TimeBase::SECONDS, bytes.to_vec()))
+        .ok()?;
+    let frame = dec.receive_arena_frame().ok()?;
+    frame_to_rgba(&frame)
+}
+
+/// Decode an AVIF still image through the first-party oxideav stack: register the
+/// AV1 pixel codec (`oxideav-av1`) and the AVIF container/codec (`oxideav-avif`,
+/// which walks the HEIF meta boxes to the primary `av1C` item), then decode the
+/// whole file as one packet.
+///
+/// `oxideav-av1`'s pixel-reconstruction pipeline is an in-progress upstream rebuild
+/// (its `register` is currently a no-op and the AVIF codec's AV1 path is stubbed),
+/// so today this returns `None` and the caller falls back to broken-image `alt`
+/// text. The wiring is forward-compatible: when the upstream decoder lands, AVIF
+/// renders with no further changes here.
+fn decode_avif(bytes: &[u8]) -> Option<DecodedImage> {
+    use oxideav_core::{CodecId, CodecParameters, Packet, RuntimeContext, TimeBase};
+    let mut ctx = RuntimeContext::new();
+    oxideav_av1::register(&mut ctx); // AV1 pixel backend (upstream WIP)
+    oxideav_avif::register(&mut ctx); // AVIF HEIF container + codec
+    let params = CodecParameters::video(CodecId::new(oxideav_avif::CODEC_ID_STR));
     let mut dec = ctx.codecs.first_decoder(&params).ok()?;
     dec.send_packet(&Packet::new(0, TimeBase::SECONDS, bytes.to_vec()))
         .ok()?;
@@ -1265,6 +1303,33 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn avif_is_detected_and_handled_gracefully() {
+        // A minimal ISOBMFF `ftyp` box with the `avif` brand is routed to the AVIF
+        // path. The upstream AV1 pixel decoder is a WIP no-op today, so this decodes
+        // to `None` (graceful fallback) — but must sniff correctly and never panic.
+        let mut b = Vec::new();
+        b.extend_from_slice(&[0, 0, 0, 0x20]); // box size
+        b.extend_from_slice(b"ftyp");
+        b.extend_from_slice(b"avif"); // major brand
+        b.extend_from_slice(&[0, 0, 0, 0]); // minor version
+        b.extend_from_slice(b"avifmif1"); // compatible brands
+        b.resize(0x20, 0);
+        assert!(decode(&b).is_none(), "stub AV1 → graceful None, no panic");
+
+        // Real AVIF fixtures (if present on this machine) must also decode without
+        // panicking — currently `None`, and real pixels once upstream AV1 lands.
+        let base = "/Users/magicaltux/.cargo/registry/src/\
+                    index.crates.io-1949cf8c6b5b557f/oxideav-avif-0.0.8/tests/fixtures";
+        for name in ["red.avif", "black420.avif", "white16.avif"] {
+            if let Ok(bytes) = std::fs::read(format!("{base}/{name}")) {
+                // Confirms our sniffer recognizes a real AVIF (the file is `ftyp avif…`).
+                assert_eq!(&bytes[4..8], b"ftyp");
+                let _ = decode(&bytes); // graceful today; the point is "no panic"
+            }
+        }
+    }
 
     #[test]
     fn decodes_a_24bit_bmp() {

@@ -111,6 +111,8 @@ name = "argus-image"
 version = "0.0.0"
 dependencies = [
  "compcol 0.6.2",
+ "oxideav-av1",
+ "oxideav-avif",
  "oxideav-core",
  "oxideav-gif",
  "oxideav-ico",
@@ -570,6 +572,24 @@ dependencies = [
  "bitflags",
  "objc2",
  "objc2-foundation",
+]
+
+[[package]]
+name = "oxideav-av1"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ca9af00c36e2b2bda18213ae4c2879a581f5dc07aa0541237a23e40ae8ed347"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-avif"
+version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88aab9ac5f2432f6bfdf3562fc28c7f063faae9dd22f524a8b847cb56e53f931"
+dependencies = [
+ "oxideav-core",
 ]
 
 [[package]]
