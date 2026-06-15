@@ -513,7 +513,28 @@ pub fn dump_links(url: Option<&str>) -> io::Result<String> {
     net.wait()?;
     let mut doc = argus_html::parse(&html);
     argus_domscript::apply_scripts_with_url(&mut doc, url);
-    Ok(extract_links(&doc, url))
+    let base = effective_base(&doc, url);
+    Ok(extract_links(&doc, base.as_deref()))
+}
+
+/// The base URL for resolving the document's relative links: the first
+/// `<base href>` (resolved against the page URL), else the page URL itself.
+fn effective_base(doc: &argus_dom::Document, url: Option<&str>) -> Option<String> {
+    use argus_dom::{Document, NodeData, NodeId};
+    fn find(doc: &Document, id: NodeId) -> Option<String> {
+        if let NodeData::Element(e) = &doc.node(id).data {
+            if e.name.is_html("base") {
+                if let Some(h) = e.attr("href").filter(|h| !h.trim().is_empty()) {
+                    return Some(h.to_string());
+                }
+            }
+        }
+        doc.children(id).find_map(|c| find(doc, c))
+    }
+    match find(doc, doc.root()) {
+        Some(href) => Some(resolve_url(url, &href)),
+        None => url.map(str::to_string),
+    }
 }
 
 /// Headless automation: fetch a page and return its **heading outline** — each
@@ -543,7 +564,8 @@ pub fn dump_json(url: Option<&str>) -> io::Result<String> {
     net.wait()?;
     let mut doc = argus_html::parse(&html);
     argus_domscript::apply_scripts_with_url(&mut doc, url);
-    Ok(extract_json(&doc, url))
+    let base = effective_base(&doc, url);
+    Ok(extract_json(&doc, base.as_deref()))
 }
 
 /// Headless automation: fetch a page and return its DOM as a nested JSON tree
@@ -761,7 +783,8 @@ pub fn dump_forms(url: Option<&str>) -> io::Result<String> {
     net.wait()?;
     let mut doc = argus_html::parse(&html);
     argus_domscript::apply_scripts_with_url(&mut doc, url);
-    Ok(extract_forms(&doc, url))
+    let base = effective_base(&doc, url);
+    Ok(extract_forms(&doc, base.as_deref()))
 }
 
 /// Headless automation: fetch a page and return its **metadata** (title, lang,
@@ -857,7 +880,8 @@ pub fn dump_meta(url: Option<&str>) -> io::Result<String> {
     net.wait()?;
     let mut doc = argus_html::parse(&html);
     argus_domscript::apply_scripts_with_url(&mut doc, url);
-    Ok(extract_meta(&doc, url))
+    let base = effective_base(&doc, url);
+    Ok(extract_meta(&doc, base.as_deref()))
 }
 
 /// Collect document metadata as `key: value` lines: `title`, `lang` (`<html lang>`),
@@ -1530,8 +1554,8 @@ fn verify_uniform(fb: &Framebuffer) -> io::Result<Color> {
 #[cfg(test)]
 mod tests {
     use super::{
-        dom_node_json, extract_forms, extract_json, extract_links, extract_meta, extract_tables,
-        page_title, render_text, resolve_url, History,
+        dom_node_json, effective_base, extract_forms, extract_json, extract_links, extract_meta,
+        extract_tables, page_title, render_text, resolve_url, History,
     };
 
     #[test]
@@ -1640,6 +1664,24 @@ mod tests {
             out.contains("{\"text\":\"Link\",\"href\":\"https://site.example/x\"}"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn base_href_changes_relative_resolution() {
+        // A <base href> overrides the page URL for resolving relative links.
+        let doc = argus_html::parse(
+            "<head><base href=\"https://cdn.example/assets/\"></head>\
+             <body><a href=\"x.png\">x</a></body>",
+        );
+        let base = effective_base(&doc, Some("https://site.example/page.html"));
+        assert_eq!(base.as_deref(), Some("https://cdn.example/assets/"));
+        let links = extract_links(&doc, base.as_deref());
+        assert!(links.contains("https://cdn.example/assets/x.png"), "{links}");
+
+        // No <base> → relative links resolve against the page URL.
+        let doc2 = argus_html::parse("<a href=\"y.png\">y</a>");
+        let base2 = effective_base(&doc2, Some("https://site.example/dir/page.html"));
+        assert_eq!(base2.as_deref(), Some("https://site.example/dir/page.html"));
     }
 
     #[test]
