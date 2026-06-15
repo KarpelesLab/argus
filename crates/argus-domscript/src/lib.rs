@@ -55,6 +55,9 @@ try {
   }
 } catch (e) {}
 var __argus_ops = [];
+// Per-id element geometry `{x,y,w,h}` from the most recent layout (empty on the
+// first pass). Powers getBoundingClientRect / offset* read-back deterministically.
+var __argus_geom = __GEOMETRY__;
 var __seed = __SEED__;
 // Full element tree in document order: each {i,t,id,c,p,tc} is index, tag, id,
 // class, parent index, text. Lets querySelectorAll/getElementsBy* run in JS-space.
@@ -441,20 +444,40 @@ function __argus_el(tgt) {
       if (k === "focus" || k === "blur" || k === "scrollIntoView") {
         return function() {};
       }
-      // Geometry read-back isn't available in the reconciliation model; return
-      // zero-sized stubs so layout-measuring scripts run instead of throwing.
+      // Geometry read-back: an element with an `id` reports the box from the most
+      // recent layout (one frame behind in the reconciliation model). Elements
+      // without an id, or before the first layout, read as zero rather than throw.
+      var __geom = function() {
+        var id = __read(tgt, seed, "id");
+        return (id != null && __argus_geom[id]) ? __argus_geom[id] : null;
+      };
       if (k === "getBoundingClientRect") {
         return function() {
+          var g = __geom();
+          if (g) return {top: g.y, left: g.x, right: g.x + g.w, bottom: g.y + g.h,
+                         width: g.w, height: g.h, x: g.x, y: g.y};
           return {top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0};
         };
       }
       if (k === "getClientRects") {
-        return function() { return []; };
+        return function() {
+          var g = __geom();
+          if (g) return [{top: g.y, left: g.x, right: g.x + g.w, bottom: g.y + g.h,
+                          width: g.w, height: g.h, x: g.x, y: g.y}];
+          return [];
+        };
       }
-      if (k === "offsetWidth" || k === "offsetHeight" || k === "offsetTop" ||
-          k === "offsetLeft" || k === "clientWidth" || k === "clientHeight" ||
-          k === "scrollWidth" || k === "scrollHeight" || k === "scrollTop" ||
-          k === "scrollLeft") {
+      if (k === "offsetWidth" || k === "clientWidth" || k === "scrollWidth") {
+        var gw = __geom();
+        return gw ? gw.w : 0;
+      }
+      if (k === "offsetHeight" || k === "clientHeight" || k === "scrollHeight") {
+        var gh = __geom();
+        return gh ? gh.h : 0;
+      }
+      if (k === "offsetTop") { var gt = __geom(); return gt ? gt.y : 0; }
+      if (k === "offsetLeft") { var gl = __geom(); return gl ? gl.x : 0; }
+      if (k === "scrollTop" || k === "scrollLeft") {
         return 0;
       }
       if (k === "offsetParent") {
@@ -842,21 +865,21 @@ pub struct Interaction {
 /// Returns the console output (minus the internal ops line) for logging.
 pub fn apply_scripts(doc: &mut Document) -> Option<String> {
     let mut storage = std::collections::HashMap::new();
-    run_scripts(doc, &[], &mut storage, &[], None)
+    run_scripts(doc, &[], &mut storage, &[], None, &[])
 }
 
 /// Like [`apply_scripts`], but seeds `window.location` from `url` so scripts can
 /// read `location.href`/`pathname`/`search`/`hash`/etc.
 pub fn apply_scripts_with_url(doc: &mut Document, url: Option<&str>) -> Option<String> {
     let mut storage = std::collections::HashMap::new();
-    run_scripts(doc, &[], &mut storage, &[], url)
+    run_scripts(doc, &[], &mut storage, &[], url, &[])
 }
 
 /// Like [`apply_scripts`], but also replays `events` (deterministic event replay)
 /// with a throwaway storage (no cross-call persistence).
 pub fn apply_scripts_with_events(doc: &mut Document, events: &[Interaction]) -> Option<String> {
     let mut storage = std::collections::HashMap::new();
-    run_scripts(doc, events, &mut storage, &[], None)
+    run_scripts(doc, events, &mut storage, &[], None, &[])
 }
 
 /// Like [`apply_scripts`], but also honors **header-delivered** Content-Security-
@@ -865,7 +888,7 @@ pub fn apply_scripts_with_events(doc: &mut Document, events: &[Interaction]) -> 
 /// blocked if *any* meta or header policy forbids them.
 pub fn apply_scripts_with_csp(doc: &mut Document, header_csp: &[String]) -> Option<String> {
     let mut storage = std::collections::HashMap::new();
-    run_scripts(doc, &[], &mut storage, header_csp, None)
+    run_scripts(doc, &[], &mut storage, header_csp, None, &[])
 }
 
 /// The full session entry point: run scripts, replay `events`, and persist
@@ -876,7 +899,19 @@ pub fn apply_scripts_session(
     events: &[Interaction],
     storage: &mut std::collections::HashMap<String, String>,
 ) -> Option<String> {
-    run_scripts(doc, events, storage, &[], None)
+    run_scripts(doc, events, storage, &[], None, &[])
+}
+
+/// Like [`apply_scripts_session`], plus per-`id` element geometry (`[x, y, w, h]`)
+/// from the most recent layout, so `getBoundingClientRect`/`offset*` read back real
+/// boxes (one frame behind, deterministically — fits the event-replay model).
+pub fn apply_scripts_session_geom(
+    doc: &mut Document,
+    events: &[Interaction],
+    storage: &mut std::collections::HashMap<String, String>,
+    geometry: &[(String, [f32; 4])],
+) -> Option<String> {
+    run_scripts(doc, events, storage, &[], None, geometry)
 }
 
 fn run_scripts(
@@ -885,6 +920,7 @@ fn run_scripts(
     storage: &mut std::collections::HashMap<String, String>,
     header_csp: &[String],
     url: Option<&str>,
+    geometry: &[(String, [f32; 4])],
 ) -> Option<String> {
     let all_scripts = collect_scripts(doc);
     if all_scripts.is_empty() {
@@ -917,7 +953,8 @@ fn run_scripts(
         .replace("__TREE__", &tree)
         .replace("__LOCATION__", &location)
         .replace("__TITLE__", &title)
-        .replace("__STORAGE__", &storage_seed);
+        .replace("__STORAGE__", &storage_seed)
+        .replace("__GEOMETRY__", &geometry_json(geometry));
     for s in &scripts {
         src.push('\n');
         src.push_str(s);
@@ -1002,6 +1039,35 @@ fn storage_json(storage: &std::collections::HashMap<String, String>) -> String {
         .map(|(k, v)| format!("{}:{}", json_string(k), json_string(v)))
         .collect();
     format!("{{{}}}", entries.join(","))
+}
+
+/// Build the `__argus_geom` seed: a `{ "id": {x,y,w,h}, … }` object of element
+/// boxes from the last layout, keyed by `id` attribute.
+fn geometry_json(geometry: &[(String, [f32; 4])]) -> String {
+    let entries: Vec<String> = geometry
+        .iter()
+        .map(|(id, [x, y, w, h])| {
+            format!(
+                "{}:{{x:{},y:{},w:{},h:{}}}",
+                json_string(id),
+                fmt_num(*x),
+                fmt_num(*y),
+                fmt_num(*w),
+                fmt_num(*h)
+            )
+        })
+        .collect();
+    format!("{{{}}}", entries.join(","))
+}
+
+/// Format an `f32` as a finite JS number literal (non-finite → `0`).
+fn fmt_num(v: f32) -> String {
+    if v.is_finite() {
+        // Trim to whole pixels; geometry read-back doesn't need sub-pixel detail.
+        format!("{}", v.round() as i64)
+    } else {
+        "0".to_string()
+    }
 }
 
 /// Build the `location` seed object (`href`/`protocol`/`host`/`hostname`/`port`/
@@ -2471,6 +2537,45 @@ mod tests {
         apply_scripts(&mut doc);
         assert_eq!(attr_of(&doc, "o", "data-r").as_deref(), Some("0"));
         assert_eq!(attr_of(&doc, "o", "data-rects").as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn geometry_read_back_returns_real_boxes() {
+        // With layout geometry for `#o`, getBoundingClientRect / offset* / getClientRects
+        // report the real box (one frame behind in the reconciliation model).
+        let mut doc = argus_html::parse(
+            "<div id=\"o\">x</div>\
+             <script>\
+               var o = document.getElementById('o');\
+               var r = o.getBoundingClientRect();\
+               o.setAttribute('data-w', '' + r.width);\
+               o.setAttribute('data-h', '' + r.height);\
+               o.setAttribute('data-x', '' + r.left);\
+               o.setAttribute('data-b', '' + r.bottom);\
+               o.setAttribute('data-ow', '' + o.offsetWidth);\
+               o.setAttribute('data-ot', '' + o.offsetTop);\
+               o.setAttribute('data-rects', '' + o.getClientRects().length);\
+             </script>",
+        );
+        let mut storage = std::collections::HashMap::new();
+        let geom = [("o".to_string(), [12.0, 34.0, 100.0, 20.0])];
+        apply_scripts_session_geom(&mut doc, &[], &mut storage, &geom);
+        assert_eq!(attr_of(&doc, "o", "data-w").as_deref(), Some("100"));
+        assert_eq!(attr_of(&doc, "o", "data-h").as_deref(), Some("20"));
+        assert_eq!(attr_of(&doc, "o", "data-x").as_deref(), Some("12"));
+        assert_eq!(attr_of(&doc, "o", "data-b").as_deref(), Some("54")); // y + h = 34+20
+        assert_eq!(attr_of(&doc, "o", "data-ow").as_deref(), Some("100"));
+        assert_eq!(attr_of(&doc, "o", "data-ot").as_deref(), Some("34"));
+        assert_eq!(attr_of(&doc, "o", "data-rects").as_deref(), Some("1"));
+        // An element without geometry still reads zero (no throw).
+        let mut doc2 = argus_html::parse(
+            "<div id=\"q\">y</div>\
+             <script>document.getElementById('q').setAttribute('data-w', \
+              '' + document.getElementById('q').getBoundingClientRect().width);</script>",
+        );
+        let mut s2 = std::collections::HashMap::new();
+        apply_scripts_session_geom(&mut doc2, &[], &mut s2, &geom);
+        assert_eq!(attr_of(&doc2, "q", "data-w").as_deref(), Some("0"));
     }
 
     #[test]

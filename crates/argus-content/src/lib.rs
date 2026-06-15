@@ -82,9 +82,15 @@ pub fn run(channel: Channel) -> io::Result<()> {
                 let mut doc = argus_html::parse(&html);
                 // localStorage persists across navigations; the event history resets.
                 content.events.clear();
-                if let Some(console) =
-                    argus_domscript::apply_scripts_session(&mut doc, &[], &mut content.storage)
-                {
+                // Geometry from the previous document's layout (empty on a fresh
+                // load) so getBoundingClientRect/offset* read back real boxes.
+                let geom = content.geometry();
+                if let Some(console) = argus_domscript::apply_scripts_session_geom(
+                    &mut doc,
+                    &[],
+                    &mut content.storage,
+                    &geom,
+                ) {
                     for line in console.lines() {
                         log!("console.log: {line}");
                     }
@@ -172,6 +178,16 @@ struct Content {
 }
 
 impl Content {
+    /// Per-`id` element boxes from the last layout (`self.bounds`), as the
+    /// `(id, [x, y, w, h])` geometry the script shim reads for `getBoundingClientRect`
+    /// / `offset*`. Empty before the first layout.
+    fn geometry(&self) -> Vec<(String, [f32; 4])> {
+        self.bounds
+            .iter()
+            .map(|b| (b.id.clone(), [b.x, b.y, b.w, b.h]))
+            .collect()
+    }
+
     /// Paint the current document (or the fallback color) into a fresh framebuffer.
     /// `channel` is used to fetch image subresources from the browser.
     fn render(&mut self, channel: &Channel) -> io::Result<Framebuffer> {
@@ -339,9 +355,13 @@ impl Content {
             event: "click".into(),
         });
         let mut doc = argus_html::parse(html);
-        if let Some(console) =
-            argus_domscript::apply_scripts_session(&mut doc, &self.events, &mut self.storage)
-        {
+        let geom = self.geometry();
+        if let Some(console) = argus_domscript::apply_scripts_session_geom(
+            &mut doc,
+            &self.events,
+            &mut self.storage,
+            &geom,
+        ) {
             for line in console.lines() {
                 log!("console.log: {line}");
             }
