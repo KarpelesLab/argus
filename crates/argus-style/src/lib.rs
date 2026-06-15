@@ -281,6 +281,9 @@ pub struct ComputedStyle {
     pub flex_grow: f32,
     /// `flex-shrink` factor for a flex item (default 1; 0 = does not shrink).
     pub flex_shrink: f32,
+    /// `flex-basis` — an item's base main size before grow/shrink (`None` = auto,
+    /// i.e. content/`width`).
+    pub flex_basis: Option<Length>,
     /// `order` for a flex item — visual ordering; lower comes first (default 0).
     pub order: i32,
     /// `flex-wrap: wrap` — allow flex items to break onto multiple lines.
@@ -411,6 +414,7 @@ impl ComputedStyle {
             align_items: AlignItems::Stretch,
             flex_grow: 0.0,
             flex_shrink: 1.0,
+            flex_basis: None,
             order: 0,
             flex_wrap: false,
             border_radius: 0.0,
@@ -1588,17 +1592,38 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
                 cs.flex_shrink = 1.0;
             }
             _ => {
-                let nums: Vec<f32> = t
-                    .split_whitespace()
-                    .filter_map(|tok| tok.parse::<f32>().ok())
-                    .collect();
+                // `flex: <grow> <shrink>? <basis>?`. Bare numbers are grow then
+                // shrink; an `auto` keyword or a length token is the basis; a third
+                // bare number is the basis (in px). The shorthand resets an omitted
+                // basis to 0 (so `flex: 1` means a 0 base size).
+                let mut nums = Vec::new();
+                let mut basis: Option<Option<Length>> = None; // outer Some = explicit
+                for tok in t.split_whitespace() {
+                    if tok == "auto" {
+                        basis = Some(None);
+                    } else if let Ok(n) = tok.parse::<f32>() {
+                        nums.push(n);
+                    } else if let Some(len) = parse_length(tok) {
+                        basis = Some(Some(len));
+                    }
+                }
                 if let Some(&g) = nums.first() {
                     cs.flex_grow = g.max(0.0);
-                    // A single number means `flex: <grow> 1 0`.
-                    cs.flex_shrink = nums.get(1).copied().unwrap_or(1.0).max(0.0);
                 }
+                cs.flex_shrink = nums.get(1).copied().unwrap_or(1.0).max(0.0);
+                cs.flex_basis = match nums.get(2) {
+                    Some(&b) => Some(Length::Px(b)),
+                    None => basis.unwrap_or(Some(Length::Zero)),
+                };
             }
         }
+    }
+    if let Some(v) = map.get("flex-basis") {
+        cs.flex_basis = if v.trim() == "auto" {
+            None
+        } else {
+            parse_length(v.trim())
+        };
     }
     // Longhands override the shorthand when both are present.
     if let Some(v) = map.get("flex-grow") {
@@ -2200,6 +2225,26 @@ mod tests {
         let cs = computed_style(&doc, dd, &ComputedStyle::initial(), &Stylesheet::default());
         assert_eq!(cs.display, Display::Block);
         assert_eq!(cs.margin.left, 40.0, "dd is indented by the UA default");
+    }
+
+    #[test]
+    fn flex_shorthand_basis() {
+        let parse = |decl: &str| {
+            let mut doc = Document::new();
+            let el = one(&mut doc, "div", vec![]);
+            let author = parse_stylesheet(&format!("div {{ {decl} }}"));
+            computed_style(&doc, el, &ComputedStyle::initial(), &author)
+        };
+        // `flex: 1` → grow 1, shrink 1, basis 0.
+        let a = parse("flex: 1");
+        assert_eq!((a.flex_grow, a.flex_shrink, a.flex_basis), (1.0, 1.0, Some(Length::Zero)));
+        // Explicit length basis.
+        assert_eq!(parse("flex: 1 1 200px").flex_basis, Some(Length::Px(200.0)));
+        // `auto` basis stays None (content-sized).
+        assert_eq!(parse("flex: 0 0 auto").flex_basis, None);
+        assert_eq!(parse("flex: 0 0 auto").flex_grow, 0.0);
+        // Longhand.
+        assert_eq!(parse("flex-basis: 50px").flex_basis, Some(Length::Px(50.0)));
     }
 
     #[test]

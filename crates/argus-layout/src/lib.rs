@@ -2229,7 +2229,8 @@ impl Ctx<'_> {
             let fixed: Vec<Option<f32>> = istyles
                 .iter()
                 .map(|s| {
-                    s.width.map(|len| {
+                    // `flex-basis` sets the base main size, overriding `width`.
+                    s.flex_basis.or(s.width).map(|len| {
                         let c = border_box_to_content(s, len.to_px(s.font_size, content_w));
                         c + s.padding.left
                             + s.padding.right
@@ -5474,6 +5475,26 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         // b and c come before a horizontally.
         assert!(bx < ax && cx < ax, "a (order:2) moves last: a={ax} b={bx} c={cx}");
         assert!(bx < cx, "b before c (equal order keeps source order)");
+    }
+
+    #[test]
+    fn flex_basis_zero_makes_equal_items() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // `flex: 1` (grow 1, basis 0) on both items → equal halves regardless of
+        // content length, so the second item starts ~halfway across the 200px row.
+        let html = "<div style=\"display:flex; width:200px\">\
+                      <div style=\"flex: 1\">a</div>\
+                      <div style=\"flex: 1\">wwwww</div>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let a = l.runs.iter().find(|r| r.text == "a").unwrap();
+        let b = l.runs.iter().find(|r| r.text == "wwwww").unwrap();
+        // Second item's left edge ≈ half the container (100px past the first's).
+        assert!((b.x - a.x - 100.0).abs() < 8.0, "equal halves: a={} b={}", a.x, b.x);
     }
 
     #[test]
