@@ -472,7 +472,7 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         .get("background-color")
         .or_else(|| map.get("background"))
     {
-        if let Some(c) = color_in(v) {
+        if let Some(c) = resolve_color(v, cs.color) {
             cs.background_color = c;
         }
     }
@@ -612,12 +612,17 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         cs.border = Edges::uniform(w);
         if let Some(c) = c {
             cs.border_color = c;
+        } else if mentions_current_color(v) {
+            cs.border_color = cs.color;
         }
     }
     if let Some(v) = map.get("border-width").and_then(|v| len_px(v, fs)) {
         cs.border = Edges::uniform(v);
     }
-    if let Some(v) = map.get("border-color").and_then(|v| parse_color(v)) {
+    if let Some(v) = map
+        .get("border-color")
+        .and_then(|v| resolve_color(v, cs.color))
+    {
         cs.border_color = v;
     }
     if let Some(px) = map.get("border-top-width").and_then(|v| len_px(v, fs)) {
@@ -638,12 +643,17 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         cs.outline_width = w;
         if let Some(c) = c {
             cs.outline_color = c;
+        } else if mentions_current_color(v) {
+            cs.outline_color = cs.color;
         }
     }
     if let Some(v) = map.get("outline-width").and_then(|v| len_px(v, fs)) {
         cs.outline_width = v;
     }
-    if let Some(v) = map.get("outline-color").and_then(|v| parse_color(v)) {
+    if let Some(v) = map
+        .get("outline-color")
+        .and_then(|v| resolve_color(v, cs.color))
+    {
         cs.outline_color = v;
     }
     // Width.
@@ -819,6 +829,21 @@ fn color_in(v: &str) -> Option<Color> {
     parse_color(v).or_else(|| v.split_whitespace().find_map(parse_color))
 }
 
+/// Whether a value contains the `currentColor` keyword (case-insensitive).
+fn mentions_current_color(v: &str) -> bool {
+    v.split_whitespace().any(|t| t.eq_ignore_ascii_case("currentcolor"))
+}
+
+/// Resolve a color value, mapping the `currentColor` keyword to `cur` (the
+/// element's already-computed `color`). Used for properties where `currentColor`
+/// is common (background, border, outline).
+fn resolve_color(v: &str, cur: Color) -> Option<Color> {
+    if mentions_current_color(v) {
+        return Some(cur);
+    }
+    color_in(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -829,6 +854,26 @@ mod tests {
         let el = doc.create_element(QualName::html(tag), attrs);
         doc.append(root, el);
         el
+    }
+
+    #[test]
+    fn current_color_resolves_to_color() {
+        // `currentColor` on border/background/outline resolves to the element's
+        // computed `color`.
+        let mut doc = Document::new();
+        let el = one(&mut doc, "div", vec![]);
+        let author = parse_stylesheet(
+            "div { color: rgb(10, 20, 30); \
+                   border: 2px solid currentColor; \
+                   background-color: currentColor; \
+                   outline-color: currentColor }",
+        );
+        let cs = computed_style(&doc, el, &ComputedStyle::initial(), &author);
+        let c = Color::rgb(10, 20, 30);
+        assert_eq!(cs.color, c);
+        assert_eq!(cs.border_color, c, "border-color: currentColor");
+        assert_eq!(cs.background_color, c, "background-color: currentColor");
+        assert_eq!(cs.outline_color, c, "outline-color: currentColor");
     }
 
     #[test]
