@@ -130,6 +130,7 @@ dependencies = [
 name = "argus-layout"
 version = "0.0.0"
 dependencies = [
+ "argus-css",
  "argus-dom",
  "argus-geometry",
  "argus-gfx",

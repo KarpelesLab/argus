@@ -169,7 +169,7 @@ impl Content {
 
         // Decode every <img> (data: URLs locally, http(s) via the browser).
         let mut images: HashMap<String, argus_image::DecodedImage> = HashMap::new();
-        for src in collect_img_srcs(doc) {
+        for src in collect_img_srcs(doc, self.viewport.width as f32) {
             if images.contains_key(&src) {
                 continue;
             }
@@ -376,22 +376,23 @@ fn find_element_by_id(doc: &argus_dom::Document, id: &str) -> Option<argus_dom::
 }
 
 /// Collect the `src` of every `<img>` element in document order.
-fn collect_img_srcs(doc: &argus_dom::Document) -> Vec<String> {
-    fn walk(doc: &argus_dom::Document, id: argus_dom::NodeId, out: &mut Vec<String>) {
+fn collect_img_srcs(doc: &argus_dom::Document, viewport_w: f32) -> Vec<String> {
+    fn walk(doc: &argus_dom::Document, id: argus_dom::NodeId, viewport_w: f32, out: &mut Vec<String>) {
         if let argus_dom::NodeData::Element(e) = &doc.node(id).data {
             if e.name.is_html("img") {
-                // Fetch the same URL layout resolves (`src`, else best `srcset`).
-                if let Some(src) = argus_layout::img_url(e) {
-                    out.push(src.to_string());
+                // Fetch the same URL layout resolves (`<picture>` source, else
+                // the img's own `src`/`srcset`).
+                if let Some(src) = argus_layout::resolve_img_url(doc, id, viewport_w) {
+                    out.push(src);
                 }
             }
         }
         for child in doc.children(id) {
-            walk(doc, child, out);
+            walk(doc, child, viewport_w, out);
         }
     }
     let mut out = Vec::new();
-    walk(doc, doc.root(), &mut out);
+    walk(doc, doc.root(), viewport_w, &mut out);
     out
 }
 

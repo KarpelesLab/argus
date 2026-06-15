@@ -48,6 +48,73 @@ pub fn img_url(e: &ElementData) -> Option<&str> {
         .or_else(|| e.attr("srcset").and_then(srcset_best))
 }
 
+/// Resolve the URL an `<img>` should load, honoring an enclosing `<picture>`:
+/// the first preceding `<source>` whose `type` is a format we decode and whose
+/// `media` matches the `viewport_w`-wide viewport wins (using its best `srcset`
+/// candidate); otherwise the `<img>`'s own `src`/`srcset`. Shared by the layout
+/// image sites and the content process's fetch pass so both pick the same URL.
+pub fn resolve_img_url(doc: &Document, img_id: NodeId, viewport_w: f32) -> Option<String> {
+    let node = doc.node(img_id);
+    let NodeData::Element(e) = &node.data else {
+        return None;
+    };
+    if let Some(parent) = node.parent() {
+        if matches!(&doc.node(parent).data, NodeData::Element(pe) if pe.name.is_html("picture")) {
+            for sib in doc.children(parent) {
+                if sib == img_id {
+                    break; // only <source>s before the <img> apply
+                }
+                let NodeData::Element(se) = &doc.node(sib).data else {
+                    continue;
+                };
+                if !se.name.is_html("source") {
+                    continue;
+                }
+                let Some(srcset) = se.attr("srcset") else {
+                    continue;
+                };
+                if se.attr("type").is_some_and(|t| !source_type_supported(t)) {
+                    continue; // skip formats we can't decode (e.g. AVIF)
+                }
+                if se
+                    .attr("media")
+                    .is_some_and(|m| !argus_css::media_query_matches(m, viewport_w))
+                {
+                    continue; // media condition doesn't match this viewport
+                }
+                if let Some(best) = srcset_best(srcset) {
+                    return Some(best.to_string());
+                }
+            }
+        }
+    }
+    img_url(e).map(str::to_string)
+}
+
+/// Whether a `<source type=…>` MIME type names an image format the decoder
+/// handles (so a `<picture>` can fall through to the next source/`<img>` for
+/// formats like AVIF/JXL we don't yet decode).
+fn source_type_supported(t: &str) -> bool {
+    matches!(
+        t.trim().to_ascii_lowercase().as_str(),
+        "image/png"
+            | "image/gif"
+            | "image/jpeg"
+            | "image/jpg"
+            | "image/webp"
+            | "image/bmp"
+            | "image/x-icon"
+            | "image/vnd.microsoft.icon"
+            | "image/tiff"
+            | "image/x-targa"
+            | "image/x-tga"
+            | "image/x-portable-pixmap"
+            | "image/x-portable-graymap"
+            | "image/x-pcx"
+            | "image/qoi"
+    )
+}
+
 /// Pick the highest-resolution candidate URL from an `srcset` value: each
 /// comma-separated `URL [descriptor]` entry's `w`/`x` descriptor is a weight;
 /// the largest wins, falling back to the last candidate when undescribed.
@@ -735,54 +802,35 @@ impl Ctx<'_> {
                         self.gather_inline(child, &style, None, &mut words, &mut pending_space);
                     }
                     NodeData::Element(e) if e.name.is_html("img") => {
-                        let istyle = computed_style(self.doc, child, &style, self.author);
-                        let (bw, bh) = self.image_box_size(e, content_w);
-                        if bw > 0.0 && bh > 0.0 {
-                            // A sized image is an atomic inline box: lay it out at the
-                            // origin and push it as a "word" placed by flush_words.
-                            let start = (
-                                self.rects.len(),
-                                self.runs.len(),
-                                self.images.len(),
-                                self.links.len(),
-                                self.bounds.len(),
-                            );
-                            let saved_y = self.cursor_y;
-                            self.cursor_y = 0.0;
-                            self.place_image(e, &istyle, 0.0, content_w);
-                            self.cursor_y = saved_y;
-                            let end = (
-                                self.rects.len(),
-                                self.runs.len(),
-                                self.images.len(),
-                                self.links.len(),
-                                self.bounds.len(),
-                            );
-                            let space_before = pending_space;
-                            pending_space = false;
-                            words.push(InlineWord {
-                                text: String::new(),
-                                font_size: istyle.font_size,
-                                color: argus_geometry::Color::TRANSPARENT,
-                                background: argus_geometry::Color::TRANSPARENT,
-                                space_before,
-                                underline: false,
-                                strike: false,
-                                overline: false,
-                                bold: false,
-                                italic: false,
-                                shadow: None,
-                                decoration_color: argus_geometry::Color::TRANSPARENT,
-                                href: None,
-                                hard_break: false,
-                                baseline_shift: 0.0,
-                                atomic: Some((start, end, bw, bh, istyle.vertical_align)),
-                            });
-                        } else {
-                            // Unresolved/broken image: block placement (alt text).
-                            self.flush_words(&mut words, &style, content_left, content_w);
-                            pending_space = false;
-                            self.place_image(e, &istyle, content_left, content_w);
+                        self.layout_img(
+                            child,
+                            e,
+                            &style,
+                            content_left,
+                            content_w,
+                            &mut words,
+                            &mut pending_space,
+                        );
+                    }
+                    // `<picture>` renders its `<img>` child; the `<source>`s only
+                    // steer which URL that `<img>` resolves to (see `resolve_img_url`).
+                    NodeData::Element(e) if e.name.is_html("picture") => {
+                        let img = self.doc.children(child).find(|&c| {
+                            matches!(&self.doc.node(c).data,
+                                NodeData::Element(ie) if ie.name.is_html("img"))
+                        });
+                        if let Some(img_id) = img {
+                            if let Some(ie) = self.doc.node(img_id).as_element() {
+                                self.layout_img(
+                                    img_id,
+                                    ie,
+                                    &style,
+                                    content_left,
+                                    content_w,
+                                    &mut words,
+                                    &mut pending_space,
+                                );
+                            }
                         }
                     }
                     NodeData::Element(e)
@@ -1488,12 +1536,79 @@ impl Ctx<'_> {
         self.cursor_y += h;
     }
 
+    /// Lay out one `<img>` (node `img_id`, element `e`) in the inline flow: a sized
+    /// image becomes an atomic inline box pushed onto `words`; an unresolved one is
+    /// block-placed (alt text). Shared by the `<img>` and `<picture>` paths.
+    #[allow(clippy::too_many_arguments)]
+    fn layout_img(
+        &mut self,
+        img_id: NodeId,
+        e: &ElementData,
+        style: &ComputedStyle,
+        content_left: f32,
+        content_w: f32,
+        words: &mut Vec<InlineWord>,
+        pending_space: &mut bool,
+    ) {
+        let istyle = computed_style(self.doc, img_id, style, self.author);
+        let resolved = resolve_img_url(self.doc, img_id, self.viewport_w);
+        let src = resolved.as_deref().unwrap_or("");
+        let (bw, bh) = self.image_box_size(e, src, content_w);
+        if bw > 0.0 && bh > 0.0 {
+            // A sized image is an atomic inline box: lay it out at the origin and
+            // push it as a "word" placed by flush_words.
+            let start = (
+                self.rects.len(),
+                self.runs.len(),
+                self.images.len(),
+                self.links.len(),
+                self.bounds.len(),
+            );
+            let saved_y = self.cursor_y;
+            self.cursor_y = 0.0;
+            self.place_image(e, src, &istyle, 0.0, content_w);
+            self.cursor_y = saved_y;
+            let end = (
+                self.rects.len(),
+                self.runs.len(),
+                self.images.len(),
+                self.links.len(),
+                self.bounds.len(),
+            );
+            let space_before = *pending_space;
+            *pending_space = false;
+            words.push(InlineWord {
+                text: String::new(),
+                font_size: istyle.font_size,
+                color: argus_geometry::Color::TRANSPARENT,
+                background: argus_geometry::Color::TRANSPARENT,
+                space_before,
+                underline: false,
+                strike: false,
+                overline: false,
+                bold: false,
+                italic: false,
+                shadow: None,
+                decoration_color: argus_geometry::Color::TRANSPARENT,
+                href: None,
+                hard_break: false,
+                baseline_shift: 0.0,
+                atomic: Some((start, end, bw, bh, istyle.vertical_align)),
+            });
+        } else {
+            // Unresolved/broken image: block placement (alt text).
+            self.flush_words(words, style, content_left, content_w);
+            *pending_space = false;
+            self.place_image(e, src, &istyle, content_left, content_w);
+        }
+    }
+
     /// The `(width, height)` an `<img>` would occupy (border box), or `(0, 0)` if
     /// unresolved (no usable size — then `alt`/placeholder handling applies).
-    fn image_box_size(&self, e: &ElementData, avail: f32) -> (f32, f32) {
-        let Some(src) = img_url(e) else {
+    fn image_box_size(&self, e: &ElementData, src: &str, avail: f32) -> (f32, f32) {
+        if src.is_empty() {
             return (0.0, 0.0);
-        };
+        }
         let (iw, ih) = self.image_sizes.get(src).copied().unwrap_or((0, 0));
         let attr_w = e.attr("width").and_then(|v| v.parse::<f32>().ok());
         let attr_h = e.attr("height").and_then(|v| v.parse::<f32>().ok());
@@ -1511,9 +1626,8 @@ impl Ctx<'_> {
     }
 
     /// unresolved image with non-empty `alt` text renders that text instead.
-    fn place_image(&mut self, e: &ElementData, istyle: &ComputedStyle, x: f32, avail: f32) {
+    fn place_image(&mut self, e: &ElementData, src: &str, istyle: &ComputedStyle, x: f32, avail: f32) {
         let hidden = istyle.hidden;
-        let Some(src) = img_url(e) else { return };
         let (iw, ih) = self.image_sizes.get(src).copied().unwrap_or((0, 0));
 
         // Width: the `width` attribute, else intrinsic, capped to the content box.
@@ -1545,8 +1659,9 @@ impl Ctx<'_> {
             } else {
                 (x, self.cursor_y, w, h)
             };
-            // `visibility: hidden` reserves the image's box but paints nothing.
-            if !hidden {
+            // `visibility: hidden` reserves the box but paints nothing; an empty
+            // `src` (no usable source) reserves space without a fetchable image.
+            if !hidden && !src.is_empty() {
                 self.images.push(ImageBox {
                     x: ix,
                     y: iy,
@@ -4732,6 +4847,46 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         let l = layout(&doc, &font, 400.0, &sizes);
         assert_eq!(l.images.len(), 1, "the srcset image is laid out");
         assert_eq!(l.images[0].src, "big.png", "largest-w candidate chosen");
+    }
+
+    #[test]
+    fn picture_selects_supported_source_over_img() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // An AVIF source we can't decode is skipped; the WebP source (supported)
+        // is chosen over the JPEG <img> fallback.
+        let mut sizes = ImageSizes::new();
+        sizes.insert("photo.webp".to_string(), (120, 60));
+        let html = "<picture>\
+                      <source type=\"image/avif\" srcset=\"photo.avif\">\
+                      <source type=\"image/webp\" srcset=\"photo.webp\">\
+                      <img src=\"photo.jpg\" width=\"120\" height=\"60\">\
+                    </picture>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 400.0, &sizes);
+        assert_eq!(l.images.len(), 1, "one image laid out");
+        assert_eq!(l.images[0].src, "photo.webp", "webp source chosen over jpg img");
+    }
+
+    #[test]
+    fn picture_media_query_filters_sources() {
+        // Direct resolver check: a min-width source only applies on wide viewports.
+        let html = "<picture>\
+                      <source media=\"(min-width: 700px)\" srcset=\"wide.png\">\
+                      <img src=\"narrow.png\">\
+                    </picture>";
+        let doc = parse(html);
+        fn find_img(doc: &Document, id: NodeId) -> Option<NodeId> {
+            if matches!(&doc.node(id).data, NodeData::Element(e) if e.name.is_html("img")) {
+                return Some(id);
+            }
+            doc.children(id).find_map(|c| find_img(doc, c))
+        }
+        let img = find_img(&doc, doc.root()).unwrap();
+        assert_eq!(resolve_img_url(&doc, img, 1000.0).as_deref(), Some("wide.png"));
+        assert_eq!(resolve_img_url(&doc, img, 400.0).as_deref(), Some("narrow.png"));
     }
 
     #[test]
