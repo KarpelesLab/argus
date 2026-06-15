@@ -258,6 +258,11 @@ pub fn layout(doc: &Document, font: &Font, viewport_width: f32, images: &ImageSi
         links: Vec::new(),
         bounds: Vec::new(),
         cursor_y: PAGE_MARGIN,
+        cb_x: 0.0,
+        cb_y: 0.0,
+        cb_w: viewport_width,
+        cb_h: None,
+        viewport_w: viewport_width,
     };
 
     let start = body_or_root(doc);
@@ -303,6 +308,15 @@ struct Ctx<'a> {
     links: Vec<LinkBox>,
     bounds: Vec<ElementBound>,
     cursor_y: f32,
+    /// Containing block for absolutely-positioned descendants: the padding box of
+    /// the nearest positioned ancestor (origin x/y, width; height if definite).
+    /// Defaults to the initial containing block (the viewport).
+    cb_x: f32,
+    cb_y: f32,
+    cb_w: f32,
+    cb_h: Option<f32>,
+    /// Viewport width — the containing block used by `position: fixed`.
+    viewport_w: f32,
 }
 
 impl Ctx<'_> {
@@ -354,6 +368,27 @@ impl Ctx<'_> {
             x + style.margin.left
         };
         let content_left = border_box_left + style.border.left + style.padding.left;
+
+        // The containing block this box is positioned within: the nearest positioned
+        // ancestor's padding box (tracked in `self.cb_*`), except `fixed`, which is
+        // anchored to the viewport.
+        let cb_self = if style.position == Position::Fixed {
+            (0.0, 0.0, self.viewport_w, None)
+        } else {
+            (self.cb_x, self.cb_y, self.cb_w, self.cb_h)
+        };
+        // If this box is itself positioned, it establishes the containing block for
+        // its absolutely-positioned descendants. Save the parent's CB and install
+        // this box's padding box (its definite height, if any) for the subtree.
+        let saved_cb = (self.cb_x, self.cb_y, self.cb_w, self.cb_h);
+        if style.position != Position::Static {
+            self.cb_x = border_box_left + style.border.left;
+            self.cb_y = border_box_top + style.border.top;
+            self.cb_w = content_w + style.padding.left + style.padding.right;
+            self.cb_h = style.height.map(|len| {
+                len.to_px(style.font_size, avail) + style.padding.top + style.padding.bottom
+            });
+        }
 
         // Reserve background + border rect slots up front so ancestors paint first.
         // `visibility: hidden` keeps the box's geometry but paints no ink.
@@ -721,10 +756,16 @@ impl Ctx<'_> {
             });
         }
 
+        // Restore the parent's containing block now that the subtree is laid out.
+        self.cb_x = saved_cb.0;
+        self.cb_y = saved_cb.1;
+        self.cb_w = saved_cb.2;
+        self.cb_h = saved_cb.3;
+
         // Positioning. `relative` paints the box (and subtree) shifted by its inset
         // without affecting following siblings. `absolute`/`fixed` additionally take
-        // the box out of normal flow (the parent's cursor is reset), positioning it
-        // by its insets relative to where it would have started.
+        // the box out of normal flow (the parent's cursor is reset) and are anchored
+        // to their containing block by `top`/`left`/`right`/`bottom`.
         match style.position {
             Position::Relative => {
                 let (dx, dy) = relative_offset(&style, avail);
@@ -733,7 +774,28 @@ impl Ctx<'_> {
                 }
             }
             Position::Absolute | Position::Fixed => {
-                let (dx, dy) = relative_offset(&style, avail);
+                let (cbx, cby, cbw, cbh) = cb_self;
+                let fs = style.font_size;
+                // Horizontal: anchor to the CB's left or right edge; else keep the
+                // static position. Right anchoring needs the box width.
+                let target_left = if let Some(l) = style.inset_left {
+                    cbx + l.to_px(fs, cbw)
+                } else if let Some(r) = style.inset_right {
+                    cbx + cbw - r.to_px(fs, cbw) - border_box_w
+                } else {
+                    border_box_left
+                };
+                // Vertical: anchor to the CB's top or bottom edge. Bottom anchoring
+                // needs a definite CB height; without one, fall back to static.
+                let target_top = if let Some(t) = style.inset_top {
+                    cby + t.to_px(fs, cbh.unwrap_or(0.0))
+                } else if let (Some(b), Some(h)) = (style.inset_bottom, cbh) {
+                    cby + h - b.to_px(fs, h) - border_box_h
+                } else {
+                    border_box_top
+                };
+                let dx = target_left - border_box_left;
+                let dy = target_top - border_box_top;
                 if dx != 0.0 || dy != 0.0 {
                     self.shift_display_list(ds_start, dx, dy);
                 }
@@ -2651,6 +2713,46 @@ mod tests {
         let grow = l.runs.iter().find(|r| r.text == "grow").unwrap();
         // The grower starts just after the fixed 50px slot (plus page margin ~8).
         assert!(grow.x > 50.0 && grow.x < 80.0, "grower starts after fixed slot, got {}", grow.x);
+    }
+
+    #[test]
+    fn absolute_anchors_to_positioned_ancestor_corner() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A relatively-positioned 300×200 box establishes the containing block; an
+        // absolute child with right:0/top:0 pins to the box's top-right corner, so
+        // its left edge ≈ box_left + 300 - child_width (not the page origin).
+        let html = "<div style=\"position:relative; width:300px; height:200px; margin-left:50px\">\
+                      <div id=\"pin\" style=\"position:absolute; top:0; right:0; width:40px\">x</div>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 600.0, &ImageSizes::new());
+        let pin = l.bounds.iter().find(|b| b.id == "pin").expect("pin bounds");
+        // Container border-box left = page-margin(8) + margin-left(50) = 58; its
+        // padding box right edge = 58 + 300 = 358; child (40px) left ≈ 318.
+        assert!((pin.x - 318.0).abs() < 4.0, "pinned to right edge, got {}", pin.x);
+        // top:0 → child top aligns with the container's content top (~8).
+        assert!((pin.y - 8.0).abs() < 4.0, "pinned to top edge, got {}", pin.y);
+    }
+
+    #[test]
+    fn absolute_bottom_anchors_to_container_height() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // bottom:0 against a 200px-tall positioned container puts the child's bottom
+        // at the container bottom: child top ≈ container_top(8) + 200 - child_height.
+        let html = "<div style=\"position:relative; height:200px\">\
+                      <div id=\"b\" style=\"position:absolute; bottom:0; height:30px; width:20px\">y</div>\
+                    </div>";
+        let doc = parse(html);
+        let l = layout(&doc, &font, 600.0, &ImageSizes::new());
+        let b = l.bounds.iter().find(|b| b.id == "b").expect("b bounds");
+        // container content top ≈ 8; bottom edge ≈ 208; child top ≈ 208 - 30 = 178.
+        assert!((b.y - 178.0).abs() < 5.0, "pinned to bottom, got {}", b.y);
     }
 
     #[test]
