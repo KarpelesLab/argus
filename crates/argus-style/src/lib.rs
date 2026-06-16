@@ -1978,6 +1978,57 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     {
         cs.border_color = v;
     }
+    // Per-side border colors default to the (shorthand) border color; per-side
+    // shorthands and `-color` longhands override below.
+    cs.border_top_color = cs.border_color;
+    cs.border_right_color = cs.border_color;
+    cs.border_bottom_color = cs.border_color;
+    cs.border_left_color = cs.border_color;
+    // Per-side border *shorthands* (`border-bottom: 12px solid yellow`): set that
+    // side's width + color (+ style; `none`/`hidden` zeroes it). Run BEFORE the
+    // per-side `-width`/`-color` longhands so those (more specific) still win.
+    for (prop, side) in [
+        ("border-top", 0usize),
+        ("border-right", 1),
+        ("border-bottom", 2),
+        ("border-left", 3),
+    ] {
+        if let Some(v) = map.get(prop) {
+            let (w, c) = parse_border(v, fs);
+            let col = c.or_else(|| mentions_current_color(v).then_some(cs.color));
+            match side {
+                0 => {
+                    cs.border.top = w;
+                    if let Some(c) = col {
+                        cs.border_top_color = c;
+                    }
+                }
+                1 => {
+                    cs.border.right = w;
+                    if let Some(c) = col {
+                        cs.border_right_color = c;
+                    }
+                }
+                2 => {
+                    cs.border.bottom = w;
+                    if let Some(c) = col {
+                        cs.border_bottom_color = c;
+                    }
+                }
+                _ => {
+                    cs.border.left = w;
+                    if let Some(c) = col {
+                        cs.border_left_color = c;
+                    }
+                }
+            }
+            for tok in v.split_whitespace() {
+                if let Some(s) = decoration_style_of(tok) {
+                    cs.border_style = s;
+                }
+            }
+        }
+    }
     if let Some(px) = map.get("border-top-width").and_then(|v| len_px(v, fs)) {
         cs.border.top = px;
     }
@@ -2012,12 +2063,6 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     if map.get("border-left-style").is_some_and(|v| is_none_style(v)) {
         cs.border.left = 0.0;
     }
-    // Per-side border colors default to the shorthand color, then per-side longhands
-    // override them.
-    cs.border_top_color = cs.border_color;
-    cs.border_right_color = cs.border_color;
-    cs.border_bottom_color = cs.border_color;
-    cs.border_left_color = cs.border_color;
     if let Some(c) = map.get("border-top-color").and_then(|v| resolve_color(v, cs.color, parent.border_color)) {
         cs.border_top_color = c;
     }
@@ -2967,6 +3012,43 @@ mod tests {
         let el = doc.create_element(QualName::html(tag), attrs);
         doc.append(root, el);
         el
+    }
+
+    #[test]
+    fn per_side_border_shorthand_sets_width_and_color() {
+        let cs = |decl: &str| {
+            let mut doc = Document::new();
+            let d = one(&mut doc, "div", vec![]);
+            computed_style(
+                &doc,
+                d,
+                &ComputedStyle::initial(),
+                &parse_stylesheet(&format!("div {{ {decl} }}")),
+            )
+        };
+        let yellow = Color { r: 255, g: 255, b: 0, a: 255 };
+        let lime = Color { r: 0, g: 255, b: 0, a: 255 };
+
+        // `border-bottom: 12px solid yellow` sets only the bottom edge (width+color),
+        // leaving the other sides at 0 — previously this was dropped entirely.
+        let b = cs("border-bottom: 12px solid yellow");
+        assert_eq!(b.border.bottom, 12.0, "bottom width");
+        assert_eq!(b.border.top, 0.0, "other sides untouched");
+        assert_eq!(b.border_bottom_color, yellow);
+
+        // Two per-side shorthands coexist with independent colors.
+        let c = cs("border-top: 6px solid lime; border-bottom: 12px solid yellow");
+        assert_eq!((c.border.top, c.border.bottom), (6.0, 12.0));
+        assert_eq!(c.border_top_color, lime);
+        assert_eq!(c.border_bottom_color, yellow);
+
+        // An explicit per-side `-color` longhand still overrides the shorthand color.
+        let d = cs("border-left: 4px solid yellow; border-left-color: lime");
+        assert_eq!(d.border.left, 4.0);
+        assert_eq!(d.border_left_color, lime, "longhand color wins");
+
+        // `none`/`hidden` zeroes the side.
+        assert_eq!(cs("border-right: 5px none red").border.right, 0.0);
     }
 
     #[test]
