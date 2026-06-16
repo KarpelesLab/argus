@@ -173,6 +173,28 @@ pub enum BgSize {
     Contain,
 }
 
+/// `background-repeat` — which axes a natural-size bitmap background tiles along.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum BgRepeat {
+    #[default]
+    Repeat,
+    NoRepeat,
+    RepeatX,
+    RepeatY,
+}
+
+impl BgRepeat {
+    /// Whether the background tiles horizontally / vertically.
+    pub fn tiles(self) -> (bool, bool) {
+        match self {
+            BgRepeat::Repeat => (true, true),
+            BgRepeat::NoRepeat => (false, false),
+            BgRepeat::RepeatX => (true, false),
+            BgRepeat::RepeatY => (false, true),
+        }
+    }
+}
+
 /// Extract the URL from the first `url(...)` in a value (e.g. a `background-image`),
 /// stripping optional quotes. `None` if there is no `url()`.
 pub fn extract_url(v: &str) -> Option<String> {
@@ -646,8 +668,8 @@ pub struct ComputedStyle {
     /// Whether `background-image` declares a `url(...)` (resolved to the actual URL
     /// at layout time, since the string can't ride in this `Copy` struct).
     pub has_bg_image: bool,
-    /// `background-repeat: no-repeat` (else the image tiles to fill the box).
-    pub bg_no_repeat: bool,
+    /// `background-repeat` — tiling axes for a natural-size bitmap background.
+    pub bg_repeat: BgRepeat,
     /// `background-size` — how the bitmap is scaled into the box.
     pub bg_size: BgSize,
     /// `background-position` as `(x, y)` fractions in `0.0..=1.0` (default top-left
@@ -774,7 +796,7 @@ impl ComputedStyle {
             object_position: (0.5, 0.5),
             filter: Filter::default(),
             has_bg_image: false,
-            bg_no_repeat: false,
+            bg_repeat: BgRepeat::Repeat,
             bg_size: BgSize::Auto,
             bg_position: (0.0, 0.0),
             line_height: 1.2,
@@ -1565,7 +1587,12 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         }
     }
     if let Some(v) = map.get("background-repeat") {
-        cs.bg_no_repeat = v.split_whitespace().any(|t| t == "no-repeat");
+        cs.bg_repeat = match v.trim() {
+            "no-repeat" => BgRepeat::NoRepeat,
+            "repeat-x" => BgRepeat::RepeatX,
+            "repeat-y" => BgRepeat::RepeatY,
+            _ => BgRepeat::Repeat,
+        };
     }
     if let Some(v) = map.get("background-size") {
         cs.bg_size = match v.trim() {
@@ -3600,8 +3627,15 @@ mod tests {
             )
         };
         assert!(cs("background-image: url(x.png)").has_bg_image);
-        assert!(!cs("background-image: url(x.png)").bg_no_repeat, "tiles by default");
-        assert!(cs("background-image: url(x.png); background-repeat: no-repeat").bg_no_repeat);
+        assert_eq!(cs("background-image: url(x.png)").bg_repeat, BgRepeat::Repeat, "tiles by default");
+        assert_eq!(
+            cs("background-image: url(x.png); background-repeat: no-repeat").bg_repeat,
+            BgRepeat::NoRepeat
+        );
+        assert_eq!(cs("background-repeat: repeat-x").bg_repeat, BgRepeat::RepeatX);
+        assert_eq!(cs("background-repeat: repeat-y").bg_repeat, BgRepeat::RepeatY);
+        assert_eq!(BgRepeat::RepeatX.tiles(), (true, false));
+        assert_eq!(BgRepeat::RepeatY.tiles(), (false, true));
         // A gradient is not a bitmap background (no url flag).
         assert!(!cs("background: linear-gradient(red, blue)").has_bg_image);
 

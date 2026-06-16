@@ -248,8 +248,9 @@ Property` / `JSON` suffice).
 - **border-radius**, **per-side border colors**, **`border-style`** (none/hidden,
   solid/double/dotted/dashed).
 - **`background-image: url()`** (URL resolved at layout via `cascaded_value`; two-pass
-  render rects → backgrounds → text; tiled or `no-repeat`, clipped; **`background-size:
-  cover`/`contain`** + **`background-position`** — hero backgrounds work), **`background:
+  render rects → backgrounds → text; **`background-repeat`** repeat/no-repeat/repeat-x/
+  repeat-y, clipped; **`background-size: cover`/`contain`** + **`background-position`**
+  — hero backgrounds work), **`background:
   linear-gradient`** (multi-stop, `to <side>`/`<angle>`) + **`radial-gradient`**.
 - **opacity**, **color syntax** (`#rgb(a)`/`#rrggbb(aa)`, `rgb()`/`hsl()`/`hwb()`/
   `oklab()`/`oklch()`, full named-color set, **`color-mix()`**).

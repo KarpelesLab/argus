@@ -1077,19 +1077,24 @@ fn blit_background(
             fb, vw, vh, x, y, iw, ih, &img.rgba, iw, ih, 0, 0, iw, ih, clip,
         );
     };
-    // `no-repeat`: paint once at the position (natural size).
-    if bgi.no_repeat {
-        let ox = bgi.x + (bw - iwf) * px;
-        let oy = bgi.y + (bh - ihf) * py;
-        blit_at(fb, ox as i32, oy as i32);
-        return;
-    }
-    // Tile to fill from the top-left (bounded so a tiny image can't spin forever).
-    let cols = ((bw / iwf).ceil() as i32 + 1).clamp(1, 4096);
-    let rows = ((bh / ihf).ceil() as i32 + 1).clamp(1, 4096);
+    // Natural size: tile along whichever axes `background-repeat` allows; the
+    // non-repeating axis is positioned by `background-position` (one row/column).
+    let (rx, ry) = bgi.repeat.tiles();
+    let cols = if rx {
+        ((bw / iwf).ceil() as i32 + 1).clamp(1, 4096)
+    } else {
+        1
+    };
+    let rows = if ry {
+        ((bh / ihf).ceil() as i32 + 1).clamp(1, 4096)
+    } else {
+        1
+    };
+    let base_x = if rx { bgi.x } else { bgi.x + (bw - iwf) * px };
+    let base_y = if ry { bgi.y } else { bgi.y + (bh - ihf) * py };
     for row in 0..rows {
         for col in 0..cols {
-            blit_at(fb, bgi.x as i32 + col * iw as i32, bgi.y as i32 + row * ih as i32);
+            blit_at(fb, base_x as i32 + col * iw as i32, base_y as i32 + row * ih as i32);
         }
     }
 }

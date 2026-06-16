@@ -586,8 +586,8 @@ pub struct BgImage {
     pub w: f32,
     pub h: f32,
     pub src: String,
-    /// `background-repeat: no-repeat` — paint once instead of tiling.
-    pub no_repeat: bool,
+    /// `background-repeat` — tiling axes (or no-repeat) for a natural-size image.
+    pub repeat: argus_style::BgRepeat,
     /// `background-size` — natural (tiled) vs cover/contain (scaled, painted once).
     pub size: argus_style::BgSize,
     /// `background-position` as `(x, y)` fractions in `0.0..=1.0`.
@@ -1951,7 +1951,7 @@ impl Ctx<'_> {
                     w: border_box_w,
                     h,
                     src: url,
-                    no_repeat: style.bg_no_repeat,
+                    repeat: style.bg_repeat,
                     size: style.bg_size,
                     pos: style.bg_position,
                     clip: Some([border_box_left, border_box_top, border_box_w, h]),
@@ -6839,7 +6839,7 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         assert_eq!(l.bg_images.len(), 1, "one background fill");
         let bg = &l.bg_images[0];
         assert_eq!(bg.src, "bg.png");
-        assert!(!bg.no_repeat, "tiles by default");
+        assert_eq!(bg.repeat, argus_style::BgRepeat::Repeat, "tiles by default");
         assert!(bg.w > 0.0 && bg.h > 0.0, "covers the element box");
         assert_eq!(bg.clip, Some([bg.x, bg.y, bg.w, bg.h]), "clipped to its box");
         assert_eq!(bg.size, argus_style::BgSize::Auto, "natural size by default");
@@ -6854,9 +6854,17 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         assert_eq!(bc.size, argus_style::BgSize::Cover);
         assert_eq!(bc.pos, (0.5, 0.5));
 
-        // no-repeat is recorded; a gradient background emits no bg-image.
+        // repeat axes are recorded; a gradient background emits no bg-image.
         let nr = parse("<div style=\"background-image:url(b.png); background-repeat:no-repeat\">x</div>");
-        assert!(layout(&nr, &font, 400.0, &ImageSizes::new()).bg_images[0].no_repeat);
+        assert_eq!(
+            layout(&nr, &font, 400.0, &ImageSizes::new()).bg_images[0].repeat,
+            argus_style::BgRepeat::NoRepeat
+        );
+        let rx = parse("<div style=\"background-image:url(b.png); background-repeat:repeat-x\">x</div>");
+        assert_eq!(
+            layout(&rx, &font, 400.0, &ImageSizes::new()).bg_images[0].repeat,
+            argus_style::BgRepeat::RepeatX
+        );
         let grad = parse("<div style=\"background:linear-gradient(red,blue)\">x</div>");
         assert!(layout(&grad, &font, 400.0, &ImageSizes::new()).bg_images.is_empty());
     }
