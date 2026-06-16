@@ -248,7 +248,11 @@ Property` / `JSON` suffice).
 **Borders, backgrounds, color**
 
 - **border-radius**, **per-side border colors**, **`border-style`** (none/hidden,
-  solid/double/dotted/dashed).
+  solid/double/dotted/dashed); **mitered border corners** — each solid border edge
+  is a trapezoid from the outer to the inner (padding-box) corner, so adjacent
+  differently-colored sides meet on the diagonal, and a `0×0` box with thick borders
+  yields the **CSS-triangle technique** (tooltip arrows, dropdown carets, speech
+  bubbles) via an optional polygon fill on `RectFill`.
 - **`background-image: url()`** (URL resolved at layout via `cascaded_value`; two-pass
   render rects → backgrounds → text; **`background-repeat`** repeat/no-repeat/repeat-x/
   repeat-y, clipped; **`background-size: cover`/`contain`** + **`background-position`**

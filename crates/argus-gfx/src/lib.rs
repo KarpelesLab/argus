@@ -179,6 +179,10 @@ pub struct RectFill {
     pub radius: f32,
     /// `overflow: hidden` clip rect `(x, y, w, h)` this fill is confined to, if any.
     pub clip: Option<[f32; 4]>,
+    /// When set, fill this 4-point polygon (canvas pixels) instead of the `x/y/w/h`
+    /// rectangle — used for mitered border edges (the CSS-triangle technique). `x/y`
+    /// still position it for clipping/z-order; `radius` is ignored.
+    pub quad: Option<[[f32; 2]; 4]>,
 }
 
 /// A flat list of paint commands. Rectangles paint first (backgrounds), then text.
@@ -243,6 +247,15 @@ fn maybe_clip(node: Node, clip: Option<[f32; 4]>) -> Node {
 
 fn rect_node(r: &RectFill) -> Node {
     let mut path = Path::new();
+    // A 4-point polygon (e.g. a mitered border edge) is filled directly.
+    if let Some(q) = r.quad {
+        path.move_to(Point::new(q[0][0], q[0][1]));
+        path.line_to(Point::new(q[1][0], q[1][1]));
+        path.line_to(Point::new(q[2][0], q[2][1]));
+        path.line_to(Point::new(q[3][0], q[3][1]));
+        path.close();
+        return Node::Path(PathNode::new(path).with_fill(Paint::Solid(rgba_of(r.color))));
+    }
     let rad = r.radius.min(r.w / 2.0).min(r.h / 2.0).max(0.0);
     if rad <= 0.5 {
         path.move_to(Point::new(r.x, r.y));

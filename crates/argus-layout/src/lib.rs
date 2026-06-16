@@ -1138,6 +1138,7 @@ impl Ctx<'_> {
                 color: style.fade(style.background_color),
                 radius: style.border_radius,
                 clip: None,
+                quad: None,
             });
             self.rects.len() - 1
         });
@@ -1172,6 +1173,7 @@ impl Ctx<'_> {
                     color: style.border_color,
                     radius: 0.0,
                     clip: None,
+                    quad: None,
                 });
             }
             i
@@ -1216,6 +1218,7 @@ impl Ctx<'_> {
                         color: style.color,
                         radius: if round { d * 0.5 } else { 0.0 },
                         clip: None,
+                        quad: None,
                     });
                     if matches!(bullet, Marker::Circle) {
                         // Punch out the centre so the ring reads as hollow.
@@ -1228,6 +1231,7 @@ impl Ctx<'_> {
                             color: argus_geometry::Color::WHITE,
                             radius: (d - 2.0 * t) * 0.5,
                             clip: None,
+                            quad: None,
                         });
                     }
                 }
@@ -1760,6 +1764,7 @@ impl Ctx<'_> {
                     color: sc,
                     radius: style.border_radius,
                     clip: None,
+                    quad: None,
                 };
             } else {
                 // Faux blur: concentric rects from the full blur extent inward, each
@@ -1779,6 +1784,7 @@ impl Ctx<'_> {
                         color: argus_geometry::Color { a: layer_a, ..sc },
                         radius: style.border_radius + grow.max(0.0),
                         clip: None,
+                        quad: None,
                     };
                 }
             }
@@ -1797,35 +1803,24 @@ impl Ctx<'_> {
             );
         }
         if let Some(i) = border_idx {
+            // Mitered border edges: each side is a trapezoid from the outer corner to
+            // the inner (padding-box) corner, so adjacent sides meet on the diagonal.
+            // For a 0×0 box with thick borders this yields the four triangles of the
+            // CSS-triangle technique (tooltip arrows, dropdown carets, ACID2's nose).
             let b = &style.border;
-            self.rects[i] = rect(
-                border_box_left,
-                border_box_top,
-                border_box_w,
-                b.top,
-                style.border_top_color,
-            );
-            self.rects[i + 1] = rect(
-                border_box_left,
-                border_box_top + border_box_h - b.bottom,
-                border_box_w,
-                b.bottom,
-                style.border_bottom_color,
-            );
-            self.rects[i + 2] = rect(
-                border_box_left,
-                border_box_top,
-                b.left,
-                border_box_h,
-                style.border_left_color,
-            );
-            self.rects[i + 3] = rect(
-                border_box_left + border_box_w - b.right,
-                border_box_top,
-                b.right,
-                border_box_h,
-                style.border_right_color,
-            );
+            let (l, t) = (border_box_left, border_box_top);
+            let r = l + border_box_w;
+            let bot = t + border_box_h;
+            let (il, it) = (l + b.left, t + b.top);
+            let (ir, ib) = (r - b.right, bot - b.bottom);
+            // top / bottom / left / right
+            self.rects[i] = border_quad([[l, t], [r, t], [ir, it], [il, it]], style.border_top_color);
+            self.rects[i + 1] =
+                border_quad([[l, bot], [r, bot], [ir, ib], [il, ib]], style.border_bottom_color);
+            self.rects[i + 2] =
+                border_quad([[l, t], [il, it], [il, ib], [l, bot]], style.border_left_color);
+            self.rects[i + 3] =
+                border_quad([[r, t], [r, bot], [ir, ib], [ir, it]], style.border_right_color);
         } else if has_border && !solid_border {
             // Non-solid border: a uniform frame (thickest side as width, top color)
             // painted over the finished subtree by the shared frame painter.
@@ -1865,6 +1860,7 @@ impl Ctx<'_> {
                     color: style.accent_color.unwrap_or(style.color),
                     radius,
                     clip: None,
+                    quad: None,
                 });
             }
             // `<input type=color>`: fill the inner box with the value's color swatch.
@@ -1882,6 +1878,7 @@ impl Ctx<'_> {
                     color: swatch,
                     radius: 0.0,
                     clip: None,
+                    quad: None,
                 });
             }
             // `<input type=range>`: a thin track with a thumb at the value position.
@@ -1901,6 +1898,7 @@ impl Ctx<'_> {
                     color: argus_geometry::Color::rgb(0xc0, 0xc0, 0xc0),
                     radius: track_h / 2.0,
                     clip: None,
+                    quad: None,
                 });
                 let thumb = border_box_h.clamp(8.0, 14.0);
                 let tx = (border_box_left + frac * border_box_w - thumb / 2.0)
@@ -1913,6 +1911,7 @@ impl Ctx<'_> {
                     color: accent,
                     radius: thumb / 2.0,
                     clip: None,
+                    quad: None,
                 });
             }
         }
@@ -2111,6 +2110,7 @@ impl Ctx<'_> {
                     color: g.color_at(1.0 - f),
                     radius: iw.min(ih) / 2.0,
                     clip: None,
+                    quad: None,
                 };
             }
             return;
@@ -2133,6 +2133,7 @@ impl Ctx<'_> {
                     color,
                     radius: 0.0,
                     clip: None,
+                    quad: None,
                 }
             } else {
                 let sh = h / n;
@@ -2144,6 +2145,7 @@ impl Ctx<'_> {
                     color,
                     radius: 0.0,
                     clip: None,
+                    quad: None,
                 }
             };
             self.rects[start + k] = rect;
@@ -2313,6 +2315,7 @@ impl Ctx<'_> {
             color: argus_geometry::Color::rgb(0xd0, 0xd0, 0xd0),
             radius,
             clip: None,
+            quad: None,
         });
         // Filled portion: `accent-color` if set, else blue (progress) / green (meter).
         let fill = istyle.accent_color.unwrap_or_else(|| {
@@ -2335,6 +2338,7 @@ impl Ctx<'_> {
                 color: fill,
                 radius,
                 clip: None,
+                quad: None,
             });
         } else if frac > 0.0 {
             self.rects.push(RectFill {
@@ -2345,6 +2349,7 @@ impl Ctx<'_> {
                 color: fill,
                 radius,
                 clip: None,
+                quad: None,
             });
         }
         self.cursor_y = top + h + istyle.margin.bottom;
@@ -2434,6 +2439,7 @@ impl Ctx<'_> {
             },
             radius: if is_audio { h / 2.0 } else { 4.0 },
             clip: None,
+            quad: None,
         });
         // A centered "play" square for video.
         if !is_audio {
@@ -2446,6 +2452,7 @@ impl Ctx<'_> {
                 color: argus_geometry::Color::rgb(0xf0, 0xf0, 0xf0),
                 radius: 2.0,
                 clip: None,
+                quad: None,
             });
         }
         self.cursor_y += h;
@@ -3054,6 +3061,7 @@ impl Ctx<'_> {
                 color: style.fade(style.background_color),
                 radius: style.border_radius,
                 clip: None,
+                quad: None,
             });
             self.rects.len() - 1
         });
@@ -3460,6 +3468,7 @@ impl Ctx<'_> {
                 color: style.fade(style.background_color),
                 radius: style.border_radius,
                 clip: None,
+                quad: None,
             });
             self.rects.len() - 1
         });
@@ -4649,6 +4658,29 @@ fn rect(x: f32, y: f32, w: f32, h: f32, color: argus_geometry::Color) -> RectFil
         color,
         radius: 0.0,
         clip: None,
+        quad: None,
+    }
+}
+
+/// A filled 4-point polygon (a mitered border edge). `x/y/w/h` are its bounding box
+/// (for clip intersection / z-order); the `quad` is what's actually filled.
+fn border_quad(points: [[f32; 2]; 4], color: argus_geometry::Color) -> RectFill {
+    let (mut minx, mut miny, mut maxx, mut maxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for [px, py] in points {
+        minx = minx.min(px);
+        miny = miny.min(py);
+        maxx = maxx.max(px);
+        maxy = maxy.max(py);
+    }
+    RectFill {
+        x: minx,
+        y: miny,
+        w: (maxx - minx).max(0.0),
+        h: (maxy - miny).max(0.0),
+        color,
+        radius: 0.0,
+        clip: None,
+        quad: Some(points),
     }
 }
 
@@ -6971,6 +7003,42 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         let l2 = layout(&doc2, &font, 400.0, &sizes);
         assert!(l2.images.iter().all(|im| im.src != "icon.png"));
         assert!(l2.runs.iter().any(|r| r.text == "X"));
+    }
+
+    #[test]
+    fn border_edges_are_mitered_polygons() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let red = argus_geometry::Color { r: 255, g: 0, b: 0, a: 255 };
+        // A uniform border emits four mitered quad edges (still a frame).
+        let doc = parse("<div style=\"width:50px;height:50px;border:10px solid red\">x</div>");
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let edges = l.rects.iter().filter(|r| r.quad.is_some() && r.color == red).count();
+        assert_eq!(edges, 4, "four mitered border edges");
+
+        // The CSS-triangle technique: a 0×0 box with a colored top border and
+        // transparent sides yields a triangle — the top edge's two inner quad points
+        // coincide at the bottom-center apex (40px below the 60px-wide top).
+        let doc2 = parse(
+            "<div style=\"width:0;height:0;\
+             border-left:30px solid transparent;border-right:30px solid transparent;\
+             border-top:40px solid red\"></div>",
+        );
+        let l2 = layout(&doc2, &font, 400.0, &ImageSizes::new());
+        let top = l2
+            .rects
+            .iter()
+            .find(|r| r.quad.is_some() && r.color == red)
+            .expect("red top border");
+        let q = top.quad.unwrap();
+        let miny = q.iter().map(|p| p[1]).fold(f32::MAX, f32::min);
+        let maxy = q.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
+        assert!((maxy - miny - 40.0).abs() < 0.5, "40px tall triangle");
+        let apex: Vec<[f32; 2]> = q.iter().cloned().filter(|p| (p[1] - maxy).abs() < 0.5).collect();
+        assert_eq!(apex.len(), 2, "two points at the apex");
+        assert!((apex[0][0] - apex[1][0]).abs() < 0.5, "apex points coincide → a triangle");
     }
 
     #[test]
