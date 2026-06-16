@@ -14,16 +14,310 @@ co-equal embedding, not an afterthought).
 
 ## Current status (snapshot)
 
-| Phase | State |
-|-------|-------|
-| 0 — Foundations / multi-process | ✅ complete (sandbox, IPC, shared-mem framebuffer, AppKit window, CI) |
-| 1 — Static document to pixels | ✅ essentially complete (HTML→DOM with an **html5lib-format tree-construction conformance harness** at 100% over a curated core set — incl. implicit `tbody`/`tr`, `p`/`li`/`dt`/`dd`/`option`/`button` auto-closing, `pre`/`textarea` leading-newline strip, table text **foster-parenting**, RCDATA/RAWTEXT; CSS cascade + box model, block/inline layout, lists/hr, text shaping + raster (with **glyph-fallback fonts** — emoji/CJK/symbol system faces pushed onto the `FaceChain` for code points the primary font lacks), networking over rsurl, images PNG/GIF/JPEG/WebP/QOI/ICO/BMP (CSS `width`/`height` size images (over the legacy attrs), oversized images shrink to the content box keeping aspect, **`max-width`** caps images (the `max-width:100%` responsive idiom); sized images now **flow inline** with text as atomic boxes (and responsive images resolve consistently: **`srcset`** picks the best `w`/`x` candidate, and **`<picture>`** selects the first `<source>` whose `type` we decode and whose `media` matches before falling back to the `<img>`), honoring `vertical-align`; broken images fall back to block alt text)) |
-| 2 — Scripting & dynamic DOM | 🟡 page `<script>` runs in kataan; **synchronous DOM bindings now work** via a JS-side shim + reconciliation — no kataan host-callback API needed (ES6 Proxy/`Object.defineProperty`/`JSON` suffice). Supports `document.getElementById`/`querySelector` (full selector engine)/**`querySelectorAll`/`getElementsByTagName`/`getElementsByClassName`** (JS-side collections over a seeded element tree, simple selectors, scoped too)/`createElement`/`body`/`write`, and element `textContent`/`innerHTML`/`className`/`classList`/`setAttribute`/`style.*`/scoped `querySelector`/**tree traversal (`parentElement`/`children`/`nextElementSibling`/…, `nodeType`/`nodeName`/`tagName`/`hasChildNodes`, `document.documentElement`/`head`/`body`)**/**`matches`/`closest`/`contains`**/`appendChild`/**`prepend`/`before`/`after`/`replaceWith`/`replaceChildren`/`insertAdjacentElement`**/`remove`; the shared `argus-domscript` crate makes `--dump-dom`/`--dump-text`/`--dump-a11y` reflect the post-script DOM too. **Interactive click events also work** — `addEventListener('click')`/`onclick` handlers fire and accumulate JS + DOM state via deterministic event replay (the windowed browser hit-tests id'd elements and re-runs the history). **`setTimeout`/`setInterval`/`requestAnimationFrame`** callbacks run too (drained synchronously, delay-ordered, no wall clock; rAF gets a synthetic timestamp), and **`localStorage`** (persisted across navigations within the session) **/`sessionStorage`**, plus **`window.location`** (read-only view seeded from the page URL: `href`/`protocol`/`hostname`/`pathname`/`search`/`hash`/`origin`). **Keyboard text input** works — click a text field to focus it and type (backspace deletes; **`maxlength` caps the length**); typed values survive event replay. **Focus ring + Tab navigation** — the focused field is marked with a `__argus_focus` sentinel attribute each render so the UA stylesheet draws a blue focus outline, and **Tab** advances focus to the next editable field in document order (wrapping, skipping non-editable controls). **Promises/microtasks and `async`/`await` now work** — DOM writes inside `Promise.then`/awaited continuations are reconciled, because scripts run through `argus_script::run_with_followup`, which drains kataan's event loop (microtasks + async tails) before the recorded ops are read back. **geometry read-back works** — `getBoundingClientRect`/`getClientRects`/`offset*`/`client*` return the real box of an `id`'d element from the most recent layout (one frame behind, fed back into the script run deterministically; elements without geometry read zero; `scrollTop/Left` stay 0), and **`window.innerWidth/innerHeight/scrollX/scrollY/pageXOffset/pageYOffset` reflect the real content viewport + page scroll** (previously hardcoded); **`window.getComputedStyle(el)`** returns the resolved CSS of an `id`'d element (a curated property set — color/background-color/display/font-size/-weight/-style/text-align/opacity/visibility — via `getPropertyValue` or camelCase accessors), computed by the cascade and fed back like geometry. Real-time (wall-clock) timers, other continuous events (mousemove/keydown handlers), on-disk storage across browser restarts, and reading back computed layout still want a real embedding API ([upstream/kataan.md](upstream/kataan.md)) |
-| 3 — Chrome, navigation & services | 🟡 links → fetch → re-render (with **charset-aware HTML decoding** — UTF-8 when valid/declared, else windows-1252/Latin-1 fallback so legacy pages don't mojibake), URL + subresource resolution (incl. **`<base href>`** overriding the relative base for the headless extractors), **scroll-wheel** + **keyboard scrolling** (Page Up/Down, Space, arrow up/down, Home/End scroll the page when no text field is focused — content computes the clamped target offset and reports it via the scroll sentinel, so Space still types into a focused field), **`#fragment` anchors** (clicking `<a href="#id">` scrolls to the target element's document position instead of reloading — content reports the target Y via a `\u{1}scroll:` sentinel `ClickResult`, the browser clamps + sets the tab's scroll and re-renders; **cross-page `page#id` deep links** scroll too: after the navigation renders, the browser sends `ScrollToFragment` and applies the reported Y, so links/back/forward to a section land on it), **persistent cookie jar**, **HTTP cache** (Cache-Control `max-age` + **`Expires`/`Date`** freshness; **conditional revalidation** — stale entries with `ETag`/`Last-Modified` refetch with `If-None-Match`/`If-Modified-Since` and refresh in place on `304`), **CSP** enforcement (inline-script `script-src`/`default-src`) from **`<meta>` and response headers**, with **all policies enforced** (multiple metas + headers; the strictest wins) via `apply_scripts_with_csp` (with **`script-src-elem`** taking CSP3 precedence over `script-src`/`default-src`), **per-script `'nonce-…'` allow-listing** (case-sensitive; matching-nonce scripts run, and `'unsafe-inline'` is correctly ignored when a nonce source is present, per CSP3) and **`'sha256/384/512-…'` hash-source allow-listing** (the inline script's body digest — computed via **purecrypto** — is base64-compared to the policy's hash sources; hashes also disable `'unsafe-inline'` per CSP3), **reload** (Cmd+R, keeping scroll position), **back/forward history** (Cmd+`[`/`]`, with **per-entry scroll restoration** — each history entry remembers the scroll offset it was left at, so going back lands you where you were rather than at the top; a new navigation starts at the top), **multi-tab navigation** (Cmd+T new tab, Cmd+W close, Cmd+Shift+`[`/`]` prev/next, Cmd+1…9 jump — each tab keeps its own independent history + scroll; the shared content process is re-navigated to the active tab on switch). a **visual tab-bar** (a strip reserved at the top of the window: one rectangle per tab with the active one accented, a `+` button; clicks switch / close (right edge) / open, page clicks offset past the strip; the content viewport shrinks to fit below it), and **one isolated content process per tab** — each tab spawns its own sandboxed process, so its DOM/JS/scroll state is preserved when other tabs are active and switching back is instant (no reload); closing a tab shuts down + reaps its process. Threading the CSP header across IPC to the apply site, and more CSP directives remain |
-| 4 — Layout & CSS breadth | 🟡 box model, **box-sizing**, **`display: inline-block`** (atomic box: laid out at the origin then shifted into the inline line by its width, sizing the line box to its height), **min/max-width**, **line-height**, text-align (incl. **justify** and direction-relative **start/end**), **text-transform**, **`letter-spacing`** (widens each glyph's advance, measured for wrapping and painted by offsetting glyphs), **white-space: pre/nowrap/pre-line/pre-wrap** (pre-line collapses spaces, pre-wrap preserves them; both keep newlines and wrap; **`tab-size`** expands tabs in preformatted text), **`overflow-wrap`/`word-break: break-word`** (splits over-long words to fit instead of overflowing), **`<wbr>` + soft-hyphen (`&shy;`) + zero-width-space (`&#8203;`) break opportunities**, **`&nbsp;` (U+00A0) non-breaking** (kept inside its word so it never wraps apart), **`text-overflow: ellipsis`** (truncates an overflowing `nowrap` line with `…`), **visibility**, **`<br>`**, **vertical-align (sub/sup; top/middle/bottom for inline-block boxes)**, **`float: left/right`** (out-of-flow, placed at the content-box edge with inline text flowing around it line-by-line via per-line float bands; floats contained by their block; multiple floats stack side-by-side then drop to the next band when they no longer fit) + **`clear: left/right/both`**, **position: relative** + **absolute/fixed** (out-of-flow; absolute anchored to the nearest positioned ancestor's padding box via `top`/`left`/`right`/`bottom`, fixed to the viewport; bottom/right edge anchoring with definite container height), **`outline` + `outline-offset` + `outline-style`** (painted outside the border box, gap-offset, no layout effect; solid/**double**/**dotted**/**dashed** edges), **`transform: translate()`/`translateX`/`translateY`** (paints the subtree shifted, no layout effect; `%` against the element's own box) and **`scale()`/`scaleX`/`scaleY`** (scales the subtree's positions/sizes/text about its center), **`::before`/`::after` generated content** (string `content` + **`attr(<name>)`** + concatenation, on inline *and* block elements; CSS `\<hex>` unicode escapes decoded in the tokenizer; **`open-quote`/`close-quote`** keywords; UA `<q>` curly quotes; **CSS counters** — `counter-reset`/`counter-increment` tracked in document order, `counter()`/`counters()` in content, e.g. auto-numbered headings), **`@media` queries** (min/max-width + prefers-color-scheme/hover/pointer/orientation keyword features with desktop defaults), **custom properties (`var()`)** + **`calc() + **`min()`/`max()`/`clamp()`** (over length/calc terms)`** (sum of `±` px/em/% terms; mul/div/nesting fall back to no-value), **`@supports`** (feature-query gating, `not`/`and`/`or`), attribute + `:first/last/only-child` + **`:nth-child`/`:nth-last-child`** + **`:first/last/only/nth/nth-last-of-type`** + **`:not()`** (incl. CSS4 selector-list form `:not(a, b)`) + **`:is()`/`:where()`** + **`:has()`** (relational — `div:has(img)`, `:has(> .x)` child combinator tolerated; matches if a descendant matches, contributes the argument's specificity) + **`:root`/`:empty`/`:lang()`** (matches the element's own or inherited `lang`, primary-subtag, OR-list form) + **form-state (`:checked`/`:disabled`/`:enabled`/`:required`/`:read-only`/`:optional`/`:read-write`)** + **`:focus`/`:focus-visible`/`:focus-within`** (the focused field is marked with `__argus_focus` before the cascade, so author `input:focus { … }` rules apply; `:focus-visible` is treated as `:focus`; `:focus-within` matches its ancestors) + **`:placeholder-shown`** (an empty input/textarea with a `placeholder`) + **`:target`** (the element matching the current URL fragment — marked by the content process on anchor jumps + deep links, so CSS-only `:target` tabs/lightboxes work) selectors (with descendant/child/adjacent-sibling (`+`)/general-sibling (`~`) combinators; correct specificity, and comma-in-`:is()`/`:not()` argument lists no longer mis-split the selector list), lists + **list-style-type** (disc/circle/square, decimal, decimal-leading-zero, lower/upper-alpha, lower/upper-roman, lower-greek) + **`<ol start>`/`reversed`/`<li value>` numbering** + **`<ol/ul/li type>` marker attribute** + **`list-style-position: inside/outside`**, `<hr>`, **tables** (**content-based ("auto") column widths** — columns size to their cells' max-content and scale to fill the table width, with **`<colgroup>`/`<col>` explicit widths** pinning columns (CSS `width` or the HTML `width` attr; auto columns share the rest) — with **`colspan` + `rowspan`** via cell-occupancy placement and measured row heights; **`caption-side: top/bottom`**; **`<thead>`/`<tfoot>`** render before/after the body regardless of source order; **`border-spacing`/`cellspacing`** gaps between cells; **`border-collapse: collapse`** (shares adjacent cell borders by suppressing each internal cell's right/bottom border); **cell `vertical-align`** (`valign` on cell/row, middle/bottom) within the row height), **legacy presentational attributes** (`align`→`text-align`/`<img align>`→`float`, `bgcolor`/`<body text>`/`<font color>`→colors, `<table>`/cell `width`/`height`, `<table border=N>`→cell borders, `<table cellpadding>`, `<td nowrap>`, `<caption align>`, `<hr size/width/color/align>`; `<center>`) mapped to CSS at the bottom of the cascade, and **UA defaults for `<fieldset>`/`<legend>` (bordered block + bold legend), `<dd>` indent, `<template>`/`<datalist>`/closed `<dialog>`/`<input type=hidden>`** (hidden via `dialog:not([open])`/`input[type=hidden]`), **form controls** (input/textarea/button render with their value, submit/reset buttons get default "Submit"/"Reset" labels; **editable `<textarea>`** — focus + type like a text input, with **multi-line editing** (Enter inserts a newline rather than submitting, rendered as a hard line break; the edited `value` attr overrides the initial content and is what gets submitted); **`<progress>`/`<meter>`** render as filled bars proportional to `value`/`max`, meter offset by `min`, indeterminate progress (no value) shows a centered activity chunk; **`<input type=password>`** masks its value with bullets (`•`) so it never renders in cleartext (the value still submits normally); **`<input type=color>`** renders its value as a color swatch; **`<input type=range>`** renders a track + thumb at the value position; **`accent-color`** tints checkbox/radio fills, progress/meter bars, and range thumbs; **interactive checkbox/radio toggling + `<select>` cycling** — clicking an id'd checkbox flips its `checked` state, a radio selects within its `name`-group (clearing the rest), and a `<select>` advances to its next option (wrapping — the deterministic, popup-free model); the choice persists across re-renders (`checked`/`selected`-by-id maps re-applied like typed values) and feeds both the drawn state and form submission; **`<label>` activation** — clicking a `<label>` focuses its associated text field or toggles its checkbox/radio/select (resolved by `for=` or the first labelable descendant; a sentinel-href link the content process intercepts, like the disclosure toggle); **`<details>`/`<summary>` disclosure toggling** — clicking a `<summary>` flips its `<details>` `open` state (a sentinel-href `LinkBox` the content process intercepts to toggle the details, keyed by document-order index, re-applied like the other control state — reusing the link hit-test/shift path with no new plumbing); **GET form submission** — clicking a submit control (`<button>` or `<input type=submit/image>`) serializes the enclosing `method=get` form's successful controls (text inputs, checked checkbox/radio, `<select>` value, `<textarea>`, + the activated submit's own `name=value`) as `application/x-www-form-urlencoded` and navigates to `action?query`, reusing the link/click→navigate path — typed values flow in via the live DOM; **Enter in a focused text field implicitly submits its form** the same way (content's `InputKey` replies with a `ClickResult` navigation url, mirroring the click contract); **`method=post` form submission** — POST submit buttons emit a `SubmitRegion` (action + urlencoded body) instead of a link; clicking one (or Enter in a POST form) makes content reply with a `ClickResult` carrying a `post_body`, the browser `PostUrl`s it to the net service (rsurl POST, threaded through the cookie jar, never cached), and the response renders with the action URL pushed to history (back/forward re-GET; the body is not replayed)), **broken-image `alt` text** (an unresolved `<img>` with `alt` renders the text in its place), **`object-fit`** (contain — scaled to fit preserving aspect, centered/letterboxed; **cover** — fills the box and crops the source overflow via a sub-rect blit; fill — default stretch) + **`object-position`** (keyword/percentage alignment of the fitted image or crop window within the box; default centered) + **`filter`** on images (`grayscale`/`sepia`/`invert`/`opacity`/`brightness`/`contrast`/`saturate` color-tone functions applied per-pixel at blit time; `blur` parsed but not yet applied; filters on non-image elements still want offscreen compositing), **flexbox** (row + **`flex-direction: column`**, fixed item widths, **`justify-content`** — flex-start/end/center/space-between/around/evenly on the main axis (row free space when items are fixed-width; column free space when the container has an explicit `height`) — and **`align-items`** cross-axis flex-start/end/center for both row and column, with per-item **`align-self`** override on the main row), **`flex-basis`** (base main size, incl. the `flex` shorthand third value â `flex: 1` â basis 0 for equal items) + **`flex-grow`** (shrink-to-content base size via a max-content intrinsic-width measure, free space split by grow weights; `flex` shorthand grow component), **`flex-wrap`** (items pack onto multiple lines at their base size, breaking on overflow; lines stack `gap` apart with per-line `align-items` and per-line `justify-content`), **`flex-shrink`** (overflowing items compress in proportion to `shrink × base size`; `flex`-shorthand shrink component; `flex-shrink:0` opts out; items won't shrink below their `min-width`), **`order`** (reorders flex items, stable for equal order), **grid** (row-major flow, **`grid-template-columns`/`grid-template-rows` with mixed fixed lengths + `fr` units + `auto`, and `repeat()`/`minmax()`** (explicit fixed row heights override the content measure) — tracks held in a fixed-size `Copy` array, fr units sharing leftover space; **`grid-column`/`grid-row: span N`** item spans across columns *and* rows via a proper cell-occupancy auto-placement — items flow into the next free slot, spanning cells are reserved, and row heights are measured then deficits pushed to the last spanned row; **line-based placement** — `grid-column`/`grid-row` (`2 / 4` or `-start`) pin an item to an explicit column/row line; a pinned-only axis scans the other for the first fit, a fully-pinned item is placed exactly) + **gap** (incl. **separate `row-gap`/`column-gap`** and the two-value `gap` shorthand), **`margin: 0 auto` block centering**, **CSS logical properties** (`inline-size`/`block-size` + min/max, `margin`/`padding`/`inset`-`inline`/`block`(-`start`/`-end`) mapped to physical for horizontal-tb), **`min-height`**/**`max-height`** (max-height caps an explicit/aspect height, never below actual content), **`overflow: hidden`/`clip`** (descendant paint — rects, text runs, images — is confined to the element's border box via a clip rect honored by the rasterizer and image blit; a definite `height` becomes a hard size so following siblings flow after it; nested clips intersect, and clips shift/track with `position: relative`) + **`clip-path: inset()`** (clips the element and descendants to a rectangle inset from the border box — `round` radius dropped, non-`inset()` shapes ignored — reusing the same clip mechanism), **`aspect-ratio`**, **bold text** (`font-weight: bold`/`<b>`/`<strong>`, faux-bolded by glyph overprint) + **italic text** (`font-style: italic`/`<i>`/`<em>`, faux-slanted by an x-shear) + **per-run font selection** (`font-family` resolves to a face key — a web-font family hash, the `monospace` generic / known fixed-width family, or the default — threaded through every measure/shape site) + **web fonts (`@font-face`)** (the sheet's `@font-face` faces are fetched (data-URL or via the browser) and registered under the family key, then used to shape matching runs; the `src` list prefers a decodable format (raw sfnt > **WOFF** (zlib) > **WOFF2** (Brotli) — WOFF/WOFF2 are unwrapped to a bare sfnt: WOFF zlib-inflates its tables, WOFF2 Brotli-decompresses and reverses the glyf/loca transform; `local()`/EOT/SVG skipped); UA `<code>`/`<pre>`/`<kbd>`/`<samp>`/`<tt>`/`<textarea>` default to monospace; **weight/style matching** — `@font-face` `font-weight`/`font-style` register distinct faces per family, a bold/italic run selects the matching face, and faux bold/italic synthesis is suppressed when a real styled face is used) + **`text-shadow`** (offset + color, painted behind the glyphs; blur ignored) + **`box-shadow`** (outer offset + spread + color rect behind the box; **blur** faux-rendered as fading concentric layers; inset ignored), underline + **line-through** + **overline** (with **`text-decoration-color`** and **`text-decoration-style`** — solid, **double** (two parallel lines), **dotted**/**dashed** (segmented), wavy falls back to solid; decorations propagate to descendant inline boxes â a link's nested markup stays underlined â while a child's `text-decoration: none` overrides), **border-radius**, **per-side border colors** (`border-top/right/bottom/left-color`) + **`border-style`** (none/hidden whole-border or per-side suppression; **solid**, **double** (two concentric frames), **dotted**/**dashed** (segmented) drawn as a uniform frame), **`background-image: url()`** (bitmap backgrounds — the URL is resolved at layout time via `cascaded_value` since it can't ride in the `Copy` style; painted behind the element's content by a two-pass render — rects → background images → text — tiled by default or `background-repeat: no-repeat`, clipped to the element box; **`background-size: cover`/`contain`** scale the image to fill/fit the box (painted once) and **`background-position`** (keyword/percentage) places the scaled or no-repeat image — so hero backgrounds work), **`background: linear-gradient`** (axis-aligned, `to <side>` or `<angle>` in deg/grad/rad/turn, **multi-stop** with explicit `%` positions or even default spacing — up to 8 stops, hard stops and `currentColor` supported — painted as stepped strips) + **`radial-gradient`** (**multi-stop** center→edge, shape/position prefix ignored, painted as concentric rounded rects), **opacity**, **color syntax** (`#rgb(a)`/`#rrggbb(aa)`, `rgb()`/`rgba()`/`hsl()`/`hsla()`/`hwb()`/`oklab()`/`oklch()` with comma or CSS Color 4 space/slash separators and number-or-percentage alpha, plus the full CSS named-color set, and **`color-mix()`** weighted blends). WOFF2 (Brotli) web fonts, **`direction: rtl`/`dir=rtl`** right-aligns by default (block direction) + **character-level bidi reordering** (UAX#9: scribe's class/weak/neutral passes + implicit I1/I2 levels + L1 trailing-WS reset + L2 run reversal, reordering logical→visual so the LTR shaper paints RTL/mixed text correctly — Hebrew and mixed L/R/numbers correct; **Arabic contextual joining** — letters are reshaped to their Presentation-Forms-B glyphs (isolated/initial/medial/final by neighbour, incl. LAM-ALEF ligatures) before reordering, so Arabic renders joined; reordering is per-line). AVIF (av1) + `<video>` first-frame (both wired through the oxideav demux/codec pipeline, graceful-`None` until the upstream pixel codecs land), continuous video/audio playback, GPU compositor & Phase-2 wall-clock/continuous-event JS remain |
-| 5 — Web platform & headless | 🟡 headless surfaces: `--dump-page` (off-screen render to PNG, with **`--width`/`--height`** for responsive screenshots — width drives `@media`/layout), `--dump-dom`, `--dump-a11y`, **`--dump-text`** (skips `hidden`/inline `display:none`/`visibility:hidden` elements), **`--dump-links`** (text + resolved hrefs for `<a>` and `<area>` image-map links, for crawling), **`--dump-headings`** (heading outline), **`--dump-forms`** (forms + controls with name/type/value, for scripted form-filling/scraping), **`--dump-meta`** (title/lang/charset/description/canonical/favicon `icon`/`alternate:<lang>` hreflang/RSS-Atom `feed`/`http-equiv` (refresh) /`og:`+`twitter:` social tags, for SEO/scraping), **`--dump-json`** (machine-readable `{title, headings, links}` JSON with proper escaping, for automation pipelines), **`--dump-jsonld`** (every `<script type="application/ld+json">` block's verbatim body, wrapped into one JSON array, for structured-data scraping/SEO), **`--dump-microdata`** (HTML `itemscope`/`itemprop` items as `{type, props}` JSON, resolving URL-valued props), **`--dump-domtree`** (the post-script DOM as a nested `{tag, attrs, children}` JSON tree — a CDP-style structured snapshot), **`--dump-tables`** (each `<table>` as TSV rows, for data scraping), **`--dump-images`** (each `<img>` as `src`/`alt`/dimensions, falling back to the best `srcset` candidate when `src` is absent), `--eval` (JS). Web API breadth (needs JS bindings) and full CDP remain. **On-disk `localStorage` persistence** is DONE — the trusted browser owns a store file (`$ARGUS_STORAGE` or `~/.argus_localstorage`), seeds each (per-tab) content process at spawn via `ProvideStorage`, and rewrites the file when a content process reports a `StorageChanged` after a script run, so `localStorage` survives browser restarts (escaped `key\tvalue` text form shared via `argus_protocol::encode_storage`/`decode_storage`) |
-| 6 — Media & richer rendering | 🟡 PNG + GIF + **JPEG** (oxideav-mjpeg registry decoder, YUV→RGBA via oxideav-pixfmt) + **WebP** (lossless + lossy VP8) + **QOI** (oxideav-qoi) + **ICO/CUR favicons** (oxideav-ico, largest sub-image) + **BMP** (1/4/8-bit palette incl. RLE4/RLE8, uncompressed 24/32-bit) + **TGA** (Truevision true-color 24/32-bit, 8-bit grayscale, *and* 8-bit color-mapped/palette, uncompressed + RLE, vertical-flip aware, structurally validated so it fails closed) + **Netpbm** (PPM `P3`/`P6` RGB and PGM `P2`/`P5` grayscale, ASCII + binary, comment-aware, sample-scaled) + **PCX** (ZSoft RLE, 24-bit 3-plane RGB and 8-bit palette-indexed) + **TIFF** (baseline uncompressed + PackBits + LZW + Deflate/zlib RGB / RGBA / grayscale, 8- and 16-bit samples, horizontal-differencing predictor, little- and big-endian, multi-strip and tiled) image decode. **`<video>`/`<audio>` placeholders** (a dark video box with a play square, or a `<video poster>` painted as its frame; a thin audio control bar) plus **`<video>` first-frame wiring** — `poster`, `src`, and `<source>` URLs are fetched and decoded through the first-party demux pipeline (`argus-image::decode_video_frame`: oxideav-mp4/oxideav-mkv container probe + demux → oxideav-h264/vp9/av1 codec) and rendered as the video's frame still; graceful-`None` until the upstream pixel codecs land, then real frames with no further changes. The **multi-frame decode core** is also wired forward-compatibly — `argus_image::decode_video_frames(bytes, max_frames)` demuxes and decodes up to N leading frames in presentation order (draining B-frame reorder per packet), the decode half of `<video>` playback/scrubbing; graceful-empty until the upstream pixel codecs land, fuzz-verified to fail closed. Continuous playback scheduling (A/V sync, seeking, audio out, wall-clock) is the remaining media-service work; animations, GPU compositor remain |
-| 7 — Hardening / perf / conformance | 🟡 started — parser + **full layout-pipeline** robustness tests (random inputs, biased toward floats/positioning/`fr` tracks; assert finite geometry across rects/runs/images) + **CSS robustness** (random input through stylesheet + inline-declaration parsers, selector specificity/pseudo-element, value parsers — never panics) + cargo-fuzz harness (html/css/**layout**/**image**, full-geometry finiteness invariants; css selector + declaration-block paths; the image target asserts every decode fails closed *and* any decoded buffer is exactly `w*h*4`) + **image-decoder fuzz** (all formats fail closed on hostile bytes — including the AVIF + `<video>` first-frame **demux/codec** container paths, exercised through the in-crate robustness test) + **DOM-ops JSON fuzz**, **accessibility tree** (implicit + explicit `role` — incl. input-`type`-refined roles like checkbox/radio/button/searchbox/slider, listbox/option, separator/meter/spinbutton, rowheader/columnheader (`<th scope>`), region/article/complementary/dialog/figure/group; `aria-label`/**`aria-labelledby`** (referenced elements joined), **caption naming** (`<figure>`/`<fieldset>`/`<table>` named by `<figcaption>`/`<legend>`/`<caption>`), **`<label>` association** (for= or wrapping label names a form control), `aria-hidden` pruning, `role=presentation`/`none` semantics-stripping, and ARIA/native **state annotations** `[disabled]`/`[checked]`/`[required]`/`[pressed]`/`[expanded=…]`/`[current=…]`). WPT, perf, sandbox hardening remain |
+Per-phase detail follows. Each phase lists its state and the concrete capabilities
+shipped so far; the trailing "remaining" bullet in each phase names what is still
+open. (This used to be a single mega-table with one thousand-word cell per phase —
+it is now broken into sections and lists for readability.)
+
+### Phase 0 — Foundations / multi-process — ✅ complete
+
+- Sandbox, IPC, shared-memory framebuffer, AppKit window, CI.
+
+### Phase 1 — Static document to pixels — ✅ essentially complete
+
+- **HTML → DOM** with an **html5lib-format tree-construction conformance harness** at
+  100% over a curated core set: implicit `tbody`/`tr`, `p`/`li`/`dt`/`dd`/`option`/
+  `button` auto-closing, `pre`/`textarea` leading-newline strip, table text
+  **foster-parenting**, RCDATA/RAWTEXT.
+- **CSS cascade + box model**, block/inline layout, lists/`<hr>`.
+- **Text shaping + raster**, with **glyph-fallback fonts** — emoji/CJK/symbol system
+  faces pushed onto the `FaceChain` for code points the primary font lacks.
+- **Networking** over rsurl.
+- **Images** PNG/GIF/JPEG/WebP/QOI/ICO/BMP: CSS `width`/`height` size images (over the
+  legacy attrs), oversized images shrink to the content box keeping aspect,
+  **`max-width`** caps images (the `max-width:100%` responsive idiom); sized images
+  **flow inline** with text as atomic boxes honoring `vertical-align`; responsive
+  images resolve consistently (**`srcset`** picks the best `w`/`x` candidate,
+  **`<picture>`** selects the first `<source>` whose `type` we decode and whose
+  `media` matches before falling back to the `<img>`); broken images fall back to
+  block alt text.
+
+### Phase 2 — Scripting & dynamic DOM — 🟡 in progress
+
+Page `<script>` runs in kataan; **synchronous DOM bindings work** via a JS-side shim
++ reconciliation — no kataan host-callback API needed (ES6 Proxy / `Object.define-
+Property` / `JSON` suffice).
+
+- **DOM query/build**: `document.getElementById` / `querySelector` (full selector
+  engine) / `querySelectorAll` / `getElementsByTagName` / `getElementsByClassName`
+  (JS-side collections over a seeded element tree, scoped too) / `createElement` /
+  `body` / `write`.
+- **Element ops**: `textContent` / `innerHTML` / `className` / `classList` /
+  `setAttribute` / `style.*` / scoped `querySelector`; **tree traversal**
+  (`parentElement`/`children`/`nextElementSibling`/…, `nodeType`/`nodeName`/`tagName`/
+  `hasChildNodes`, `document.documentElement`/`head`/`body`); `matches`/`closest`/
+  `contains`; `appendChild`/`prepend`/`before`/`after`/`replaceWith`/`replaceChildren`/
+  `insertAdjacentElement`/`remove`. The shared `argus-domscript` crate makes
+  `--dump-dom`/`--dump-text`/`--dump-a11y` reflect the post-script DOM.
+- **Interactive click events**: `addEventListener('click')`/`onclick` fire and
+  accumulate JS + DOM state via deterministic event replay (the windowed browser
+  hit-tests id'd elements and re-runs the history).
+- **Timers**: `setTimeout`/`setInterval`/`requestAnimationFrame` callbacks run
+  (drained synchronously, delay-ordered, no wall clock; rAF gets a synthetic
+  timestamp).
+- **Storage + location**: `localStorage` (persisted across navigations in-session) /
+  `sessionStorage`; `window.location` (read-only view seeded from the page URL:
+  `href`/`protocol`/`hostname`/`pathname`/`search`/`hash`/`origin`).
+- **Keyboard text input**: click a text field to focus and type (backspace deletes;
+  **`maxlength` caps the length**); typed values survive event replay.
+- **Focus ring + Tab navigation**: the focused field is marked with a `__argus_focus`
+  sentinel attribute each render so the UA sheet draws a blue focus outline, and
+  **Tab** advances focus to the next editable field (wrapping, skipping non-editable
+  controls).
+- **Promises/microtasks + `async`/`await`**: DOM writes inside `Promise.then` /
+  awaited continuations are reconciled — scripts run through
+  `argus_script::run_with_followup`, which drains kataan's event loop before the
+  recorded ops are read back.
+- **Geometry read-back**: `getBoundingClientRect`/`getClientRects`/`offset*`/`client*`
+  return the real box of an `id`'d element from the most recent layout (one frame
+  behind, fed back deterministically; no-geometry reads zero; `scrollTop/Left` stay
+  0); `window.innerWidth/innerHeight/scrollX/scrollY/pageXOffset/pageYOffset` reflect
+  the real viewport + scroll; `window.getComputedStyle(el)` returns a curated property
+  set (color/background-color/display/font-size/-weight/-style/text-align/opacity/
+  visibility) computed by the cascade and fed back like geometry.
+- **Remaining**: real-time (wall-clock) timers, continuous events (mousemove/keydown),
+  on-disk storage across browser restarts, and reading back computed layout still want
+  a real embedding API ([upstream/kataan.md](upstream/kataan.md)).
+
+### Phase 3 — Chrome, navigation & services — 🟡 in progress
+
+- **Navigation**: links → fetch → re-render, with **charset-aware HTML decoding**
+  (UTF-8 when valid/declared, else windows-1252/Latin-1 so legacy pages don't
+  mojibake); URL + subresource resolution incl. **`<base href>`** overriding the
+  relative base for the headless extractors.
+- **Scrolling**: **scroll-wheel** + **keyboard scrolling** (Page Up/Down, Space, arrow
+  up/down, Home/End scroll when no text field is focused — content computes the
+  clamped target offset and reports it via the scroll sentinel, so Space still types
+  into a focused field).
+- **`#fragment` anchors**: clicking `<a href="#id">` scrolls to the target's document
+  position instead of reloading (content reports the Y via a `\u{1}scroll:` sentinel
+  `ClickResult`; the browser clamps + sets the tab's scroll and re-renders);
+  **cross-page `page#id` deep links** scroll too (after the navigation renders, the
+  browser sends `ScrollToFragment` and applies the reported Y).
+- **Networking**: **persistent cookie jar**; **HTTP cache** (Cache-Control `max-age` +
+  `Expires`/`Date` freshness; **conditional revalidation** — stale `ETag`/
+  `Last-Modified` entries refetch with `If-None-Match`/`If-Modified-Since` and refresh
+  in place on `304`).
+- **CSP enforcement** (inline-script `script-src`/`default-src`) from `<meta>` and
+  response headers, **all policies enforced** (multiple metas + headers; strictest
+  wins) via `apply_scripts_with_csp`: `script-src-elem` CSP3 precedence;
+  **`'nonce-…'` allow-listing** (case-sensitive; `'unsafe-inline'` ignored when a
+  nonce source is present, per CSP3); **`'sha256/384/512-…'` hash-source allow-listing**
+  (inline-script body digest via **purecrypto**, base64-compared; hashes disable
+  `'unsafe-inline'` per CSP3).
+- **History**: **reload** (Cmd+R, keeping scroll position); **back/forward** (Cmd+`[`/
+  `]`) with **per-entry scroll restoration** (each entry remembers the offset it was
+  left at; a new navigation starts at the top).
+- **Multi-tab**: Cmd+T new / Cmd+W close / Cmd+Shift+`[`/`]` prev-next / Cmd+1…9 jump —
+  each tab keeps its own history + scroll; a **visual tab-bar** (per-tab rectangles
+  with the active one accented, a `+` button; clicks switch / close (right edge) /
+  open; page clicks offset past the strip); **one isolated content process per tab**
+  (own sandboxed process, DOM/JS/scroll preserved when inactive, instant switch-back;
+  closing a tab shuts down + reaps it).
+- **Remaining**: threading the CSP header across IPC to the apply site; more CSP
+  directives.
+
+### Phase 4 — Layout & CSS breadth — 🟡 in progress
+
+**Box model & block flow**
+
+- Box model, **`box-sizing`**, **`display: inline-block`** (atomic box laid at the
+  origin then shifted into the inline line, sizing the line box to its height),
+  **min/max-width**, **line-height**, **`margin: 0 auto`** block centering.
+- **`float: left/right`** (out-of-flow at the content-box edge, inline text flows
+  around it via per-line float bands; floats contained by their block; multiple stack
+  then drop to the next band) + **`clear: left/right/both`**.
+- **position: relative** + **absolute/fixed** (absolute anchored to the nearest
+  positioned ancestor's padding box via `top`/`left`/`right`/`bottom`; fixed to the
+  viewport).
+- **CSS logical properties** (`inline-size`/`block-size` + min/max, `margin`/`padding`/
+  `inset`-`inline`/`block`), **`min-height`**/**`max-height`**, **`aspect-ratio`**.
+- **`overflow: hidden`/`clip`** (descendant paint confined to the border box; a
+  definite `height` becomes a hard size; nested clips intersect and track
+  `position: relative`) + **`clip-path: inset()`**.
+
+**Inline & text wrapping**
+
+- text-align (incl. **justify** + direction-relative **start/end**),
+  **text-transform**, **`letter-spacing`**, **`word-spacing`**, **`text-indent`**.
+- **white-space: pre/nowrap/pre-line/pre-wrap** (+ **`tab-size`**),
+  **`overflow-wrap`/`word-break: break-word`**, **`<wbr>` + `&shy;` + ZWSP** breaks,
+  **`&nbsp;` non-breaking**, **`text-overflow: ellipsis`**, **visibility**, **`<br>`**,
+  **vertical-align** (sub/sup; top/middle/bottom for inline-block boxes).
+
+**Positioning effects, transforms, outline**
+
+- **`outline` + `outline-offset` + `outline-style`** (outside the border box, no layout
+  effect; solid/double/dotted/dashed).
+- **`transform: translate()`** and **`scale()`** (paint the subtree shifted/scaled; no
+  layout effect).
+
+**Generated content, at-rules, custom properties**
+
+- **`::before`/`::after`** (string `content` + **`attr()`** + concatenation, inline &
+  block; CSS `\<hex>` escapes; **`open-quote`/`close-quote`**, UA `<q>` quotes; **CSS
+  counters**).
+- **`@media`** (min/max-width + prefers-color-scheme/hover/pointer/orientation),
+  **`var()`** + **`calc()`/`min()`/`max()`/`clamp()`**, **`@supports`**.
+
+**Selectors** (descendant/child/`+`/`~` combinators; correct specificity)
+
+- attribute, `:first/last/only-child`, **`:nth-child`/`:nth-last-child`**,
+  **`:first/last/only/nth/nth-last-of-type`**.
+- **`:not()`** (CSS4 list form), **`:is()`/`:where()`**, **`:has()`** (relational —
+  `div:has(img)`, `:has(> .x)` tolerated; contributes the argument's specificity),
+  **`:root`/`:empty`/`:lang()`**.
+- **form-state** (`:checked`/`:disabled`/`:enabled`/`:required`/`:read-only`/
+  `:optional`/`:read-write`), **`:focus`/`:focus-visible`/`:focus-within`**
+  (focused field marked `__argus_focus` before the cascade), **`:placeholder-shown`**,
+  **`:target`** (URL-fragment element — CSS-only tabs/lightboxes work).
+
+**Lists / tables / legacy attrs**
+
+- **list-style-type** (disc/circle/square, decimal(-leading-zero), lower/upper-alpha,
+  lower/upper-roman, lower-greek) + **`<ol start>`/`reversed`/`<li value>`** + **`type`
+  attr** + **`list-style-position`**, `<hr>`.
+- **tables**: content-based ("auto") column widths + **`<colgroup>`/`<col>`** pinning,
+  **`colspan`/`rowspan`**, **`caption-side`**, **`<thead>`/`<tfoot>`** reordering,
+  **`border-spacing`**, **`border-collapse: collapse`**, **cell `vertical-align`**.
+- **legacy presentational attributes** (`align`, `bgcolor`/`<font>`, cell `width`/
+  `height`, `<table border>`/`cellpadding`, `<td nowrap>`, `<hr>` attrs, `<center>`)
+  mapped to CSS; UA defaults for `<fieldset>`/`<legend>`, `<dd>` indent, hidden
+  `<template>`/`<datalist>`/closed `<dialog>`/`<input type=hidden>`.
+
+**Form controls & interaction**
+
+- input/textarea/button render with their value; submit/reset default labels;
+  **editable `<textarea>`** (multi-line; Enter inserts a newline; edited `value`
+  submits); **`<progress>`/`<meter>`** bars; **`<input type=password>`** masked (value
+  still submits); **`<input type=color>`** swatch; **`<input type=range>`** track+thumb;
+  **`accent-color`**.
+- **checkbox/radio toggling + `<select>` cycling** (click an id'd control to
+  flip/select/advance; persisted via `checked`/`selected` maps, fed to submission);
+  **`<label>` activation**; **`<details>`/`<summary>` disclosure** (sentinel-href the
+  content process intercepts).
+- **GET form submission** (serialize the `method=get` form to `action?query`; **Enter**
+  submits too); **`method=post` submission** (`SubmitRegion`/`post_body` → browser
+  `PostUrl`s to the net service, rsurl POST through the cookie jar, never cached;
+  action URL pushed to history, body not replayed).
+
+**Images**
+
+- **broken-image `alt` text**; **`object-fit`** (contain/cover/fill) +
+  **`object-position`**; **`filter`** on images (`grayscale`/`sepia`/`invert`/`opacity`/
+  `brightness`/`contrast`/`saturate` per-pixel; `blur` parsed not applied; non-image
+  filters want offscreen compositing).
+
+**Flexbox**
+
+- row + **`flex-direction: column`**, **`justify-content`**, **`align-items`** +
+  **`align-self`**; **`flex-basis`** (+ `flex` shorthand), **`flex-grow`**,
+  **`flex-wrap`** (per-line align/justify), **`flex-shrink`** (respects `min-width`),
+  **`order`**.
+
+**Grid**
+
+- row-major flow, **`grid-template-columns`/`-rows`** (fixed + `fr` + `auto` +
+  `repeat()`/`minmax()`), **`span N`** across columns & rows (cell-occupancy
+  auto-placement, measured heights), **line-based placement** (`2 / 4` / `-start`),
+  **gap** (+ separate `row-gap`/`column-gap` + shorthand).
+
+**Text styling & fonts**
+
+- **bold** + **italic** (faux overprint / x-shear) + **per-run font selection**
+  (`font-family` → face key) + **web fonts (`@font-face`)** (fetched + registered; `src`
+  prefers raw sfnt > **WOFF** (zlib) > **WOFF2** (Brotli); UA monospace for
+  `<code>`/`<pre>`/…; **weight/style matching** suppresses faux synthesis).
+- **`text-shadow`** (blur ignored), **`box-shadow`** (blur as fading concentric layers;
+  inset ignored), underline + **line-through** + **overline** (with
+  **`text-decoration-color`/`-style`** solid/double/dotted/dashed; propagate to
+  descendant inlines, child `none` overrides).
+
+**Borders, backgrounds, color**
+
+- **border-radius**, **per-side border colors**, **`border-style`** (none/hidden,
+  solid/double/dotted/dashed).
+- **`background-image: url()`** (URL resolved at layout via `cascaded_value`; two-pass
+  render rects → backgrounds → text; tiled or `no-repeat`, clipped; **`background-size:
+  cover`/`contain`** + **`background-position`** — hero backgrounds work), **`background:
+  linear-gradient`** (multi-stop, `to <side>`/`<angle>`) + **`radial-gradient`**.
+- **opacity**, **color syntax** (`#rgb(a)`/`#rrggbb(aa)`, `rgb()`/`hsl()`/`hwb()`/
+  `oklab()`/`oklch()`, full named-color set, **`color-mix()`**).
+
+**Bidi & Arabic**
+
+- **`direction: rtl`/`dir=rtl`** + **character-level bidi reordering** (UAX#9) +
+  **Arabic contextual joining** (Presentation-Forms-B reshaping); per-line.
+
+**Remaining**: AVIF (av1) + `<video>` first-frame are wired through the oxideav
+demux/codec pipeline but graceful-`None` until the upstream pixel codecs land;
+continuous video/audio playback, GPU compositor & Phase-2 wall-clock/continuous-event
+JS remain.
+
+### Phase 5 — Web platform & headless — 🟡 in progress
+
+- **Headless surfaces**: `--dump-page` (off-screen render to PNG; **`--width`/
+  `--height`** drive `@media`/layout), `--dump-dom`, `--dump-a11y`, **`--dump-text`**
+  (skips hidden/`display:none`/`visibility:hidden`), **`--dump-links`** (`<a>`/`<area>`
+  hrefs), **`--dump-headings`**, **`--dump-forms`** (controls with name/type/value),
+  **`--dump-meta`** (title/lang/charset/description/canonical/favicon/hreflang/feed/
+  refresh/`og:`+`twitter:`), **`--dump-json`** (`{title, headings, links}`),
+  **`--dump-jsonld`** (every ld+json block), **`--dump-microdata`** (`itemscope`/
+  `itemprop` → `{type, props}`), **`--dump-domtree`** (post-script DOM as nested JSON —
+  a CDP-style snapshot), **`--dump-tables`** (TSV), **`--dump-images`** (src/alt/dims,
+  srcset fallback), `--eval` (JS).
+- **On-disk `localStorage` persistence** — the trusted browser owns a store file
+  (`$ARGUS_STORAGE` or `~/.argus_localstorage`), seeds each content process at spawn
+  via `ProvideStorage`, and rewrites the file on `StorageChanged`, so it survives
+  restarts (escaped `key\tvalue` via `encode_storage`/`decode_storage`).
+- **Remaining**: Web API breadth (needs JS bindings) and full CDP.
+
+### Phase 6 — Media & richer rendering — 🟡 in progress
+
+- **Image decode**: PNG + GIF + **JPEG** (oxideav-mjpeg, YUV→RGBA) + **WebP** (lossless
+  + lossy VP8) + **QOI** + **ICO/CUR favicons** + **BMP** (1/4/8-bit palette incl.
+  RLE4/RLE8, 24/32-bit) + **TGA** (true-color/grayscale/palette, RLE, fails closed) +
+  **Netpbm** (PPM/PGM, ASCII + binary) + **PCX** (RLE) + **TIFF** (uncompressed/
+  PackBits/LZW/Deflate, 8/16-bit, predictor, strips + tiles, both byte orders).
+- **`<video>`/`<audio>` placeholders** (dark video box with a play square, or a
+  `<video poster>` as its frame; a thin audio bar) plus **`<video>` first-frame wiring**
+  — poster/src/`<source>` URLs decoded through the first-party demux pipeline
+  (`decode_video_frame`: oxideav-mp4/mkv probe + demux → oxideav-h264/vp9/av1) and
+  rendered as the frame still; graceful-`None` until the upstream codecs land.
+- **Multi-frame decode core** — `decode_video_frames(bytes, max_frames)` demuxes +
+  decodes up to N leading frames in presentation order (draining B-frame reorder), the
+  decode half of playback/scrubbing; graceful-empty until the codecs land, fuzz-verified
+  to fail closed.
+- **Remaining**: continuous playback scheduling (A/V sync, seeking, audio out,
+  wall-clock); animations; GPU compositor.
+
+### Phase 7 — Hardening / perf / conformance — 🟡 started
+
+- **Robustness tests**: parser + **full layout-pipeline** (random inputs, finite
+  geometry across rects/runs/images) + **CSS robustness** (stylesheet + inline-decl
+  parsers, selectors, value parsers — never panic).
+- **cargo-fuzz harness** (html/css/**layout**/**image**; the image target asserts every
+  decode fails closed *and* any decoded buffer is exactly `w*h*4`) + **image-decoder
+  fuzz** (all formats fail closed on hostile bytes — incl. the AVIF + `<video>`
+  first-frame demux/codec container paths) + **DOM-ops JSON fuzz**.
+- **Accessibility tree**: implicit + explicit `role` (input-`type`-refined roles,
+  listbox/option, separator/meter/spinbutton, rowheader/columnheader, region/article/
+  …); `aria-label`/`aria-labelledby`; caption naming (`<figcaption>`/`<legend>`/
+  `<caption>`); `<label>` association; `aria-hidden` pruning; `role=presentation`/`none`;
+  state annotations (`[disabled]`/`[checked]`/`[required]`/`[pressed]`/`[expanded]`/
+  `[current]`).
+- **Remaining**: WPT, perf, sandbox hardening.
+
 
 Honest scope note: **`document`/`window` bindings now work** without any kataan
 changes — kataan supports enough JS (ES6 `Proxy` traps, `Object.defineProperty`,
