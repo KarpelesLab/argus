@@ -130,6 +130,11 @@ pub struct Compound {
     pub is_groups: Vec<Vec<Compound>>,
     /// `:where(...)` groups — like `:is()`, but contribute **zero** specificity.
     pub where_groups: Vec<Vec<Compound>>,
+    /// `:has(...)` groups — each a list of alternatives matched against the
+    /// element's *descendants*; the group matches if some descendant matches some
+    /// alternative. Every group must be satisfied. Contributes the most specific
+    /// argument's weight (like `:is()`).
+    pub has_groups: Vec<Vec<Compound>>,
     /// `:lang(...)` groups — one per `:lang()`, each an OR-list of primary subtags
     /// (lowercased). The compound matches only if the element's language (its own
     /// or nearest ancestor `lang`) matches at least one tag in **every** group.
@@ -172,8 +177,8 @@ impl Selector {
                     s = s.add(max);
                 }
             }
-            // `:is()` contributes the specificity of its most specific argument.
-            for group in &c.is_groups {
+            // `:is()` / `:has()` contribute their most specific argument's weight.
+            for group in c.is_groups.iter().chain(&c.has_groups) {
                 if let Some(max) = group.iter().map(compound_specificity).max() {
                     s = s.add(max);
                 }
@@ -205,7 +210,7 @@ fn compound_specificity(c: &Compound) -> Specificity {
             s = s.add(max);
         }
     }
-    for group in &c.is_groups {
+    for group in c.is_groups.iter().chain(&c.has_groups) {
         if let Some(max) = group.iter().map(compound_specificity).max() {
             s = s.add(max);
         }
@@ -393,6 +398,7 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                         let is_is = !double && fname.eq_ignore_ascii_case("is");
                         let is_where = !double && fname.eq_ignore_ascii_case("where");
                         let is_lang = !double && fname.eq_ignore_ascii_case("lang");
+                        let is_has = !double && fname.eq_ignore_ascii_case("has");
                         *i += 1;
                         // Capture the argument tokens up to the matching ')'.
                         let mut args = Vec::new();
@@ -435,22 +441,31 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                             if !group.is_empty() {
                                 c.negations.push(group);
                             }
-                        } else if is_is || is_where {
-                            // `:is(...)` / `:where(...)` — a comma-separated list of
-                            // compound alternatives; the group matches if any does.
+                        } else if is_is || is_where || is_has {
+                            // `:is(...)` / `:where(...)` / `:has(...)` — a comma-
+                            // separated list of compound alternatives. is/where match
+                            // the element itself; has matches a *descendant*. A
+                            // leading child combinator (`:has(> x)`) is tolerated by
+                            // skipping it (we match any descendant either way).
                             let group: Vec<Compound> = args
                                 .split(|t| *t == Token::Comma)
                                 .filter_map(|alt| {
                                     let mut j = 0;
                                     skip_ws(alt, &mut j);
+                                    if alt.get(j) == Some(&Token::Delim('>')) {
+                                        j += 1;
+                                        skip_ws(alt, &mut j);
+                                    }
                                     parse_compound(alt, &mut j)
                                 })
                                 .collect();
                             if !group.is_empty() {
                                 if is_is {
                                     c.is_groups.push(group);
-                                } else {
+                                } else if is_where {
                                     c.where_groups.push(group);
+                                } else {
+                                    c.has_groups.push(group);
                                 }
                             }
                         } else if is_lang {
@@ -678,6 +693,12 @@ fn matches_compound(doc: &Document, node: NodeId, compound: &Compound) -> bool {
             return false;
         }
     }
+    // `:has(...)` — each group must match some descendant of the element.
+    for group in &compound.has_groups {
+        if !descendant_matches_any(doc, node, group) {
+            return false;
+        }
+    }
     // `:lang(...)` — the element's language must match at least one tag per group.
     if !compound.langs.is_empty() {
         let lang = element_language(doc, node);
@@ -832,6 +853,14 @@ fn pseudo_matches(doc: &Document, node: NodeId, p: PseudoClass) -> bool {
 /// Whether `node` is an element carrying attribute `name`.
 fn element_has_attr(doc: &Document, node: NodeId, name: &str) -> bool {
     matches!(&doc.node(node).data, NodeData::Element(e) if e.attr(name).is_some())
+}
+
+/// Whether any descendant of `node` matches some alternative in a `:has()` group.
+fn descendant_matches_any(doc: &Document, node: NodeId, group: &[Compound]) -> bool {
+    doc.children(node).any(|c| {
+        group.iter().any(|alt| matches_compound(doc, c, alt))
+            || descendant_matches_any(doc, c, group)
+    })
 }
 
 /// Whether `node` or any descendant carries the focus marker (`:focus-within`).
@@ -1202,6 +1231,32 @@ mod tests {
         assert!(matches(&doc, empty, &sel("input:placeholder-shown")));
         assert!(!matches(&doc, filled, &sel(":placeholder-shown")));
         assert!(!matches(&doc, bare, &sel(":placeholder-shown")));
+    }
+
+    #[test]
+    fn has_relational_selector() {
+        // <div id=a><img></div> <div id=b><span>hi</span></div>
+        let mut doc = Document::new();
+        let root = doc.root();
+        let a = doc.create_element(QualName::html("div"), vec![Attribute::new("id", "a")]);
+        doc.append(root, a);
+        let img = doc.create_element(QualName::html("img"), vec![]);
+        doc.append(a, img);
+        let b = doc.create_element(QualName::html("div"), vec![Attribute::new("id", "b")]);
+        doc.append(root, b);
+        let span = doc.create_element(QualName::html("span"), vec![Attribute::new("class", "x")]);
+        doc.append(b, span);
+
+        // div:has(img) matches the div containing an image, not the other.
+        assert!(matches(&doc, a, &sel("div:has(img)")));
+        assert!(!matches(&doc, b, &sel("div:has(img)")));
+        // A leading child combinator is tolerated (matched as descendant).
+        assert!(matches(&doc, b, &sel("div:has(> .x)")));
+        // Class/compound argument and a non-matching case.
+        assert!(matches(&doc, b, &sel("div:has(span.x)")));
+        assert!(!matches(&doc, a, &sel("div:has(.x)")));
+        // :has() adds the argument's specificity (a class here) over a bare type.
+        assert!(sel("div:has(.x)").specificity() > sel("div").specificity());
     }
 
     #[test]
