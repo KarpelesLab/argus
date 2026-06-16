@@ -43,6 +43,8 @@ pub enum Event {
     PrevTab,
     /// Activate the tab at this 0-based index (Cmd+1…9; 9 = last tab).
     SwitchTab { index: usize },
+    /// Reload the active tab (Cmd+R).
+    Reload,
     /// The user asked to close the window.
     CloseRequested,
 }
@@ -231,6 +233,7 @@ impl Window {
                 0x5D => Some(Event::Forward),  // Cmd+']'
                 0x74 | 0x54 => Some(Event::NewTab),   // Cmd+T
                 0x77 | 0x57 => Some(Event::CloseTab), // Cmd+W
+                0x72 | 0x52 => Some(Event::Reload),   // Cmd+R
                 0x7D => Some(Event::NextTab),  // Cmd+Shift+']' → '}'
                 0x7B => Some(Event::PrevTab),  // Cmd+Shift+'[' → '{'
                 // Cmd+1..9 jump to a tab (9 = the last tab, per browser convention).

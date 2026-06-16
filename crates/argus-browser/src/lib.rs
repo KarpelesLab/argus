@@ -2393,6 +2393,12 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
                     reload_active!();
                 }
             }
+            Event::Reload => {
+                // Re-fetch and re-render the current page, keeping the scroll
+                // position (reload_active! restores a non-zero tab scroll).
+                log!("reloading");
+                reload_active!();
+            }
             Event::NewTab => open_tab!(),
             Event::CloseTab => {
                 if !close_tab!(tabs.active_index()) {
