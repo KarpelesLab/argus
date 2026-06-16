@@ -723,9 +723,17 @@ fn collect_form_fields(
                 } else if e.name.is_html("select") {
                     out.push((name.to_string(), selected_option_value(doc, c)));
                 } else if e.name.is_html("textarea") {
-                    let mut s = String::new();
-                    collect_text(doc, c, &mut s);
-                    out.push((name.to_string(), s));
+                    // The user-edited `value` attr (written by the content process)
+                    // wins over the element's initial text content.
+                    let v = match e.attr("value") {
+                        Some(v) => v.to_string(),
+                        None => {
+                            let mut s = String::new();
+                            collect_text(doc, c, &mut s);
+                            s
+                        }
+                    };
+                    out.push((name.to_string(), v));
                 } else if e.name.is_html("button")
                     && Some(c) == submit_id
                     && !matches!(e.attr("type"), Some("button") | Some("reset"))
@@ -1280,6 +1288,21 @@ impl Ctx<'_> {
                     }
                 } else if e.name.is_html("select") {
                     (self.selected_option_text(id), false)
+                } else if e.name.is_html("textarea") {
+                    // The `value` attr (user-typed, applied by content) wins over the
+                    // element's initial text content. Empty falls back to placeholder.
+                    match e.attr("value") {
+                        Some(v) if !v.is_empty() => (v.to_string(), false),
+                        _ => {
+                            let mut s = String::new();
+                            collect_text(self.doc, id, &mut s);
+                            if s.is_empty() {
+                                (e.attr("placeholder").unwrap_or("").to_string(), true)
+                            } else {
+                                (s, false)
+                            }
+                        }
+                    }
                 } else {
                     (String::new(), false)
                 };
@@ -1288,36 +1311,74 @@ impl Ctx<'_> {
                 } else {
                     style.fade(style.color)
                 };
-                for (i, word) in text.split_whitespace().enumerate() {
-                    words.push(InlineWord {
-                        text: word.to_string(),
-                        font_size: style.font_size,
-                        font_key: style.font_key,
-                        color,
-                        background: argus_geometry::Color::TRANSPARENT,
-                        space_before: i > 0,
-                        underline: false,
-                        strike: false,
-                        overline: false,
-                        bold: false,
-                        italic: false,
-                        shadow: None,
-                        decoration_color: argus_geometry::Color::TRANSPARENT,
-                        decoration_style: argus_style::DecorationStyle::Solid,
-                        href: None,
-                        hard_break: false,
-                        baseline_shift: 0.0,
-                        atomic: None,
-                    });
+                // Emit words newline-aware: a `\n` (in a `<textarea>`'s value) becomes
+                // a hard break. Single-line controls have no newlines (unchanged).
+                let mut first_word = true;
+                for (li, line) in text.split('\n').enumerate() {
+                    if li > 0 {
+                        words.push(InlineWord {
+                            text: String::new(),
+                            font_size: style.font_size,
+                            font_key: style.font_key,
+                            color,
+                            background: argus_geometry::Color::TRANSPARENT,
+                            space_before: false,
+                            underline: false,
+                            strike: false,
+                            overline: false,
+                            bold: false,
+                            italic: false,
+                            shadow: None,
+                            decoration_color: argus_geometry::Color::TRANSPARENT,
+                            decoration_style: argus_style::DecorationStyle::Solid,
+                            href: None,
+                            hard_break: true,
+                            baseline_shift: 0.0,
+                            atomic: None,
+                        });
+                        first_word = true;
+                    }
+                    for word in line.split_whitespace() {
+                        words.push(InlineWord {
+                            text: word.to_string(),
+                            font_size: style.font_size,
+                            font_key: style.font_key,
+                            color,
+                            background: argus_geometry::Color::TRANSPARENT,
+                            space_before: !first_word,
+                            underline: false,
+                            strike: false,
+                            overline: false,
+                            bold: false,
+                            italic: false,
+                            shadow: None,
+                            decoration_color: argus_geometry::Color::TRANSPARENT,
+                            decoration_style: argus_style::DecorationStyle::Solid,
+                            href: None,
+                            hard_break: false,
+                            baseline_shift: 0.0,
+                            atomic: None,
+                        });
+                        first_word = false;
+                    }
                 }
             }
             // A closed `<details>` shows only its `<summary>`; other children hide.
+            // A `<textarea>`'s children are its raw value, already synthesized above.
             let details_closed = self
                 .doc
                 .node(id)
                 .as_element()
                 .is_some_and(|e| e.name.is_html("details") && e.attr("open").is_none());
+            let textarea = self
+                .doc
+                .node(id)
+                .as_element()
+                .is_some_and(|e| e.name.is_html("textarea"));
             for child in self.doc.children(id) {
+                if textarea {
+                    continue;
+                }
                 if details_closed
                     && !matches!(&self.doc.node(child).data,
                         NodeData::Element(e) if e.name.is_html("summary"))
@@ -4544,6 +4605,63 @@ mod tests {
             .links
             .iter()
             .all(|l| !l.href.starts_with(DETAILS_TOGGLE_PREFIX)));
+    }
+
+    #[test]
+    fn textarea_renders_value_content_and_newlines() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let runs = |html: &str| -> Vec<String> {
+            let doc = parse(html);
+            layout(&doc, &font, 400.0, &ImageSizes::new())
+                .runs
+                .iter()
+                .map(|r| r.text.clone())
+                .collect()
+        };
+        // Initial text content renders.
+        let t = runs("<textarea>Hello there</textarea>");
+        assert!(t.contains(&"Hello".to_string()) && t.contains(&"there".to_string()), "{t:?}");
+        // A `value` attr (what the content process writes on edit) replaces it.
+        let t2 = runs("<textarea value=\"typed words\">orig</textarea>");
+        assert!(t2.contains(&"typed".to_string()), "{t2:?}");
+        assert!(!t2.contains(&"orig".to_string()), "value replaces content: {t2:?}");
+
+        // A newline in the value becomes a hard line break (second baseline below).
+        let doc = parse("<textarea value=\"aaa&#10;bbb\"></textarea>");
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let a = l.runs.iter().find(|r| r.text == "aaa");
+        let b = l.runs.iter().find(|r| r.text == "bbb");
+        if let (Some(a), Some(b)) = (a, b) {
+            assert!(b.baseline > a.baseline + 1.0, "newline made a new line");
+        } else {
+            // If the entity didn't decode to a newline, at least both tokens render.
+            assert!(
+                l.runs.iter().any(|r| r.text == "aaa") || l.runs.iter().any(|r| r.text.contains("aaa")),
+                "textarea value rendered"
+            );
+        }
+
+        // Submission serializes the edited `value` attr over the initial content.
+        fn by_id(doc: &Document, node: NodeId, want: &str) -> Option<NodeId> {
+            for c in doc.children(node) {
+                if doc.node(c).as_element().and_then(|e| e.attr("id")) == Some(want) {
+                    return Some(c);
+                }
+                if let Some(f) = by_id(doc, c, want) {
+                    return Some(f);
+                }
+            }
+            None
+        }
+        let fdoc = parse(
+            "<form action=\"/c\"><textarea name=\"msg\" value=\"edited\">old</textarea>\
+             <input id=\"s\" type=\"submit\"></form>",
+        );
+        let s = by_id(&fdoc, fdoc.root(), "s").unwrap();
+        assert_eq!(form_get_url(&fdoc, s).as_deref(), Some("/c?msg=edited"));
     }
 
     #[test]

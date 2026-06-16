@@ -654,11 +654,12 @@ impl Content {
         let Some(el) = doc.node(e).as_element() else {
             return false;
         };
-        el.name.is_html("input")
-            && matches!(
-                el.attr("type").unwrap_or("text"),
-                "text" | "search" | "email" | "url" | "tel" | "password"
-            )
+        el.name.is_html("textarea")
+            || (el.name.is_html("input")
+                && matches!(
+                    el.attr("type").unwrap_or("text"),
+                    "text" | "search" | "email" | "url" | "tel" | "password"
+                ))
     }
 
     /// Apply a typed key to the focused field: update its value and the document.
@@ -667,8 +668,15 @@ impl Content {
     /// `(action, urlencoded-body)`. Returns `None` for ordinary typing.
     fn type_key(&mut self, ch: u32) -> Option<(String, Vec<u8>)> {
         let id = self.focused.clone()?;
-        // Enter (CR/LF) implicitly submits the focused field's form.
-        if ch == 0x0D || ch == 0x0A {
+        let is_textarea = self
+            .doc
+            .as_ref()
+            .and_then(|d| find_element_by_id(d, &id).map(|n| (d, n)))
+            .and_then(|(d, n)| d.node(n).as_element())
+            .is_some_and(|e| e.name.is_html("textarea"));
+        // Enter (CR/LF) implicitly submits a single-line field's form; in a
+        // `<textarea>` it inserts a newline instead (handled below).
+        if (ch == 0x0D || ch == 0x0A) && !is_textarea {
             let doc = self.doc.as_ref()?;
             let node = find_element_by_id(doc, &id)?;
             if let Some(url) = argus_layout::form_get_url_for_field(doc, node) {
@@ -677,20 +685,30 @@ impl Content {
             let (action, body) = argus_layout::form_post_data_for_field(doc, node)?;
             return Some((action, body.into_bytes()));
         }
+        // Current value: the in-progress edit, else the DOM `value` attr, else (for
+        // a textarea) its initial text content.
         let current = self
             .input_values
             .get(&id)
             .cloned()
             .or_else(|| {
                 self.doc.as_ref().and_then(|d| {
-                    find_element_by_id(d, &id)
-                        .and_then(|n| d.node(n).as_element())
-                        .and_then(|e| e.attr("value"))
-                        .map(String::from)
+                    let n = find_element_by_id(d, &id)?;
+                    let e = d.node(n).as_element()?;
+                    match e.attr("value") {
+                        Some(v) => Some(v.to_string()),
+                        None if e.name.is_html("textarea") => Some(node_text(d, n)),
+                        None => None,
+                    }
                 })
             })
             .unwrap_or_default();
-        let next = edit_value(&current, ch);
+        // A textarea Enter appends a newline (edit_value drops control chars).
+        let next = if ch == 0x0D || ch == 0x0A {
+            format!("{current}\n")
+        } else {
+            edit_value(&current, ch)
+        };
         self.input_values.insert(id, next);
         self.apply_input_values();
         None
@@ -786,6 +804,24 @@ fn nth_details(doc: &argus_dom::Document, n: usize) -> Option<argus_dom::NodeId>
         None
     }
     walk(doc, doc.root(), n, &mut 0)
+}
+
+/// The concatenated text-node content of `node`'s subtree (a `<textarea>`'s
+/// initial value, whitespace and newlines preserved).
+fn node_text(doc: &argus_dom::Document, node: argus_dom::NodeId) -> String {
+    let mut out = String::new();
+    fn walk(doc: &argus_dom::Document, n: argus_dom::NodeId, out: &mut String) {
+        match &doc.node(n).data {
+            argus_dom::NodeData::Text(t) => out.push_str(t),
+            _ => {
+                for c in doc.children(n) {
+                    walk(doc, c, out);
+                }
+            }
+        }
+    }
+    walk(doc, node, &mut out);
+    out
 }
 
 /// Collect the `<option>` descendant node ids of `node`, in document order.
@@ -1093,6 +1129,36 @@ mod tests {
         // An empty fragment or unknown id scrolls to the top.
         assert_eq!(c.fragment_scroll_y(""), 0);
         assert_eq!(c.fragment_scroll_y("missing"), 0);
+    }
+
+    #[test]
+    fn typing_into_a_textarea_edits_its_value_including_newlines() {
+        fn dom_value(c: &Content) -> String {
+            let doc = c.doc.as_ref().unwrap();
+            find_element_by_id(doc, "t")
+                .and_then(|n| doc.node(n).as_element())
+                .and_then(|e| e.attr("value"))
+                .unwrap_or("")
+                .to_string()
+        }
+        let mut c = headless(
+            "<textarea id=\"t\">init</textarea>",
+            vec![box_at("t", 0.0, 0.0)],
+        );
+        c.focused = Some("t".to_string());
+        // A textarea is editable (unlike before), and editing builds on the initial
+        // text content.
+        assert!(c.is_editable_input("t"));
+        assert_eq!(c.type_key('!' as u32), None);
+        assert_eq!(dom_value(&c), "init!");
+        // Enter inserts a newline and does NOT submit (returns None).
+        assert_eq!(c.type_key(0x0A), None, "Enter in a textarea is a newline");
+        assert_eq!(dom_value(&c), "init!\n");
+        c.type_key('x' as u32);
+        assert_eq!(dom_value(&c), "init!\nx");
+        // Backspace removes the last char.
+        c.type_key(0x08);
+        assert_eq!(dom_value(&c), "init!\n");
     }
 
     #[test]
