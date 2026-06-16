@@ -2228,7 +2228,14 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
                     }
                 };
                 if let Msg::ClickResult { url, post_body } = click {
-                    if !post_body.is_empty() {
+                    if let Some(n) = url.strip_prefix(proto::SCROLL_TO_PREFIX) {
+                        // Same-page anchor: scroll to the reported document Y.
+                        let max = content_height.saturating_sub(content_vp.height);
+                        let y = n.parse::<u32>().unwrap_or(0).min(max);
+                        tabs.active_mut().scroll_y = y;
+                        proto::send(procs[tabs.active_index()].channel(), Msg::SetScroll { y }, &[])?;
+                        show_active!();
+                    } else if !post_body.is_empty() {
                         // POST form submission: POST the body to the action URL.
                         let target = resolve_url(active_target(&tabs).as_deref(), &url);
                         log!("posting form to {target}");
@@ -2271,6 +2278,16 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
                     }
                 };
                 match resp {
+                    Msg::ClickResult { url, .. } if url.starts_with(proto::SCROLL_TO_PREFIX) => {
+                        let max = content_height.saturating_sub(content_vp.height);
+                        let y = url[proto::SCROLL_TO_PREFIX.len()..]
+                            .parse::<u32>()
+                            .unwrap_or(0)
+                            .min(max);
+                        tabs.active_mut().scroll_y = y;
+                        proto::send(procs[tabs.active_index()].channel(), Msg::SetScroll { y }, &[])?;
+                        show_active!();
+                    }
                     Msg::ClickResult { url, post_body } if !post_body.is_empty() => {
                         let target = resolve_url(active_target(&tabs).as_deref(), &url);
                         log!("submitting form (POST) -> {target}");

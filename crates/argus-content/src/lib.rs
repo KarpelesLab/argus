@@ -156,7 +156,19 @@ pub fn run(channel: Channel) -> io::Result<()> {
                     .iter()
                     .find(|s| s.contains(x as f32, y as f32))
                     .map(|s| (s.action.clone(), s.body.clone()));
-                if let Some(rest) = url.strip_prefix(argus_layout::DETAILS_TOGGLE_PREFIX) {
+                if let Some(frag) = url.strip_prefix('#') {
+                    // Same-page anchor: reply with the target's absolute Y so the
+                    // browser scrolls there instead of navigating/reloading.
+                    let y = content.fragment_scroll_y(frag);
+                    proto::send(
+                        &channel,
+                        Msg::ClickResult {
+                            url: format!("{}{}", proto::SCROLL_TO_PREFIX, y),
+                            post_body: Vec::new(),
+                        },
+                        &[],
+                    )?;
+                } else if let Some(rest) = url.strip_prefix(argus_layout::DETAILS_TOGGLE_PREFIX) {
                     // A `<summary>` toggle: flip the details' open state and re-render
                     // (no navigation). Empty ClickResult → the browser re-renders.
                     if let Ok(n) = rest.parse::<usize>() {
@@ -440,6 +452,20 @@ impl Content {
             }
         }
         Ok(())
+    }
+
+    /// The absolute document Y to scroll to for a `#fragment` anchor: the target
+    /// id's box top in document coords (its on-screen y plus the current scroll).
+    /// An empty fragment (`#`/`#top`) or unknown id scrolls to the top.
+    fn fragment_scroll_y(&self, frag: &str) -> u32 {
+        if frag.is_empty() {
+            return 0;
+        }
+        self.bounds
+            .iter()
+            .find(|b| b.id == frag)
+            .map(|b| (b.y + self.scroll_y as f32).max(0.0) as u32)
+            .unwrap_or(0)
     }
 
     /// The id of the deepest (smallest) id'd element box under `(x, y)`.
@@ -1050,6 +1076,23 @@ mod tests {
         c.toggle_details(0);
         c.apply_input_values();
         assert!(!nth_open(&c, 0), "details 0 closed again");
+    }
+
+    #[test]
+    fn fragment_anchor_resolves_to_target_document_y() {
+        let mut c = headless(
+            "<a href=\"#sec\">jump</a><h2 id=\"sec\">Section</h2>",
+            vec![box_at("sec", 0.0, 300.0)],
+        );
+        // With no scroll, the target's document Y is its on-screen Y.
+        assert_eq!(c.fragment_scroll_y("sec"), 300);
+        // Scrolled down 120px: the box's screen Y is 120 less, so document Y holds.
+        c.scroll_y = 120;
+        c.bounds[0].y = 180.0; // box now drawn 120px higher on screen
+        assert_eq!(c.fragment_scroll_y("sec"), 300, "screen y + scroll = doc y");
+        // An empty fragment or unknown id scrolls to the top.
+        assert_eq!(c.fragment_scroll_y(""), 0);
+        assert_eq!(c.fragment_scroll_y("missing"), 0);
     }
 
     #[test]

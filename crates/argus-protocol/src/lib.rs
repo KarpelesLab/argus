@@ -141,6 +141,12 @@ pub fn decode_storage(text: &str) -> std::collections::HashMap<String, String> {
     map
 }
 
+/// Sentinel `ClickResult.url` prefix for a same-page fragment (`#anchor`) scroll:
+/// the content process replies with this prefix followed by the target's absolute
+/// document Y, and the browser scrolls there instead of navigating. U+0001 can't
+/// begin a real URL, so it never collides with an author href.
+pub const SCROLL_TO_PREFIX: &str = "\u{1}scroll:";
+
 /// A single Phase 0 message. Direction is by convention (see each variant).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Msg {
