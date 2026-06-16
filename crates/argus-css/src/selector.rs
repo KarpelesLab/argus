@@ -93,6 +93,9 @@ pub enum PseudoClass {
     Focus,
     /// `:focus-within` — the focused element or any of its ancestors.
     FocusWithin,
+    /// `:placeholder-shown` — an empty `<input>`/`<textarea>` with a `placeholder`
+    /// (so the placeholder text is currently visible).
+    PlaceholderShown,
     /// `:root` — the document's root element (`<html>`).
     Root,
     /// `:empty` — no element or (non-whitespace) text children.
@@ -350,8 +353,13 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                                 "optional" => c.pseudos.push(PseudoClass::Optional),
                                 "read-write" => c.pseudos.push(PseudoClass::ReadWrite),
                                 "link" | "any-link" => c.pseudos.push(PseudoClass::AnyLink),
-                                "focus" => c.pseudos.push(PseudoClass::Focus),
+                                // `:focus-visible` (keyboard-focus ring) — Argus
+                                // focus is always "visible", so treat it as `:focus`.
+                                "focus" | "focus-visible" => c.pseudos.push(PseudoClass::Focus),
                                 "focus-within" => c.pseudos.push(PseudoClass::FocusWithin),
+                                "placeholder-shown" => {
+                                    c.pseudos.push(PseudoClass::PlaceholderShown)
+                                }
                                 "root" => c.pseudos.push(PseudoClass::Root),
                                 "empty" => c.pseudos.push(PseudoClass::Empty),
                                 "first-of-type" => c.pseudos.push(PseudoClass::FirstOfType),
@@ -799,6 +807,14 @@ fn pseudo_matches(doc: &Document, node: NodeId, p: PseudoClass) -> bool {
         PseudoClass::Focus => element_has_attr(doc, node, "__argus_focus"),
         // `:focus-within` — this element or any descendant holds focus.
         PseudoClass::FocusWithin => subtree_has_focus(doc, node),
+        // `:placeholder-shown` — an empty input/textarea that has a placeholder.
+        PseudoClass::PlaceholderShown => matches!(
+            &doc.node(node).data,
+            NodeData::Element(e)
+                if (e.name.is_html("input") || e.name.is_html("textarea"))
+                    && e.attr("placeholder").is_some()
+                    && e.attr("value").is_none_or(|v| v.is_empty())
+        ),
         // `:root` — an element whose parent is the document node.
         PseudoClass::Root => doc
             .node(node)
@@ -1155,6 +1171,37 @@ mod tests {
         let a = sel("input:focus").specificity();
         let b = sel("input").specificity();
         assert!(a > b, "{a:?} should outrank {b:?}");
+        // :focus-visible is treated as :focus.
+        assert!(matches(&doc, focused, &sel("input:focus-visible")));
+        assert!(!matches(&doc, other, &sel(":focus-visible")));
+    }
+
+    #[test]
+    fn placeholder_shown_pseudo_class() {
+        let mut doc = Document::new();
+        let root = doc.root();
+        // Empty input with a placeholder → placeholder shown.
+        let empty = doc.create_element(
+            QualName::html("input"),
+            vec![Attribute::new("placeholder", "Search")],
+        );
+        doc.append(root, empty);
+        // Same input but with a value → placeholder hidden.
+        let filled = doc.create_element(
+            QualName::html("input"),
+            vec![
+                Attribute::new("placeholder", "Search"),
+                Attribute::new("value", "hi"),
+            ],
+        );
+        doc.append(root, filled);
+        // No placeholder attribute → never matches.
+        let bare = doc.create_element(QualName::html("input"), vec![]);
+        doc.append(root, bare);
+
+        assert!(matches(&doc, empty, &sel("input:placeholder-shown")));
+        assert!(!matches(&doc, filled, &sel(":placeholder-shown")));
+        assert!(!matches(&doc, bare, &sel(":placeholder-shown")));
     }
 
     #[test]
