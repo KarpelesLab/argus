@@ -36,6 +36,7 @@ pub fn run(channel: Channel) -> io::Result<()> {
         input_values: std::collections::HashMap::new(),
         checked: std::collections::HashMap::new(),
         selected: std::collections::HashMap::new(),
+        details_open: std::collections::HashMap::new(),
         links: Vec::new(),
         submits: Vec::new(),
         bounds: Vec::new(),
@@ -112,6 +113,7 @@ pub fn run(channel: Channel) -> io::Result<()> {
                 content.input_values.clear();
                 content.checked.clear();
                 content.selected.clear();
+                content.details_open.clear();
                 content.doc = Some(doc);
                 // Report localStorage so the browser can persist it to disk.
                 if !content.storage.is_empty() {
@@ -154,7 +156,19 @@ pub fn run(channel: Channel) -> io::Result<()> {
                     .iter()
                     .find(|s| s.contains(x as f32, y as f32))
                     .map(|s| (s.action.clone(), s.body.clone()));
-                if !url.is_empty() {
+                if let Some(rest) = url.strip_prefix(argus_layout::DETAILS_TOGGLE_PREFIX) {
+                    // A `<summary>` toggle: flip the details' open state and re-render
+                    // (no navigation). Empty ClickResult → the browser re-renders.
+                    if let Ok(n) = rest.parse::<usize>() {
+                        content.toggle_details(n);
+                        content.apply_input_values();
+                    }
+                    proto::send(
+                        &channel,
+                        Msg::ClickResult { url: String::new(), post_body: Vec::new() },
+                        &[],
+                    )?;
+                } else if !url.is_empty() {
                     log!("link clicked at ({x}, {y}) -> {url}");
                     proto::send(&channel, Msg::ClickResult { url, post_body: Vec::new() }, &[])?;
                 } else if let Some((action, body)) = post {
@@ -227,6 +241,9 @@ struct Content {
     /// User-chosen `<select>` option index by select id (clicking a select cycles
     /// to the next option). Re-applied as the option's `selected` attribute.
     selected: std::collections::HashMap<String, usize>,
+    /// User-toggled `<details>` open state by the details' document-order index
+    /// (clicking its `<summary>` flips it). Re-applied as the `open` attribute.
+    details_open: std::collections::HashMap<usize, bool>,
     /// Clickable link regions from the last render (in screen coords), for input.
     links: Vec<argus_layout::LinkBox>,
     /// `method=post` submit-button regions from the last render (screen coords) —
@@ -495,6 +512,24 @@ impl Content {
             .unwrap_or(0)
     }
 
+    /// Whether the `n`-th `<details>` (document order) is currently open: the user's
+    /// toggle if any, else the document's `open` attribute.
+    fn is_details_open(&self, n: usize) -> bool {
+        if let Some(&o) = self.details_open.get(&n) {
+            return o;
+        }
+        let Some(doc) = &self.doc else { return false };
+        nth_details(doc, n)
+            .and_then(|d| doc.node(d).as_element())
+            .is_some_and(|e| e.attr("open").is_some())
+    }
+
+    /// Flip the open state of the `n`-th `<details>` (clicking its `<summary>`).
+    fn toggle_details(&mut self, n: usize) {
+        let next = !self.is_details_open(n);
+        self.details_open.insert(n, next);
+    }
+
     /// If `(x, y)` hits an id'd form control, mutate it: a checkbox flips, a radio
     /// selects within its name-group, a `<select>` advances to its next option
     /// (wrapping). Returns whether one was handled. The change persists via the
@@ -684,10 +719,49 @@ impl Content {
                 }
             }
         }
+        // Re-apply user `<details>` open/closed toggles as the `open` attribute,
+        // which layout reads to show or hide the details body.
+        for (&n, &open) in &self.details_open {
+            if let Some(d) = nth_details(doc, n) {
+                if let argus_dom::NodeData::Element(e) = doc.data_mut(d) {
+                    let has = e.attrs.iter().any(|a| &*a.name == "open");
+                    if open && !has {
+                        e.attrs.push(argus_dom::Attribute::new("open", ""));
+                    } else if !open && has {
+                        e.attrs.retain(|a| &*a.name != "open");
+                    }
+                }
+            }
+        }
     }
 }
 
 /// The first element with `id` in document order.
+/// The `n`-th `<details>` element in document (pre-order) order — matching the
+/// index `argus_layout::summary_toggle_href` assigns. `None` if out of range.
+fn nth_details(doc: &argus_dom::Document, n: usize) -> Option<argus_dom::NodeId> {
+    fn walk(
+        doc: &argus_dom::Document,
+        node: argus_dom::NodeId,
+        n: usize,
+        count: &mut usize,
+    ) -> Option<argus_dom::NodeId> {
+        if doc.node(node).as_element().is_some_and(|e| e.name.is_html("details")) {
+            if *count == n {
+                return Some(node);
+            }
+            *count += 1;
+        }
+        for c in doc.children(node) {
+            if let Some(found) = walk(doc, c, n, count) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    walk(doc, doc.root(), n, &mut 0)
+}
+
 /// Collect the `<option>` descendant node ids of `node`, in document order.
 fn collect_options(doc: &argus_dom::Document, node: argus_dom::NodeId, out: &mut Vec<argus_dom::NodeId>) {
     for c in doc.children(node) {
@@ -843,6 +917,7 @@ mod tests {
             input_values: std::collections::HashMap::new(),
             checked: std::collections::HashMap::new(),
             selected: std::collections::HashMap::new(),
+            details_open: std::collections::HashMap::new(),
             links: Vec::new(),
             submits: Vec::new(),
             bounds,
@@ -947,6 +1022,34 @@ mod tests {
         assert_eq!(selected_idx(&c), Some(0), "wrapped to A");
         // The `selected` attr now sits on option A, so form submission (which reads
         // it, tested in argus-layout) serializes `k=a`.
+    }
+
+    #[test]
+    fn toggling_details_flips_its_open_attribute() {
+        fn nth_open(c: &Content, n: usize) -> bool {
+            let doc = c.doc.as_ref().unwrap();
+            super::nth_details(doc, n)
+                .and_then(|d| doc.node(d).as_element())
+                .is_some_and(|e| e.attr("open").is_some())
+        }
+        let mut c = headless(
+            "<details><summary>A</summary><p>x</p></details>\
+             <details open><summary>B</summary><p>y</p></details>",
+            vec![],
+        );
+        // details 0 starts closed, details 1 starts open.
+        assert!(!nth_open(&c, 0));
+        assert!(nth_open(&c, 1));
+        // Toggle 0 open and 1 closed; the `open` attr tracks each.
+        c.toggle_details(0);
+        c.toggle_details(1);
+        c.apply_input_values();
+        assert!(nth_open(&c, 0), "details 0 now open");
+        assert!(!nth_open(&c, 1), "details 1 now closed");
+        // Toggling 0 again closes it.
+        c.toggle_details(0);
+        c.apply_input_values();
+        assert!(!nth_open(&c, 0), "details 0 closed again");
     }
 
     #[test]

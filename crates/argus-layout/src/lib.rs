@@ -786,6 +786,43 @@ fn build_post_data(doc: &Document, form: NodeId, submit_id: Option<NodeId>) -> O
     Some((action.to_string(), encode_form_body(doc, form, submit_id)))
 }
 
+/// Sentinel `href` prefix for a `<summary>` disclosure toggle. A `LinkBox` whose
+/// href is this prefix followed by the parent `<details>`'s document-order index
+/// toggles that details' `open` state instead of navigating — reusing the existing
+/// link hit-testing/shift/scroll machinery. U+0001 can't begin a real URL, so it
+/// never collides with an author href.
+pub const DETAILS_TOGGLE_PREFIX: &str = "\u{1}toggle:";
+
+/// If `id` is a `<summary>` directly inside a `<details>`, the sentinel toggle href
+/// for that details (its document-order index among all `<details>`). `None`
+/// otherwise.
+fn summary_toggle_href(doc: &Document, id: NodeId) -> Option<String> {
+    if !doc.node(id).as_element().is_some_and(|e| e.name.is_html("summary")) {
+        return None;
+    }
+    let parent = doc.node(id).parent()?;
+    if !doc.node(parent).as_element().is_some_and(|e| e.name.is_html("details")) {
+        return None;
+    }
+    // Pre-order document index of the parent <details> among all <details>.
+    fn index_of(doc: &Document, node: NodeId, target: NodeId, count: &mut usize) -> Option<usize> {
+        if doc.node(node).as_element().is_some_and(|e| e.name.is_html("details")) {
+            if node == target {
+                return Some(*count);
+            }
+            *count += 1;
+        }
+        for c in doc.children(node) {
+            if let Some(i) = index_of(doc, c, target, count) {
+                return Some(i);
+            }
+        }
+        None
+    }
+    let idx = index_of(doc, doc.root(), parent, &mut 0)?;
+    Some(format!("{DETAILS_TOGGLE_PREFIX}{idx}"))
+}
+
 /// The first submit control in `node`'s subtree — the implicit default submit for
 /// Enter-key submission.
 fn first_submit(doc: &Document, node: NodeId) -> Option<NodeId> {
@@ -1801,6 +1838,16 @@ impl Ctx<'_> {
                     h: self.cursor_y - border_box_top,
                     action,
                     body,
+                });
+            } else if let Some(href) = summary_toggle_href(self.doc, id) {
+                // A `<summary>` toggles its `<details>` open/closed — a sentinel-href
+                // link the content process intercepts (no navigation).
+                self.links.push(LinkBox {
+                    x: border_box_left,
+                    y: border_box_top,
+                    w: border_box_w,
+                    h: self.cursor_y - border_box_top,
+                    href,
                 });
             }
         }
@@ -4461,6 +4508,42 @@ mod tests {
             open.contains(&"Hidden".to_string()),
             "open body shows: {open:?}"
         );
+    }
+
+    #[test]
+    fn summary_emits_a_details_toggle_link() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Each <summary> becomes a sentinel toggle link carrying its <details>'s
+        // document-order index.
+        let doc = parse(
+            "<details><summary>One</summary><p>a</p></details>\
+             <details open><summary>Two</summary><p>b</p></details>",
+        );
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let toggles: Vec<&str> = l
+            .links
+            .iter()
+            .map(|l| l.href.as_str())
+            .filter(|h| h.starts_with(DETAILS_TOGGLE_PREFIX))
+            .collect();
+        assert_eq!(
+            toggles,
+            vec![
+                format!("{DETAILS_TOGGLE_PREFIX}0"),
+                format!("{DETAILS_TOGGLE_PREFIX}1")
+            ],
+            "two summaries → toggle links for details 0 and 1"
+        );
+        // A bare <summary> outside <details> is not a toggle.
+        let doc2 = parse("<summary>loose</summary>");
+        let l2 = layout(&doc2, &font, 400.0, &ImageSizes::new());
+        assert!(l2
+            .links
+            .iter()
+            .all(|l| !l.href.starts_with(DETAILS_TOGGLE_PREFIX)));
     }
 
     #[test]
