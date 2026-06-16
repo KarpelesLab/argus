@@ -1,0 +1,10 @@
+/Users/magicaltux/projects/argus/fuzz/target/debug/deps/oxideav_qoi-0495d754677c7bcc.d: /Users/magicaltux/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxideav-qoi-0.0.1/src/lib.rs /Users/magicaltux/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxideav-qoi-0.0.1/src/decoder.rs /Users/magicaltux/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxideav-qoi-0.0.1/src/encoder.rs /Users/magicaltux/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxideav-qoi-0.0.1/src/error.rs /Users/magicaltux/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxideav-qoi-0.0.1/src/image.rs /Users/magicaltux/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxideav-qoi-0.0.1/src/registry.rs
+
+/Users/magicaltux/projects/argus/fuzz/target/debug/deps/liboxideav_qoi-0495d754677c7bcc.rmeta: /Users/magicaltux/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxideav-qoi-0.0.1/src/lib.rs /Users/magicaltux/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxideav-qoi-0.0.1/src/decoder.rs /Users/magicaltux/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxideav-qoi-0.0.1/src/encoder.rs /Users/magicaltux/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxideav-qoi-0.0.1/src/error.rs /Users/magicaltux/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxideav-qoi-0.0.1/src/image.rs /Users/magicaltux/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxideav-qoi-0.0.1/src/registry.rs
+
+/Users/magicaltux/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxideav-qoi-0.0.1/src/lib.rs:
+/Users/magicaltux/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxideav-qoi-0.0.1/src/decoder.rs:
+/Users/magicaltux/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxideav-qoi-0.0.1/src/encoder.rs:
+/Users/magicaltux/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxideav-qoi-0.0.1/src/error.rs:
+/Users/magicaltux/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxideav-qoi-0.0.1/src/image.rs:
+/Users/magicaltux/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/oxideav-qoi-0.0.1/src/registry.rs:

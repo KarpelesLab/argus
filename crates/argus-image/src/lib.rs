@@ -2329,6 +2329,10 @@ mod tests {
             &[0x0A, 0x05, 0x01, 0x08],   // PCX
             b"II\x2A\x00",               // TIFF little-endian
             b"MM\x00\x2A",               // TIFF big-endian
+            b"\x00\x00\x00\x20ftypavif", // AVIF (ISOBMFF + av1) → decode_avif
+            b"\x00\x00\x00\x18ftypisom", // MP4 video → decode_video_frame
+            b"\x00\x00\x00\x18ftypmp42", // MP4 video (mp42 brand)
+            b"\x1A\x45\xDF\xA3",         // Matroska/WebM (EBML) → decode_video_frame
         ];
         let mut seed = 0x9E3779B97F4A7C15u64;
         let mut byte = || {

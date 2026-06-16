@@ -3,6 +3,7 @@
 #   cargo +nightly fuzz run html
 #   cargo +nightly fuzz run css
 #   cargo +nightly fuzz run layout
+#   cargo +nightly fuzz run image
 #
 # This crate is excluded from the main workspace (it pulls libfuzzer-sys and needs
 # the `-Z sanitizer` machinery), so normal `cargo build`/`cargo test` ignore it.
@@ -21,6 +22,7 @@ argus-html = { path = "../crates/argus-html" }
 argus-css = { path = "../crates/argus-css" }
 argus-layout = { path = "../crates/argus-layout" }
 argus-gfx = { path = "../crates/argus-gfx" }
+argus-image = { path = "../crates/argus-image" }
 
 [[bin]]
 name = "html"
@@ -39,6 +41,13 @@ bench = false
 [[bin]]
 name = "layout"
 path = "fuzz_targets/layout.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "image"
+path = "fuzz_targets/image.rs"
 test = false
 doc = false
 bench = false
