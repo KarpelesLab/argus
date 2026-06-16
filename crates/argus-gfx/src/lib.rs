@@ -165,6 +165,9 @@ pub struct TextRun {
     pub font_key: u32,
     /// `overflow: hidden` clip rect `(x, y, w, h)` this run is confined to, if any.
     pub clip: Option<[f32; 4]>,
+    /// `transform: rotate()` as `(angle_radians, pivot_cx, pivot_cy)` in canvas
+    /// pixels — the whole run is rotated about the pivot when set.
+    pub rotation: Option<(f32, f32, f32)>,
 }
 
 /// A filled rectangle in canvas pixels (e.g. an element background), optionally
@@ -183,6 +186,9 @@ pub struct RectFill {
     /// rectangle — used for mitered border edges (the CSS-triangle technique). `x/y`
     /// still position it for clipping/z-order; `radius` is ignored.
     pub quad: Option<[[f32; 2]; 4]>,
+    /// `transform: rotate()` as `(angle_radians, pivot_cx, pivot_cy)` in canvas
+    /// pixels — the fill is rotated about the pivot when set.
+    pub rotation: Option<(f32, f32, f32)>,
 }
 
 /// A flat list of paint commands. Rectangles paint first (backgrounds), then text.
@@ -197,7 +203,7 @@ pub struct DisplayList {
 pub fn render_display_list(list: &DisplayList, font: &Font, width: u32, height: u32) -> Canvas {
     let mut children: Vec<Node> = Vec::with_capacity(list.rects.len() + list.runs.len());
     for r in &list.rects {
-        children.push(maybe_clip(rect_node(r), r.clip));
+        children.push(maybe_clip(maybe_rotate(rect_node(r), r.rotation), r.clip));
     }
     for run in &list.runs {
         push_run_nodes(font, run, &mut children);
@@ -238,6 +244,27 @@ fn maybe_clip(node: Node, clip: Option<[f32; 4]>) -> Node {
     match clip {
         Some(c) => Node::Group(Group {
             clip: Some(rect_clip_path(c)),
+            children: vec![node],
+            ..Group::default()
+        }),
+        None => node,
+    }
+}
+
+/// An affine rotation by `angle` (radians) about the pivot `(cx, cy)`: translate the
+/// pivot to the origin, rotate, translate back. `compose` is `self ∘ other` (applies
+/// `other` first), so this reads inside-out as translate(-c) → rotate → translate(c).
+fn rot_about(angle: f32, cx: f32, cy: f32) -> Transform2D {
+    Transform2D::translate(cx, cy)
+        .compose(&Transform2D::rotate(angle))
+        .compose(&Transform2D::translate(-cx, -cy))
+}
+
+/// Wrap `node` in a rotation group if `rotation` is set (`transform: rotate()`).
+fn maybe_rotate(node: Node, rotation: Option<(f32, f32, f32)>) -> Node {
+    match rotation {
+        Some((angle, cx, cy)) => Node::Group(Group {
+            transform: rot_about(angle, cx, cy),
             children: vec![node],
             ..Group::default()
         }),
@@ -464,15 +491,18 @@ fn render_run(root: Group, width: u32, height: u32) -> oxideav_core::VideoFrame 
 /// faux-bolded by overprinting a second copy offset ~0.6px on the x-axis, which
 /// thickens the strokes without a dedicated bold face.
 fn push_run_nodes(font: &Font, run: &TextRun, out: &mut Vec<Node>) {
-    // For a clipped run, gather the glyph nodes then wrap them in one clip group.
-    if let Some(clip) = run.clip {
+    // For a clipped and/or rotated run, gather the glyph nodes then wrap them: the
+    // rotation is the inner group (it rotates the placed glyphs about the pivot) and
+    // an ancestor's `overflow` clip is the outer group (it clips the rotated result).
+    if run.clip.is_some() || run.rotation.is_some() {
         let mut inner = Vec::new();
         push_run_nodes_unclipped(font, run, &mut inner);
-        out.push(Node::Group(Group {
-            clip: Some(rect_clip_path(clip)),
+        let mut node = Node::Group(Group {
             children: inner,
             ..Group::default()
-        }));
+        });
+        node = maybe_rotate(node, run.rotation);
+        out.push(maybe_clip(node, run.clip));
         return;
     }
     push_run_nodes_unclipped(font, run, out);
@@ -570,6 +600,41 @@ fn build_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rotation_paints_a_rect_turned_about_its_pivot() {
+        // A tall thin red rect (4x40) centered at (50,50), rotated 90deg, should paint
+        // as a *wide* bar (~40x4) about the same pivot. Probe a pixel that is only
+        // covered after the turn, and one only covered before it.
+        let red = Color { r: 255, g: 0, b: 0, a: 255 };
+        let list = DisplayList {
+            rects: vec![RectFill {
+                x: 48.0,
+                y: 30.0,
+                w: 4.0,
+                h: 40.0,
+                color: red,
+                radius: 0.0,
+                clip: None,
+                quad: None,
+                rotation: Some((std::f32::consts::FRAC_PI_2, 50.0, 50.0)),
+            }],
+            runs: vec![],
+        };
+        // render_display_list needs a Font; reuse the test system font.
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let canvas = render_display_list(&list, &font, 100, 100);
+        let alpha_at = |x: usize, y: usize| canvas.pixels[(y * 100 + x) * 4 + 3];
+        // (66,50): 16px right of the pivot — inside the rotated 40-wide bar, outside
+        // the original 4-wide column.
+        assert!(alpha_at(66, 50) > 0, "rotated bar covers a horizontal extent");
+        // (50,34): 16px above the pivot — inside the *original* tall column, outside
+        // the rotated 4-tall bar.
+        assert_eq!(alpha_at(50, 34), 0, "no longer covered after the turn");
+    }
 
     #[test]
     fn cropped_blit_samples_only_the_source_subrect() {

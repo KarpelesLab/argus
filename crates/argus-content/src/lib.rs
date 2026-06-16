@@ -379,9 +379,20 @@ impl Content {
         let scroll = (self.scroll_y as f32).min(max_scroll);
         for r in &mut layout.rects {
             r.y -= scroll;
+            if let Some(q) = &mut r.quad {
+                for p in q.iter_mut() {
+                    p[1] -= scroll;
+                }
+            }
+            if let Some((_, _, cy)) = &mut r.rotation {
+                *cy -= scroll;
+            }
         }
         for r in &mut layout.runs {
             r.baseline -= scroll;
+            if let Some((_, _, cy)) = &mut r.rotation {
+                *cy -= scroll;
+            }
         }
         for im in &mut layout.images {
             im.y -= scroll;

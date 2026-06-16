@@ -159,8 +159,10 @@ Property` / `JSON` suffice).
 
 - **`outline` + `outline-offset` + `outline-style`** (outside the border box, no layout
   effect; solid/double/dotted/dashed).
-- **`transform: translate()`** and **`scale()`** (paint the subtree shifted/scaled; no
-  layout effect).
+- **`transform: translate()`**, **`scale()`**, and **`rotate()`** (paint the subtree
+  shifted/scaled/rotated about the border-box center; no layout effect). `rotate()`
+  accepts `deg`/`rad`/`grad`/`turn` and rotates both boxes and text via a `Transform2D`
+  applied in gfx (glyph orientation stays correct); hit regions use the rotated bbox.
 
 **Generated content, at-rules, custom properties**
 

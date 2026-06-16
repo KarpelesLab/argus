@@ -1139,6 +1139,7 @@ impl Ctx<'_> {
                 radius: style.border_radius,
                 clip: None,
                 quad: None,
+                rotation: None,
             });
             self.rects.len() - 1
         });
@@ -1174,6 +1175,7 @@ impl Ctx<'_> {
                     radius: 0.0,
                     clip: None,
                     quad: None,
+                    rotation: None,
                 });
             }
             i
@@ -1202,6 +1204,7 @@ impl Ctx<'_> {
                         letter_spacing: 0.0,
                         font_key: style.font_key,
                         clip: None,
+                        rotation: None,
                     });
                 }
                 bullet => {
@@ -1219,6 +1222,7 @@ impl Ctx<'_> {
                         radius: if round { d * 0.5 } else { 0.0 },
                         clip: None,
                         quad: None,
+                        rotation: None,
                     });
                     if matches!(bullet, Marker::Circle) {
                         // Punch out the centre so the ring reads as hollow.
@@ -1232,6 +1236,7 @@ impl Ctx<'_> {
                             radius: (d - 2.0 * t) * 0.5,
                             clip: None,
                             quad: None,
+                            rotation: None,
                         });
                     }
                 }
@@ -1281,6 +1286,7 @@ impl Ctx<'_> {
                         letter_spacing: 0.0,
                         font_key: style.font_key,
                         clip: None,
+                        rotation: None,
                     });
                     self.cursor_y += fs * style.line_height;
                 }
@@ -1765,6 +1771,7 @@ impl Ctx<'_> {
                     radius: style.border_radius,
                     clip: None,
                     quad: None,
+                    rotation: None,
                 };
             } else {
                 // Faux blur: concentric rects from the full blur extent inward, each
@@ -1785,6 +1792,7 @@ impl Ctx<'_> {
                         radius: style.border_radius + grow.max(0.0),
                         clip: None,
                         quad: None,
+                        rotation: None,
                     };
                 }
             }
@@ -1861,6 +1869,7 @@ impl Ctx<'_> {
                     radius,
                     clip: None,
                     quad: None,
+                    rotation: None,
                 });
             }
             // `<input type=color>`: fill the inner box with the value's color swatch.
@@ -1879,6 +1888,7 @@ impl Ctx<'_> {
                     radius: 0.0,
                     clip: None,
                     quad: None,
+                    rotation: None,
                 });
             }
             // `<input type=range>`: a thin track with a thumb at the value position.
@@ -1899,6 +1909,7 @@ impl Ctx<'_> {
                     radius: track_h / 2.0,
                     clip: None,
                     quad: None,
+                    rotation: None,
                 });
                 let thumb = border_box_h.clamp(8.0, 14.0);
                 let tx = (border_box_left + frac * border_box_w - thumb / 2.0)
@@ -1912,6 +1923,7 @@ impl Ctx<'_> {
                     radius: thumb / 2.0,
                     clip: None,
                     quad: None,
+                    rotation: None,
                 });
             }
         }
@@ -2088,6 +2100,16 @@ impl Ctx<'_> {
                 self.shift_display_list(ds_start, dx, dy);
             }
         }
+        // Rotate last (outermost) about the border-box center. Tags rects/runs for the
+        // gfx affine; combined `rotate() scale()/translate()` is order-approximate but
+        // correct for a lone rotate (the common ribbon/badge case).
+        if let Some(angle) = style.transform_rotate {
+            if angle != 0.0 {
+                let cx = border_box_left + border_box_w / 2.0;
+                let cy = border_box_top + border_box_h / 2.0;
+                self.rotate_display_list(ds_start, angle, cx, cy);
+            }
+        }
     }
 
     /// Fill the [`GRAD_STEPS`] reserved rect slots at `start` with stepped strips
@@ -2111,6 +2133,7 @@ impl Ctx<'_> {
                     radius: iw.min(ih) / 2.0,
                     clip: None,
                     quad: None,
+                    rotation: None,
                 };
             }
             return;
@@ -2134,6 +2157,7 @@ impl Ctx<'_> {
                     radius: 0.0,
                     clip: None,
                     quad: None,
+                    rotation: None,
                 }
             } else {
                 let sh = h / n;
@@ -2146,6 +2170,7 @@ impl Ctx<'_> {
                     radius: 0.0,
                     clip: None,
                     quad: None,
+                    rotation: None,
                 }
             };
             self.rects[start + k] = rect;
@@ -2158,11 +2183,14 @@ impl Ctx<'_> {
             r.x += dx;
             r.y += dy;
             shift_clip(&mut r.clip, dx, dy);
+            shift_quad(&mut r.quad, dx, dy);
+            shift_rotation(&mut r.rotation, dx, dy);
         }
         for r in &mut self.runs[start.1..] {
             r.x += dx;
             r.baseline += dy;
             shift_clip(&mut r.clip, dx, dy);
+            shift_rotation(&mut r.rotation, dx, dy);
         }
         for im in &mut self.images[start.2..] {
             im.x += dx;
@@ -2215,11 +2243,14 @@ impl Ctx<'_> {
             r.x += dx;
             r.y += dy;
             shift_clip(&mut r.clip, dx, dy);
+            shift_quad(&mut r.quad, dx, dy);
+            shift_rotation(&mut r.rotation, dx, dy);
         }
         for r in &mut self.runs[start.1..end.1] {
             r.x += dx;
             r.baseline += dy;
             shift_clip(&mut r.clip, dx, dy);
+            shift_rotation(&mut r.rotation, dx, dy);
         }
         for im in &mut self.images[start.2..end.2] {
             im.x += dx;
@@ -2248,16 +2279,28 @@ impl Ctx<'_> {
     /// point `(ox, oy)` — positions, sizes, and text size all scale (for
     /// `transform: scale`). Text size uses the horizontal factor.
     fn scale_display_list(&mut self, start: DisplayListMark, sx: f32, sy: f32, ox: f32, oy: f32) {
+        let scale_pt = |x: f32, y: f32| (ox + (x - ox) * sx, oy + (y - oy) * sy);
         for r in &mut self.rects[start.0..] {
             r.x = ox + (r.x - ox) * sx;
             r.y = oy + (r.y - oy) * sy;
             r.w *= sx;
             r.h *= sy;
+            if let Some(q) = &mut r.quad {
+                for p in q.iter_mut() {
+                    (p[0], p[1]) = scale_pt(p[0], p[1]);
+                }
+            }
+            if let Some((_, cx, cy)) = &mut r.rotation {
+                (*cx, *cy) = scale_pt(*cx, *cy);
+            }
         }
         for r in &mut self.runs[start.1..] {
             r.x = ox + (r.x - ox) * sx;
             r.baseline = oy + (r.baseline - oy) * sy;
             r.size_px *= sx;
+            if let Some((_, cx, cy)) = &mut r.rotation {
+                (*cx, *cy) = scale_pt(*cx, *cy);
+            }
         }
         for im in &mut self.images[start.2..] {
             im.x = ox + (im.x - ox) * sx;
@@ -2276,6 +2319,44 @@ impl Ctx<'_> {
             b.y = oy + (b.y - oy) * sy;
             b.w *= sx;
             b.h *= sy;
+        }
+    }
+
+    /// Rotate every display-list item appended since `start` by `angle` (radians)
+    /// about the pivot `(cx, cy)` for `transform: rotate()`. Rects and text runs are
+    /// *tagged* with the rotation (gfx applies the affine at paint time, keeping
+    /// glyph orientation correct); images stay axis-aligned (they're blitted, not
+    /// scene nodes). Hit regions (links/bounds/submits) can't be non-axis-aligned, so
+    /// each is replaced by the axis-aligned bounding box of its rotated corners — an
+    /// approximation good enough for click testing on small rotations.
+    fn rotate_display_list(&mut self, start: DisplayListMark, angle: f32, cx: f32, cy: f32) {
+        let rot = (angle, cx, cy);
+        for r in &mut self.rects[start.0..] {
+            r.rotation.get_or_insert(rot);
+        }
+        for r in &mut self.runs[start.1..] {
+            r.rotation.get_or_insert(rot);
+        }
+        for l in &mut self.links[start.3..] {
+            let (x, y, w, h) = rotated_bbox(l.x, l.y, l.w, l.h, angle, cx, cy);
+            l.x = x;
+            l.y = y;
+            l.w = w;
+            l.h = h;
+        }
+        for b in &mut self.bounds[start.4..] {
+            let (x, y, w, h) = rotated_bbox(b.x, b.y, b.w, b.h, angle, cx, cy);
+            b.x = x;
+            b.y = y;
+            b.w = w;
+            b.h = h;
+        }
+        for s in &mut self.submits[start.5..] {
+            let (x, y, w, h) = rotated_bbox(s.x, s.y, s.w, s.h, angle, cx, cy);
+            s.x = x;
+            s.y = y;
+            s.w = w;
+            s.h = h;
         }
     }
 
@@ -2316,6 +2397,7 @@ impl Ctx<'_> {
             radius,
             clip: None,
             quad: None,
+            rotation: None,
         });
         // Filled portion: `accent-color` if set, else blue (progress) / green (meter).
         let fill = istyle.accent_color.unwrap_or_else(|| {
@@ -2339,6 +2421,7 @@ impl Ctx<'_> {
                 radius,
                 clip: None,
                 quad: None,
+                rotation: None,
             });
         } else if frac > 0.0 {
             self.rects.push(RectFill {
@@ -2350,6 +2433,7 @@ impl Ctx<'_> {
                 radius,
                 clip: None,
                 quad: None,
+                rotation: None,
             });
         }
         self.cursor_y = top + h + istyle.margin.bottom;
@@ -2440,6 +2524,7 @@ impl Ctx<'_> {
             radius: if is_audio { h / 2.0 } else { 4.0 },
             clip: None,
             quad: None,
+            rotation: None,
         });
         // A centered "play" square for video.
         if !is_audio {
@@ -2453,6 +2538,7 @@ impl Ctx<'_> {
                 radius: 2.0,
                 clip: None,
                 quad: None,
+                rotation: None,
             });
         }
         self.cursor_y += h;
@@ -2658,6 +2744,7 @@ impl Ctx<'_> {
                         letter_spacing: 0.0,
                         font_key: istyle.font_key,
                         clip: None,
+                        rotation: None,
                     });
                     self.cursor_y += fs * istyle.line_height;
                 }
@@ -3062,6 +3149,7 @@ impl Ctx<'_> {
                 radius: style.border_radius,
                 clip: None,
                 quad: None,
+                rotation: None,
             });
             self.rects.len() - 1
         });
@@ -3469,6 +3557,7 @@ impl Ctx<'_> {
                 radius: style.border_radius,
                 clip: None,
                 quad: None,
+                rotation: None,
             });
             self.rects.len() - 1
         });
@@ -4417,6 +4506,7 @@ impl Ctx<'_> {
                     letter_spacing: 0.0,
                     font_key: taken.iter().map(|w| w.font_key).find(|&k| k != 0).unwrap_or(0),
                     clip: None,
+                    rotation: None,
                 });
                 self.cursor_y += max_size * block.line_height;
                 return;
@@ -4583,6 +4673,7 @@ impl Ctx<'_> {
                     letter_spacing: ls,
                     font_key: w.font_key,
                     clip: None,
+                    rotation: None,
                 });
                 let dh = (w.font_size / 16.0).max(1.0);
                 if w.underline {
@@ -4638,6 +4729,42 @@ fn shift_clip(clip: &mut Option<[f32; 4]>, dx: f32, dy: f32) {
     }
 }
 
+/// Shift a mitered-border polygon's four points by `(dx, dy)` (the points are
+/// absolute, so they must track scroll / inline-block placement like `x`/`y`).
+fn shift_quad(quad: &mut Option<[[f32; 2]; 4]>, dx: f32, dy: f32) {
+    if let Some(q) = quad {
+        for p in q.iter_mut() {
+            p[0] += dx;
+            p[1] += dy;
+        }
+    }
+}
+
+/// Shift a rotation pivot `(_, cx, cy)` by `(dx, dy)` (the angle is unaffected).
+fn shift_rotation(rotation: &mut Option<(f32, f32, f32)>, dx: f32, dy: f32) {
+    if let Some((_, cx, cy)) = rotation {
+        *cx += dx;
+        *cy += dy;
+    }
+}
+
+/// The axis-aligned bounding box `(x, y, w, h)` of the rectangle `(x, y, w, h)` after
+/// rotating its four corners by `angle` (radians) about `(cx, cy)`. Used to keep
+/// hit-test regions (links/bounds) usable under `transform: rotate()`.
+fn rotated_bbox(x: f32, y: f32, w: f32, h: f32, angle: f32, cx: f32, cy: f32) -> (f32, f32, f32, f32) {
+    let (s, c) = angle.sin_cos();
+    let rot = |px: f32, py: f32| {
+        let (dx, dy) = (px - cx, py - cy);
+        (cx + dx * c - dy * s, cy + dx * s + dy * c)
+    };
+    let corners = [rot(x, y), rot(x + w, y), rot(x + w, y + h), rot(x, y + h)];
+    let minx = corners.iter().map(|p| p.0).fold(f32::MAX, f32::min);
+    let maxx = corners.iter().map(|p| p.0).fold(f32::MIN, f32::max);
+    let miny = corners.iter().map(|p| p.1).fold(f32::MAX, f32::min);
+    let maxy = corners.iter().map(|p| p.1).fold(f32::MIN, f32::max);
+    (minx, miny, maxx - minx, maxy - miny)
+}
+
 /// Intersect an optional existing clip with `clip`, returning the overlap (a
 /// degenerate, zero-area rect when they don't overlap, which hides the item).
 fn clip_intersect(existing: Option<[f32; 4]>, clip: [f32; 4]) -> [f32; 4] {
@@ -4659,6 +4786,7 @@ fn rect(x: f32, y: f32, w: f32, h: f32, color: argus_geometry::Color) -> RectFil
         radius: 0.0,
         clip: None,
         quad: None,
+        rotation: None,
     }
 }
 
@@ -4681,6 +4809,7 @@ fn border_quad(points: [[f32; 2]; 4], color: argus_geometry::Color) -> RectFill 
         radius: 0.0,
         clip: None,
         quad: Some(points),
+        rotation: None,
     }
 }
 
@@ -7667,6 +7796,56 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         // push it down by 30px).
         assert!(b.x < 20.0, "B unaffected horizontally, got {}", b.x);
         assert!(b.baseline < a.baseline + 5.0, "B not pushed down by A's transform");
+    }
+
+    #[test]
+    fn transform_rotate_tags_subtree_with_centered_pivot() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A 100x40 box rotated 90deg. Its background rect is tagged with the rotation
+        // (gfx applies the affine), and the pivot is the border-box center.
+        let html = "<div style=\"width:100px; height:40px; background:#f00; transform: rotate(90deg)\">hi</div>";
+        let doc = parse(html);
+        let lay = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let bg = lay
+            .rects
+            .iter()
+            .find(|r| r.color.a > 0 && r.rotation.is_some())
+            .expect("rotated background rect");
+        let (angle, cx, cy) = bg.rotation.unwrap();
+        assert!((angle - std::f32::consts::FRAC_PI_2).abs() < 1e-3, "90deg, got {angle}");
+        // Pivot = center of the ~100x40 border box (left margin ~8).
+        assert!((cx - (8.0 + 50.0)).abs() < 3.0, "pivot x ~ box center, got {cx}");
+        assert!(cy > 0.0 && cy < 60.0, "pivot y within the box band, got {cy}");
+        // The text run is tagged too, with the same pivot.
+        let run = lay.runs.iter().find(|r| r.text == "hi").expect("text run");
+        let (_, rcx, rcy) = run.rotation.expect("run rotated");
+        assert!((rcx - cx).abs() < 0.01 && (rcy - cy).abs() < 0.01, "run shares the pivot");
+    }
+
+    #[test]
+    fn rotate_pivot_and_quad_follow_shift() {
+        // Guards the scroll/inline-block bug: shifting the display list must move the
+        // rotation pivot (and mitered-quad points) with it, not leave them behind.
+        let mut rot = Some((0.5_f32, 20.0, 20.0));
+        shift_rotation(&mut rot, 5.0, 100.0);
+        assert_eq!(rot, Some((0.5, 25.0, 120.0)), "pivot shifted, angle unchanged");
+
+        let mut quad = Some([[10.0, 10.0], [30.0, 10.0], [30.0, 30.0], [10.0, 30.0]]);
+        shift_quad(&mut quad, 5.0, 100.0);
+        assert_eq!(quad.unwrap()[0], [15.0, 110.0], "quad point shifted");
+    }
+
+    #[test]
+    fn rotated_bbox_of_a_square_quarter_turn() {
+        // A 10x20 rect rotated 90deg about its own center has the swapped extents
+        // (~20x10) and the same center — the bbox a hit-test region collapses to.
+        let (x, y, w, h) = rotated_bbox(0.0, 0.0, 10.0, 20.0, std::f32::consts::FRAC_PI_2, 5.0, 10.0);
+        assert!((w - 20.0).abs() < 1e-3 && (h - 10.0).abs() < 1e-3, "extents swap: {w}x{h}");
+        assert!((x + w / 2.0 - 5.0).abs() < 1e-3, "center x preserved");
+        assert!((y + h / 2.0 - 10.0).abs() < 1e-3, "center y preserved");
     }
 
     #[test]

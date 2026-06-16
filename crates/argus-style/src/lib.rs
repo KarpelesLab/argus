@@ -645,6 +645,9 @@ pub struct ComputedStyle {
     /// `transform: translate(x, y)` — paints the subtree shifted by `(x, y)` with no
     /// effect on layout. `%` resolves against the element's own box (not inherited).
     pub transform_translate: Option<(Length, Length)>,
+    /// `transform: rotate(<angle>)` — paints the subtree rotated about its center
+    /// (border box) by this angle in **radians**, with no effect on flow.
+    pub transform_rotate: Option<f32>,
     /// `transform: scale(x, y)` — paints the subtree scaled about its center, with
     /// no effect on layout (not inherited).
     pub transform_scale: Option<(f32, f32)>,
@@ -787,6 +790,7 @@ impl ComputedStyle {
             ellipsis: false,
             transform_translate: None,
             transform_scale: None,
+            transform_rotate: None,
             list_style: ListStyle::Disc,
             list_style_inside: false,
             text_transform: TextTransform::None,
@@ -2408,6 +2412,7 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     if let Some(v) = map.get("transform") {
         cs.transform_translate = parse_transform_translate(v);
         cs.transform_scale = parse_transform_scale(v);
+        cs.transform_rotate = parse_transform_rotate(v);
     }
     // Fold the resolved weight/style into a web-font family key so a bold/italic
     // run selects the matching `@font-face` face (the registry keys faces the same
@@ -2490,6 +2495,47 @@ fn parse_transform_translate(v: &str) -> Option<(Length, Length)> {
         }
         if let Some(args) = seg.strip_prefix("translateY(") {
             return parse_length(args.trim()).map(|y| (Length::Zero, y));
+        }
+    }
+    None
+}
+
+/// Parse a CSS `<angle>` into radians: `deg` (also the default for a bare number),
+/// `rad`, `grad`, or `turn`.
+fn parse_angle_rad(tok: &str) -> Option<f32> {
+    let t = tok.trim();
+    let (num, unit): (&str, &str) = if let Some(n) = t.strip_suffix("grad") {
+        (n, "grad")
+    } else if let Some(n) = t.strip_suffix("deg") {
+        (n, "deg")
+    } else if let Some(n) = t.strip_suffix("rad") {
+        (n, "rad")
+    } else if let Some(n) = t.strip_suffix("turn") {
+        (n, "turn")
+    } else {
+        (t, "deg")
+    };
+    let v: f32 = num.trim().parse().ok()?;
+    Some(match unit {
+        "rad" => v,
+        "grad" => v * std::f32::consts::PI / 200.0,
+        "turn" => v * std::f32::consts::TAU,
+        _ => v.to_radians(), // deg
+    })
+}
+
+/// Extract the angle (radians) from the first `rotate(...)`/`rotateZ(...)` function in
+/// a `transform` list. Other functions (translate/scale/…) are ignored.
+fn parse_transform_rotate(v: &str) -> Option<f32> {
+    for seg in v.split(')') {
+        let seg = seg.trim();
+        if let Some(args) = seg
+            .strip_prefix("rotate(")
+            .or_else(|| seg.strip_prefix("rotateZ("))
+        {
+            if let Some(a) = parse_angle_rad(args) {
+                return Some(a);
+            }
         }
     }
     None
@@ -3184,6 +3230,32 @@ mod tests {
         );
         // A single width still works (uniform).
         assert_eq!(cs("border-width: 7px").border, Edges::uniform(7.0));
+    }
+
+    #[test]
+    fn transform_rotate_parses_angle_units() {
+        let cs = |decl: &str| {
+            let mut doc = Document::new();
+            let d = one(&mut doc, "div", vec![]);
+            computed_style(
+                &doc,
+                d,
+                &ComputedStyle::initial(),
+                &parse_stylesheet(&format!("div {{ {decl} }}")),
+            )
+        };
+        use std::f32::consts::PI;
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        assert!(near(cs("transform: rotate(90deg)").transform_rotate.unwrap(), PI / 2.0));
+        assert!(near(cs("transform: rotate(0.5turn)").transform_rotate.unwrap(), PI));
+        assert!(near(cs("transform: rotate(200grad)").transform_rotate.unwrap(), PI));
+        assert!(near(cs("transform: rotate(1rad)").transform_rotate.unwrap(), 1.0));
+        // Bare number is degrees; rotate coexists with translate/scale in a list.
+        assert!(near(
+            cs("transform: translate(5px) rotate(45) scale(2)").transform_rotate.unwrap(),
+            45.0_f32.to_radians()
+        ));
+        assert!(cs("transform: scale(2)").transform_rotate.is_none());
     }
 
     #[test]
