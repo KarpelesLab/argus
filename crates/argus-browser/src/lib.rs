@@ -2141,10 +2141,45 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
     // Load the active tab's page into its process and present it.
     macro_rules! reload_active {
         () => {{
-            let proc = &procs[tabs.active_index()];
-            let (frame, h) = load_page(proc, &net, &window, active_target(&tabs).as_deref())?;
+            let (frame, h) =
+                load_page(&procs[tabs.active_index()], &net, &window, active_target(&tabs).as_deref())?;
             content_height = h;
             present_framed(&window, &frame, &tabs, window_size)?;
+            // Deep-link: if the navigated URL has a `#fragment`, scroll to that
+            // element (content reports its document Y via the scroll sentinel).
+            if let Some(frag) = active_target(&tabs)
+                .as_deref()
+                .and_then(|t| t.split_once('#').map(|(_, f)| f.to_string()))
+                .filter(|f| !f.is_empty())
+            {
+                let ch = procs[tabs.active_index()].channel();
+                proto::send(ch, Msg::ScrollToFragment { fragment: frag }, &[])?;
+                let resp = loop {
+                    match proto::recv(ch)?.0 {
+                        Msg::StorageChanged { data } => {
+                            let _ = std::fs::write(store::path(), &data);
+                        }
+                        other => break other,
+                    }
+                };
+                if let Msg::ClickResult { url, .. } = resp {
+                    if let Some(n) = url.strip_prefix(proto::SCROLL_TO_PREFIX) {
+                        let max = content_height.saturating_sub(content_vp.height);
+                        let y = n.parse::<u32>().unwrap_or(0).min(max);
+                        if y > 0 {
+                            tabs.active_mut().scroll_y = y;
+                            proto::send(ch, Msg::SetScroll { y }, &[])?;
+                            let (frame2, h2) = request_frame(
+                                &procs[tabs.active_index()],
+                                &net,
+                                active_target(&tabs).as_deref(),
+                            )?;
+                            content_height = h2;
+                            present_framed(&window, &frame2, &tabs, window_size)?;
+                        }
+                    }
+                }
+            }
         }};
     }
     // Submit a `method=post` form: POST `$body` to `$url` in the active tab's

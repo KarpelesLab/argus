@@ -187,6 +187,10 @@ pub enum Msg {
     /// browser → net service: POST `body` (`application/x-www-form-urlencoded`) to
     /// this URL — an HTML form submission with `method=post`. Not cached.
     PostUrl { url: String, body: Vec<u8> },
+    /// browser → content: after a navigation to `url#fragment`, ask for the
+    /// document Y of `fragment`. Content replies with a [`Msg::ClickResult`] whose
+    /// url is the [`SCROLL_TO_PREFIX`] sentinel + that Y (so the browser scrolls).
+    ScrollToFragment { fragment: String },
     /// net service → browser: a fetched resource (`status == 0` means failure).
     ResourceLoaded { status: u16, body: Vec<u8> },
     /// content → browser: fetch a subresource (e.g. an image) at `url`.
@@ -242,6 +246,7 @@ const TAG_PROVIDE_MONO_FONT: u8 = 16;
 const TAG_PROVIDE_STORAGE: u8 = 17;
 const TAG_STORAGE_CHANGED: u8 = 18;
 const TAG_POST_URL: u8 = 19;
+const TAG_SCROLL_TO_FRAGMENT: u8 = 20;
 
 impl Msg {
     /// Number of file descriptors that accompany this message out-of-band.
@@ -307,6 +312,10 @@ impl Msg {
                 buf.push(TAG_POST_URL);
                 put_bytes(&mut buf, url.as_bytes());
                 put_bytes(&mut buf, body);
+            }
+            Msg::ScrollToFragment { fragment } => {
+                buf.push(TAG_SCROLL_TO_FRAGMENT);
+                put_bytes(&mut buf, fragment.as_bytes());
             }
             Msg::ResourceLoaded { status, body } => {
                 buf.push(TAG_RESOURCE_LOADED);
@@ -379,6 +388,9 @@ impl Msg {
             TAG_POST_URL => Msg::PostUrl {
                 url: String::from_utf8_lossy(c.bytes()?).into_owned(),
                 body: c.bytes()?.to_vec(),
+            },
+            TAG_SCROLL_TO_FRAGMENT => Msg::ScrollToFragment {
+                fragment: String::from_utf8_lossy(c.bytes()?).into_owned(),
             },
             TAG_RESOURCE_LOADED => Msg::ResourceLoaded {
                 status: c.u16()?,
@@ -500,6 +512,9 @@ mod tests {
         round_trip(Msg::PostUrl {
             url: "https://example.com/login".to_string(),
             body: b"user=a&pass=b".to_vec(),
+        });
+        round_trip(Msg::ScrollToFragment {
+            fragment: "section-2".to_string(),
         });
         round_trip(Msg::ResourceLoaded {
             status: 200,

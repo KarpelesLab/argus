@@ -142,6 +142,19 @@ pub fn run(channel: Channel) -> io::Result<()> {
             Msg::SetScroll { y } => {
                 content.scroll_y = y;
             }
+            Msg::ScrollToFragment { fragment } => {
+                // Deep-link after navigation: report the fragment target's document
+                // Y as a scroll sentinel, exactly like a same-page anchor click.
+                let y = content.fragment_scroll_y(&fragment);
+                proto::send(
+                    &channel,
+                    Msg::ClickResult {
+                        url: format!("{}{}", proto::SCROLL_TO_PREFIX, y),
+                        post_body: Vec::new(),
+                    },
+                    &[],
+                )?;
+            }
             Msg::InputClick { x, y } => {
                 // A GET link (incl. GET submit buttons) navigates by URL.
                 let url = content
