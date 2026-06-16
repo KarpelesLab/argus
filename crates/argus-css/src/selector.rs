@@ -88,6 +88,11 @@ pub enum PseudoClass {
     ReadWrite,
     /// `:link` / `:any-link` — a hyperlink (`<a>`/`<area>` with an `href`).
     AnyLink,
+    /// `:focus` — the element currently holding keyboard focus (the content
+    /// process marks it with the `__argus_focus` attribute before the cascade).
+    Focus,
+    /// `:focus-within` — the focused element or any of its ancestors.
+    FocusWithin,
     /// `:root` — the document's root element (`<html>`).
     Root,
     /// `:empty` — no element or (non-whitespace) text children.
@@ -345,6 +350,8 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                                 "optional" => c.pseudos.push(PseudoClass::Optional),
                                 "read-write" => c.pseudos.push(PseudoClass::ReadWrite),
                                 "link" | "any-link" => c.pseudos.push(PseudoClass::AnyLink),
+                                "focus" => c.pseudos.push(PseudoClass::Focus),
+                                "focus-within" => c.pseudos.push(PseudoClass::FocusWithin),
                                 "root" => c.pseudos.push(PseudoClass::Root),
                                 "empty" => c.pseudos.push(PseudoClass::Empty),
                                 "first-of-type" => c.pseudos.push(PseudoClass::FirstOfType),
@@ -787,6 +794,11 @@ fn pseudo_matches(doc: &Document, node: NodeId, p: PseudoClass) -> bool {
             NodeData::Element(e)
                 if (e.name.is_html("a") || e.name.is_html("area")) && e.attr("href").is_some()
         ),
+        // `:focus` — the focused element, marked by the content process with the
+        // `__argus_focus` attribute (see argus-content `apply_focus`).
+        PseudoClass::Focus => element_has_attr(doc, node, "__argus_focus"),
+        // `:focus-within` — this element or any descendant holds focus.
+        PseudoClass::FocusWithin => subtree_has_focus(doc, node),
         // `:root` — an element whose parent is the document node.
         PseudoClass::Root => doc
             .node(node)
@@ -804,6 +816,14 @@ fn pseudo_matches(doc: &Document, node: NodeId, p: PseudoClass) -> bool {
 /// Whether `node` is an element carrying attribute `name`.
 fn element_has_attr(doc: &Document, node: NodeId, name: &str) -> bool {
     matches!(&doc.node(node).data, NodeData::Element(e) if e.attr(name).is_some())
+}
+
+/// Whether `node` or any descendant carries the focus marker (`:focus-within`).
+fn subtree_has_focus(doc: &Document, node: NodeId) -> bool {
+    if element_has_attr(doc, node, "__argus_focus") {
+        return true;
+    }
+    doc.children(node).any(|c| subtree_has_focus(doc, c))
 }
 
 /// The 1-based position of `node` among its element siblings, counted from the end
@@ -1104,6 +1124,37 @@ mod tests {
         assert!(matches(&doc, link, &sel("a:link")));
         assert!(matches(&doc, link, &sel(":any-link")));
         assert!(!matches(&doc, anchor, &sel("a:link")));
+    }
+
+    #[test]
+    fn focus_and_focus_within_pseudo_classes() {
+        // The content process marks the focused element with `__argus_focus`.
+        let mut doc = Document::new();
+        let root = doc.root();
+        let wrapper = doc.create_element(QualName::html("div"), vec![]);
+        doc.append(root, wrapper);
+        let focused = doc.create_element(
+            QualName::html("input"),
+            vec![Attribute::new("__argus_focus", "")],
+        );
+        doc.append(wrapper, focused);
+        let other = doc.create_element(QualName::html("input"), vec![]);
+        doc.append(root, other);
+
+        // :focus matches only the marked element.
+        assert!(matches(&doc, focused, &sel("input:focus")));
+        assert!(!matches(&doc, other, &sel("input:focus")));
+        assert!(!matches(&doc, wrapper, &sel(":focus")), "ancestor isn't :focus");
+
+        // :focus-within matches the focused element and its ancestors.
+        assert!(matches(&doc, focused, &sel(":focus-within")));
+        assert!(matches(&doc, wrapper, &sel("div:focus-within")));
+        assert!(!matches(&doc, other, &sel(":focus-within")), "sibling subtree");
+
+        // :focus counts as a pseudo-class for specificity (> a bare type).
+        let a = sel("input:focus").specificity();
+        let b = sel("input").specificity();
+        assert!(a > b, "{a:?} should outrank {b:?}");
     }
 
     #[test]
