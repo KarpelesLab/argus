@@ -479,6 +479,27 @@ impl Content {
         Ok(())
     }
 
+    /// The clamped target scroll offset for a page-scrolling key (PageUp/Down,
+    /// Home/End, arrow up/down, Space), or `None` if `ch` isn't one. macOS delivers
+    /// these as function-key Unicode scalars through `KeyChar`.
+    fn scroll_key_target(&self, ch: u32) -> Option<u32> {
+        let vh = self.viewport.height;
+        let page = (vh as f32 * 0.9) as u32;
+        let line = 64u32;
+        let max = self.content_height.saturating_sub(vh);
+        let cur = self.scroll_y;
+        let new = match ch {
+            0xF72D | 0x20 => cur.saturating_add(page), // Page Down / Space
+            0xF72C => cur.saturating_sub(page),        // Page Up
+            0xF701 => cur.saturating_add(line),        // Arrow Down
+            0xF700 => cur.saturating_sub(line),        // Arrow Up
+            0xF729 => 0,                               // Home
+            0xF72B => max,                             // End
+            _ => return None,
+        };
+        Some(new.min(max))
+    }
+
     /// The absolute document Y to scroll to for a `#fragment` anchor: the target
     /// id's box top in document coords (its on-screen y plus the current scroll).
     /// An empty fragment (`#`/`#top`) or unknown id scrolls to the top.
@@ -749,6 +770,18 @@ impl Content {
     /// `(url, post_body)`: a GET form gives `(action?query, [])`, a POST form gives
     /// `(action, urlencoded-body)`. Returns `None` for ordinary typing.
     fn type_key(&mut self, ch: u32) -> Option<(String, Vec<u8>)> {
+        // Page-scrolling keys act on the document when no editable field is focused
+        // (so Space/arrows still type into a field). The new offset is reported via
+        // the scroll sentinel, applied by the browser like an anchor jump.
+        let focused_editable = self
+            .focused
+            .as_deref()
+            .is_some_and(|id| self.is_editable_input(id));
+        if !focused_editable {
+            if let Some(y) = self.scroll_key_target(ch) {
+                return Some((format!("{}{}", proto::SCROLL_TO_PREFIX, y), Vec::new()));
+            }
+        }
         let id = self.focused.clone()?;
         // Tab moves focus to the next editable field (wrapping).
         if ch == 0x09 {
@@ -1240,6 +1273,26 @@ mod tests {
         // An empty fragment or unknown id scrolls to the top.
         assert_eq!(c.fragment_scroll_y(""), 0);
         assert_eq!(c.fragment_scroll_y("missing"), 0);
+    }
+
+    #[test]
+    fn scroll_keys_target_clamped_offsets() {
+        let mut c = headless("<p>tall page</p>", vec![]);
+        // 800x600 viewport, a 2000px-tall page → max scroll 1400, page step 540.
+        c.content_height = 2000;
+        c.scroll_y = 0;
+        assert_eq!(c.scroll_key_target(0xF72D), Some(540), "Page Down");
+        assert_eq!(c.scroll_key_target(0x20), Some(540), "Space pages down");
+        assert_eq!(c.scroll_key_target(0xF701), Some(64), "Arrow Down");
+        assert_eq!(c.scroll_key_target(0xF729), Some(0), "Home");
+        assert_eq!(c.scroll_key_target(0xF72B), Some(1400), "End → max");
+        // Near the bottom, Page Down clamps to max; Page Up steps back.
+        c.scroll_y = 1200;
+        assert_eq!(c.scroll_key_target(0xF72D), Some(1400), "Page Down clamps");
+        assert_eq!(c.scroll_key_target(0xF72C), Some(660), "Page Up");
+        // Non-scroll keys are not handled here.
+        assert_eq!(c.scroll_key_target('a' as u32), None);
+        assert_eq!(c.scroll_key_target(0x08), None);
     }
 
     #[test]
