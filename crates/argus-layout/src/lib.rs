@@ -575,6 +575,12 @@ pub struct Layout {
     pub bounds: Vec<ElementBound>,
     /// Total content height in pixels.
     pub height: f32,
+    /// Index in `rects`/`runs` where the **overlay** region begins: the hoisted
+    /// `position: sticky`/`fixed` subtrees, which the content process paints (as a
+    /// rects+text unit) *above* the base layer so they occlude foreign content. Equal
+    /// to `rects.len()`/`runs.len()` when nothing is positioned.
+    pub overlay_rects: usize,
+    pub overlay_runs: usize,
 }
 
 /// A `background-image: url()` fill over an element's border box. The content
@@ -986,7 +992,9 @@ pub fn layout_scrolled(
         viewport_w: viewport_width,
         viewport_h: viewport_height,
         scroll_y,
-        sticky_ranges: Vec::new(),
+        hoist_ranges: Vec::new(),
+        overlay_rects: 0,
+        overlay_runs: 0,
         counters: HashMap::new(),
         uses_counters: argus_style::uses_counters(&author),
     };
@@ -997,7 +1005,7 @@ pub fn layout_scrolled(
         _ => ComputedStyle::initial(),
     };
     ctx.layout_block(start, start_style, content_x, content_width, None);
-    ctx.hoist_sticky();
+    ctx.hoist_positioned();
 
     Layout {
         rects: ctx.rects,
@@ -1007,6 +1015,8 @@ pub fn layout_scrolled(
         links: ctx.links,
         submits: ctx.submits,
         bounds: ctx.bounds,
+        overlay_rects: ctx.overlay_rects,
+        overlay_runs: ctx.overlay_runs,
         height: ctx.cursor_y + PAGE_MARGIN,
     }
 }
@@ -1055,11 +1065,14 @@ struct Ctx<'a> {
     /// (sticky then behaves as a non-shifting box); set by `layout_scrolled`.
     viewport_h: f32,
     scroll_y: f32,
-    /// Display-list `[start, end)` mark pairs of `position: sticky` subtrees, hoisted
-    /// to paint last (above in-flow content) after layout. Positioned boxes form a
-    /// stacking context above the normal flow; the flat doc-order display list would
-    /// otherwise let later siblings paint over a stuck box.
-    sticky_ranges: Vec<(DisplayListMark, DisplayListMark)>,
+    /// Display-list `[start, end)` mark pairs of `position: sticky`/`fixed` subtrees,
+    /// hoisted to paint last (above in-flow content) after layout. Positioned boxes
+    /// form a stacking context above the normal flow; the flat doc-order display list
+    /// would otherwise let later siblings paint over a stuck/fixed box.
+    hoist_ranges: Vec<(DisplayListMark, DisplayListMark)>,
+    /// Overlay split for `rects`/`runs` after `hoist_positioned` (see `Layout`).
+    overlay_rects: usize,
+    overlay_runs: usize,
     /// CSS counter values (`counter-reset`/`-increment`), in document order, for
     /// `counter()` in generated content. Empty/unused unless the page has counters.
     counters: HashMap<String, i32>,
@@ -1068,24 +1081,30 @@ struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
-    /// Move every `position: sticky` subtree's display items to the end of each
-    /// channel (preserving order) so they paint above later in-flow content — the
+    /// Move every `position: sticky`/`fixed` subtree's display items to the end of
+    /// each channel (preserving order) so they paint above later in-flow content — the
     /// stacking behavior of positioned boxes, approximated on the flat display list.
-    fn hoist_sticky(&mut self) {
-        if self.sticky_ranges.is_empty() {
+    fn hoist_positioned(&mut self) {
+        // No hoist → the overlay region is empty (starts at the end of each channel).
+        self.overlay_rects = self.rects.len();
+        self.overlay_runs = self.runs.len();
+        if self.hoist_ranges.is_empty() {
             return;
         }
-        let ranges = std::mem::take(&mut self.sticky_ranges);
+        let ranges = std::mem::take(&mut self.hoist_ranges);
         let comp = |sel: fn(&DisplayListMark) -> usize| -> Vec<(usize, usize)> {
             ranges.iter().map(|(s, e)| (sel(s), sel(e))).collect()
         };
-        reorder_sticky_last(&mut self.rects, &comp(|m| m.0));
-        reorder_sticky_last(&mut self.runs, &comp(|m| m.1));
-        reorder_sticky_last(&mut self.images, &comp(|m| m.2));
-        reorder_sticky_last(&mut self.links, &comp(|m| m.3));
-        reorder_sticky_last(&mut self.bounds, &comp(|m| m.4));
-        reorder_sticky_last(&mut self.submits, &comp(|m| m.5));
-        reorder_sticky_last(&mut self.bg_images, &comp(|m| m.6));
+        // The split index (where hoisted items begin) for rects/runs drives the
+        // content overlay pass, which paints positioned boxes (background + text)
+        // together above the base layer — the two-pass rects-then-runs render can't.
+        self.overlay_rects = reorder_hoisted_last(&mut self.rects, &comp(|m| m.0));
+        self.overlay_runs = reorder_hoisted_last(&mut self.runs, &comp(|m| m.1));
+        reorder_hoisted_last(&mut self.images, &comp(|m| m.2));
+        reorder_hoisted_last(&mut self.links, &comp(|m| m.3));
+        reorder_hoisted_last(&mut self.bounds, &comp(|m| m.4));
+        reorder_hoisted_last(&mut self.submits, &comp(|m| m.5));
+        reorder_hoisted_last(&mut self.bg_images, &comp(|m| m.6));
     }
 
     /// The current end of every display-list channel — a snapshot used to bound the
@@ -1160,7 +1179,10 @@ impl Ctx<'_> {
         // ancestor's padding box (tracked in `self.cb_*`), except `fixed`, which is
         // anchored to the viewport.
         let cb_self = if style.position == Position::Fixed {
-            (0.0, 0.0, self.viewport_w, None)
+            // Fixed's containing block is the viewport; a known height enables
+            // `bottom`/`right` anchoring (0 in the bare `layout()` API → no bottom CB).
+            let vh = (self.viewport_h > 0.0).then_some(self.viewport_h);
+            (0.0, 0.0, self.viewport_w, vh)
         } else {
             (self.cb_x, self.cb_y, self.cb_w, self.cb_h)
         };
@@ -2138,12 +2160,21 @@ impl Ctx<'_> {
                     border_box_top
                 };
                 let dx = target_left - border_box_left;
-                let dy = target_top - border_box_top;
+                // `fixed` is anchored to the viewport, so it must not scroll: the
+                // caller subtracts `scroll_y` when compositing, so add it back here to
+                // cancel it (`screen_y = (target + scroll) - scroll = target`).
+                let fixed = style.position == Position::Fixed;
+                let dy = target_top - border_box_top + if fixed { self.scroll_y } else { 0.0 };
                 if dx != 0.0 || dy != 0.0 {
                     self.shift_display_list(ds_start, dx, dy);
                 }
                 // Out of flow: following siblings ignore this box's height.
                 self.cursor_y = border_box_top;
+                // Fixed paints above in-flow content (a positioned stacking context),
+                // like sticky — hoist its subtree to the end of each channel.
+                if fixed {
+                    self.hoist_ranges.push((ds_start, self.mark()));
+                }
             }
             Position::Sticky => {
                 // Stays in normal flow (cursor unchanged), but shifts so its screen
@@ -2166,7 +2197,7 @@ impl Ctx<'_> {
                     self.shift_display_list(ds_start, 0.0, dy);
                 }
                 // Record the subtree so it can be hoisted to paint above later content.
-                self.sticky_ranges.push((ds_start, self.mark()));
+                self.hoist_ranges.push((ds_start, self.mark()));
             }
             Position::Static => {}
         }
@@ -4810,18 +4841,22 @@ fn transform_text(word: &str, transform: TextTransform) -> String {
 
 /// Shift a clip rect's origin by `(dx, dy)` (its size is unchanged).
 /// Stable-partition `v` so items whose index falls in any `[start, end)` range move
-/// to the end (in their original relative order); used to hoist sticky subtrees.
-fn reorder_sticky_last<T>(v: &mut Vec<T>, ranges: &[(usize, usize)]) {
-    let is_sticky = |i: usize| ranges.iter().any(|&(s, e)| i >= s && i < e);
-    if !(0..v.len()).any(is_sticky) {
-        return;
+/// to the end (in their original relative order); used to hoist positioned subtrees.
+/// Returns the split index — the count of non-hoisted items, i.e. where the hoisted
+/// (overlay) region begins.
+fn reorder_hoisted_last<T>(v: &mut Vec<T>, ranges: &[(usize, usize)]) -> usize {
+    let is_hoisted = |i: usize| ranges.iter().any(|&(s, e)| i >= s && i < e);
+    let split = (0..v.len()).filter(|&i| !is_hoisted(i)).count();
+    if split == v.len() {
+        return split; // nothing hoisted
     }
     let order: Vec<usize> = (0..v.len())
-        .filter(|&i| !is_sticky(i))
-        .chain((0..v.len()).filter(|&i| is_sticky(i)))
+        .filter(|&i| !is_hoisted(i))
+        .chain((0..v.len()).filter(|&i| is_hoisted(i)))
         .collect();
     let mut slots: Vec<Option<T>> = v.drain(..).map(Some).collect();
     *v = order.into_iter().map(|i| slots[i].take().unwrap()).collect();
+    split
 }
 
 fn shift_clip(clip: &mut Option<[f32; 4]>, dx: f32, dy: f32) {
@@ -7984,14 +8019,14 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
     }
 
     #[test]
-    fn reorder_sticky_last_hoists_ranges_preserving_order() {
+    fn reorder_hoisted_last_hoists_ranges_preserving_order() {
         // Indices 2..4 are "sticky": they move to the end, both groups keep order.
         let mut v = vec!['a', 'b', 'S', 'T', 'c', 'd'];
-        reorder_sticky_last(&mut v, &[(2, 4)]);
+        reorder_hoisted_last(&mut v, &[(2, 4)]);
         assert_eq!(v, vec!['a', 'b', 'c', 'd', 'S', 'T']);
         // No sticky range → unchanged (the common, fast path).
         let mut w = vec![1, 2, 3];
-        reorder_sticky_last(&mut w, &[]);
+        reorder_hoisted_last(&mut w, &[]);
         assert_eq!(w, vec![1, 2, 3]);
     }
 
@@ -8013,6 +8048,40 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         let gi = l.rects.iter().position(|r| r.color == green).expect("sticky rect");
         let wi = l.rects.iter().position(|r| r.color == white).expect("body rect");
         assert!(gi > wi, "stuck sticky rect hoisted after the body rect (paints on top)");
+    }
+
+    #[test]
+    fn fixed_box_stays_at_viewport_position_under_scroll() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let html = "<div style=\"position:fixed; top:10px; width:80px; height:20px; background:#0000ff\">F</div>\
+                    <div style=\"height:3000px\">tall</div>";
+        let doc = parse(html);
+        let blue = |l: &Layout| {
+            l.rects
+                .iter()
+                .find(|r| r.color == argus_geometry::Color { r: 0, g: 0, b: 255, a: 255 })
+                .map(|r| r.y)
+                .expect("fixed background rect")
+        };
+        // At scroll 0 the fixed box sits at its `top:10`.
+        let at0 = blue(&layout_scrolled(&doc, &font, 400.0, 600.0, 0.0, &ImageSizes::new()));
+        assert!((at0 - 10.0).abs() < 1.0, "fixed at top:10, got {at0}");
+        // Scrolled 300px: its doc-Y rises by 300 so that `doc_y - scroll` stays at 10
+        // (the caller subtracts scroll) — i.e. it stays put on screen.
+        let l = layout_scrolled(&doc, &font, 400.0, 600.0, 300.0, &ImageSizes::new());
+        let at300 = blue(&l);
+        assert!((at300 - 310.0).abs() < 1.0, "fixed doc-Y tracks scroll, got {at300}");
+        // The fixed box is hoisted into the overlay region (painted above the base).
+        assert!(l.overlay_rects < l.rects.len(), "an overlay region exists");
+        let blue_idx = l
+            .rects
+            .iter()
+            .position(|r| r.color == argus_geometry::Color { r: 0, g: 0, b: 255, a: 255 })
+            .unwrap();
+        assert!(blue_idx >= l.overlay_rects, "fixed rect lives in the overlay region");
     }
 
     #[test]

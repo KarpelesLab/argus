@@ -456,6 +456,12 @@ impl Content {
         // pass suffices.
         let n_rects = layout.rects.len();
         let n_runs = layout.runs.len();
+        // Split off the overlay region (hoisted `position: sticky`/`fixed` subtrees):
+        // these paint as a rects+text unit *above* everything else, so a fixed banner
+        // or sticky nav occludes the content scrolling under it (the base two-pass
+        // render paints all rects below all text, which can't occlude foreign text).
+        let overlay_rects = layout.rects.split_off(layout.overlay_rects.min(layout.rects.len()));
+        let overlay_runs = layout.runs.split_off(layout.overlay_runs.min(layout.runs.len()));
         if layout.bg_images.is_empty() {
             let list = argus_gfx::DisplayList {
                 rects: layout.rects,
@@ -521,6 +527,18 @@ impl Content {
                         .map(|[x, y, w, h]| [x as i32, y as i32, w as i32, h as i32]),
                 );
             }
+        }
+
+        // Overlay pass: positioned (sticky/fixed) boxes paint above the base layer and
+        // foreground images, as a single rects-then-text unit so their backgrounds
+        // occlude content underneath while their own text stays on top.
+        if !overlay_rects.is_empty() || !overlay_runs.is_empty() {
+            let overlay = argus_gfx::DisplayList {
+                rects: overlay_rects,
+                runs: overlay_runs,
+            };
+            let painted = argus_gfx::render_display_list(&overlay, font, vw, vh);
+            argus_gfx::composite_over(fb.pixels_mut(), &painted.pixels);
         }
 
         log!(
