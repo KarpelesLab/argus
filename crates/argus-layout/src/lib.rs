@@ -386,7 +386,7 @@ fn clamp_content_width(style: &ComputedStyle, width: f32, avail: f32) -> f32 {
 
 /// A snapshot of the display-list lengths (rects, runs, images, links, bounds),
 /// used to shift everything appended after the mark by a delta.
-type DisplayListMark = (usize, usize, usize, usize, usize, usize);
+type DisplayListMark = (usize, usize, usize, usize, usize, usize, usize);
 
 /// Strip count used to approximate a `linear-gradient` background.
 const GRAD_STEPS: usize = 24;
@@ -562,6 +562,10 @@ pub struct Layout {
     pub runs: Vec<TextRun>,
     /// Placed images (blitted by the content process from decoded bytes).
     pub images: Vec<ImageBox>,
+    /// `background-image: url()` fills, painted behind the element's content (the
+    /// content process tiles/places them between the background-color layer and the
+    /// text). Border-box coordinates.
+    pub bg_images: Vec<BgImage>,
     /// Clickable hyperlink regions.
     pub links: Vec<LinkBox>,
     /// `method=post` submit-button regions (GET submits are plain `links`). A
@@ -571,6 +575,21 @@ pub struct Layout {
     pub bounds: Vec<ElementBound>,
     /// Total content height in pixels.
     pub height: f32,
+}
+
+/// A `background-image: url()` fill over an element's border box. The content
+/// process tiles it (or paints once for `no-repeat`) behind the element's content.
+#[derive(Clone, Debug)]
+pub struct BgImage {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub src: String,
+    /// `background-repeat: no-repeat` — paint once at the top-left instead of tiling.
+    pub no_repeat: bool,
+    /// `overflow: hidden` clip rect confining the fill, if any.
+    pub clip: Option<[f32; 4]>,
 }
 
 /// A `method=post` submit-button hit region: clicking it POSTs `body`
@@ -934,6 +953,7 @@ pub fn layout(doc: &Document, font: &Font, viewport_width: f32, images: &ImageSi
         rects: Vec::new(),
         runs: Vec::new(),
         images: Vec::new(),
+        bg_images: Vec::new(),
         links: Vec::new(),
         submits: Vec::new(),
         bounds: Vec::new(),
@@ -959,6 +979,7 @@ pub fn layout(doc: &Document, font: &Font, viewport_width: f32, images: &ImageSi
         rects: ctx.rects,
         runs: ctx.runs,
         images: ctx.images,
+        bg_images: ctx.bg_images,
         links: ctx.links,
         submits: ctx.submits,
         bounds: ctx.bounds,
@@ -989,6 +1010,7 @@ struct Ctx<'a> {
     rects: Vec<RectFill>,
     runs: Vec<TextRun>,
     images: Vec<ImageBox>,
+    bg_images: Vec<BgImage>,
     links: Vec<LinkBox>,
     submits: Vec<SubmitRegion>,
     bounds: Vec<ElementBound>,
@@ -1035,6 +1057,7 @@ impl Ctx<'_> {
             self.links.len(),
             self.bounds.len(),
             self.submits.len(),
+            self.bg_images.len(),
         );
 
         let border_box_top = self.cursor_y;
@@ -1559,6 +1582,7 @@ impl Ctx<'_> {
                                     self.links.len(),
                                     self.bounds.len(),
                                     self.submits.len(),
+                                    self.bg_images.len(),
                                 );
                                 let saved_y = self.cursor_y;
                                 self.cursor_y = 0.0;
@@ -1572,6 +1596,7 @@ impl Ctx<'_> {
                                     self.links.len(),
                                     self.bounds.len(),
                                     self.submits.len(),
+                                    self.bg_images.len(),
                                 );
                                 let space_before = pending_space;
                                 pending_space = false;
@@ -1905,6 +1930,28 @@ impl Ctx<'_> {
             push_outline(&mut self.rects, ol, ot, ow_full, oh_full, ow, oc, style.outline_style);
         }
 
+        // `background-image: url()`: resolve the URL (it can't ride in the `Copy`
+        // style) and emit a fill over the border box, clipped to it. The content
+        // process paints it behind the element's content (tiled, or once for
+        // `no-repeat`).
+        if style.has_bg_image && !style.hidden {
+            let h = self.cursor_y - border_box_top;
+            if let Some(url) =
+                argus_style::cascaded_value(self.doc, id, self.author, "background-image")
+                    .as_deref()
+                    .and_then(argus_style::extract_url)
+            {
+                self.bg_images.push(BgImage {
+                    x: border_box_left,
+                    y: border_box_top,
+                    w: border_box_w,
+                    h,
+                    src: url,
+                    no_repeat: style.bg_no_repeat,
+                    clip: Some([border_box_left, border_box_top, border_box_w, h]),
+                });
+            }
+        }
         // Record this element's border-box for click hit-testing, if it has an id.
         if let Some(eid) = self.doc.node(id).as_element().and_then(|e| e.attr("id")) {
             self.bounds.push(ElementBound {
@@ -2109,6 +2156,10 @@ impl Ctx<'_> {
             s.x += dx;
             s.y += dy;
         }
+        for bg in &mut self.bg_images[start.6..] {
+            bg.x += dx;
+            bg.y += dy;
+        }
     }
 
     /// Intersect every display-list item appended since `start` with the clip rect
@@ -2161,6 +2212,10 @@ impl Ctx<'_> {
         for s in &mut self.submits[start.5..end.5] {
             s.x += dx;
             s.y += dy;
+        }
+        for bg in &mut self.bg_images[start.6..end.6] {
+            bg.x += dx;
+            bg.y += dy;
         }
     }
 
@@ -2401,6 +2456,7 @@ impl Ctx<'_> {
                 self.links.len(),
                 self.bounds.len(),
                 self.submits.len(),
+                self.bg_images.len(),
             );
             let saved_y = self.cursor_y;
             self.cursor_y = 0.0;
@@ -2413,6 +2469,7 @@ impl Ctx<'_> {
                 self.links.len(),
                 self.bounds.len(),
                 self.submits.len(),
+                self.bg_images.len(),
             );
             let space_before = *pending_space;
             *pending_space = false;
@@ -2984,6 +3041,7 @@ impl Ctx<'_> {
                     self.links.len(),
                     self.bounds.len(),
                     self.submits.len(),
+                    self.bg_images.len(),
                 );
                 self.layout_block(item, istyle, content_left, content_w, None);
                 // Cross-axis offset only applies to fixed-width items (a stretched
@@ -3144,6 +3202,7 @@ impl Ctx<'_> {
                             self.links.len(),
                             self.bounds.len(),
                             self.submits.len(),
+                            self.bg_images.len(),
                         );
                         self.layout_block(items[idx], istyles[idx], cx, bases[idx], None);
                         let h = self.cursor_y - line_top;
@@ -3285,6 +3344,7 @@ impl Ctx<'_> {
                     self.links.len(),
                     self.bounds.len(),
                     self.submits.len(),
+                    self.bg_images.len(),
                 );
                 self.layout_block(item, istyles[i], cx, sizes[i], None);
                 let h = self.cursor_y - row_top;
@@ -3513,6 +3573,7 @@ impl Ctx<'_> {
                 self.links.len(),
                 self.bounds.len(),
                 self.submits.len(),
+                self.bg_images.len(),
             );
             self.cursor_y = 0.0;
             self.layout_block(p.item, p.style, col_x[p.col], p.width, None);
@@ -3523,6 +3584,7 @@ impl Ctx<'_> {
             self.links.truncate(mark.3);
             self.bounds.truncate(mark.4);
             self.submits.truncate(mark.5);
+            self.bg_images.truncate(mark.6);
         }
 
         // Row heights: single-row items set their row's height directly; multi-row
@@ -3743,6 +3805,7 @@ impl Ctx<'_> {
                 self.links.len(),
                 self.bounds.len(),
                 self.submits.len(),
+                self.bg_images.len(),
             );
             self.cursor_y = 0.0;
             self.layout_block(p.cell, p.style, col_x[p.col], span_w(p.col, p.cspan), None);
@@ -3753,6 +3816,7 @@ impl Ctx<'_> {
             self.links.truncate(mark.3);
             self.bounds.truncate(mark.4);
             self.submits.truncate(mark.5);
+            self.bg_images.truncate(mark.6);
         }
         // Row heights: single-row cells set their row; multi-row deficits go to the
         // last spanned row.
@@ -6753,6 +6817,31 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         let gray = render("filter: grayscale(1)");
         assert!(!gray.filter.is_identity());
         assert!((gray.filter.grayscale - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn background_image_emits_a_bg_fill_box() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A div with a url() background emits a BgImage over its box, clipped to it.
+        let doc = parse(
+            "<div style=\"width:200px; height:80px; background-image:url(bg.png)\">hi</div>",
+        );
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        assert_eq!(l.bg_images.len(), 1, "one background fill");
+        let bg = &l.bg_images[0];
+        assert_eq!(bg.src, "bg.png");
+        assert!(!bg.no_repeat, "tiles by default");
+        assert!(bg.w > 0.0 && bg.h > 0.0, "covers the element box");
+        assert_eq!(bg.clip, Some([bg.x, bg.y, bg.w, bg.h]), "clipped to its box");
+
+        // no-repeat is recorded; a gradient background emits no bg-image.
+        let nr = parse("<div style=\"background-image:url(b.png); background-repeat:no-repeat\">x</div>");
+        assert!(layout(&nr, &font, 400.0, &ImageSizes::new()).bg_images[0].no_repeat);
+        let grad = parse("<div style=\"background:linear-gradient(red,blue)\">x</div>");
+        assert!(layout(&grad, &font, 400.0, &ImageSizes::new()).bg_images.is_empty());
     }
 
     #[test]

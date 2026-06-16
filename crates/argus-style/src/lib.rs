@@ -162,6 +162,21 @@ impl Filter {
     }
 }
 
+/// Extract the URL from the first `url(...)` in a value (e.g. a `background-image`),
+/// stripping optional quotes. `None` if there is no `url()`.
+pub fn extract_url(v: &str) -> Option<String> {
+    let start = v.find("url(")? + 4;
+    let end = v[start..].find(')')? + start;
+    let inner = v[start..end].trim();
+    let inner = inner
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| inner.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+        .unwrap_or(inner);
+    let inner = inner.trim();
+    (!inner.is_empty()).then(|| inner.to_string())
+}
+
 /// Parse a `filter` value (a space-separated list of `name(arg)` functions) into a
 /// [`Filter`]. Unknown functions are ignored. `none` / empty → identity.
 fn parse_filter(v: &str) -> Filter {
@@ -617,6 +632,11 @@ pub struct ComputedStyle {
     pub object_position: (f32, f32),
     /// `filter` — per-pixel color/tone functions applied to a replaced image.
     pub filter: Filter,
+    /// Whether `background-image` declares a `url(...)` (resolved to the actual URL
+    /// at layout time, since the string can't ride in this `Copy` struct).
+    pub has_bg_image: bool,
+    /// `background-repeat: no-repeat` (else the image tiles to fill the box).
+    pub bg_no_repeat: bool,
     /// `line-height` as a multiple of `font-size` (inherited).
     pub line_height: f32,
     /// `text-indent` for the first line, in pixels (inherited).
@@ -737,6 +757,8 @@ impl ComputedStyle {
             object_fit: ObjectFit::Fill,
             object_position: (0.5, 0.5),
             filter: Filter::default(),
+            has_bg_image: false,
+            bg_no_repeat: false,
             line_height: 1.2,
             text_indent: 0.0,
             word_spacing: 0.0,
@@ -1518,7 +1540,14 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             cs.background_gradient = parse_linear_gradient(v, cs.color);
         } else if v.contains("radial-gradient(") {
             cs.background_gradient = parse_radial_gradient(v, cs.color);
+        } else if v.contains("url(") {
+            // A bitmap background: the URL is resolved at layout time (it can't live
+            // in this `Copy` struct); flag its presence for the cheap path.
+            cs.has_bg_image = true;
         }
+    }
+    if let Some(v) = map.get("background-repeat") {
+        cs.bg_no_repeat = v.split_whitespace().any(|t| t == "no-repeat");
     }
     // `direction: rtl` / `dir="rtl"` (mapped to `direction` by presentational hints)
     // sets the right-to-left base direction.
@@ -3520,5 +3549,32 @@ mod tests {
         // Multiple functions parse together.
         let multi = filt("filter: grayscale(0.5) brightness(1.2)");
         assert!((multi.grayscale - 0.5).abs() < 1e-6 && (multi.brightness - 1.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn background_image_url_flag_and_extraction() {
+        // extract_url strips quotes and whitespace; ignores non-url values.
+        assert_eq!(extract_url("url(a.png)").as_deref(), Some("a.png"));
+        assert_eq!(extract_url("url( \"b c.png\" )").as_deref(), Some("b c.png"));
+        assert_eq!(extract_url("url('q.gif')").as_deref(), Some("q.gif"));
+        assert_eq!(extract_url("linear-gradient(red, blue)"), None);
+        assert_eq!(extract_url("none"), None);
+
+        // The cascade flags a url() background and parses background-repeat.
+        let cs = |decl: &str| {
+            let mut doc = Document::new();
+            let d = one(&mut doc, "div", vec![]);
+            computed_style(
+                &doc,
+                d,
+                &ComputedStyle::initial(),
+                &parse_stylesheet(&format!("div {{ {decl} }}")),
+            )
+        };
+        assert!(cs("background-image: url(x.png)").has_bg_image);
+        assert!(!cs("background-image: url(x.png)").bg_no_repeat, "tiles by default");
+        assert!(cs("background-image: url(x.png); background-repeat: no-repeat").bg_no_repeat);
+        // A gradient is not a bitmap background (no url flag).
+        assert!(!cs("background: linear-gradient(red, blue)").has_bg_image);
     }
 }

@@ -392,21 +392,71 @@ impl Content {
         for s in &mut layout.submits {
             s.y -= scroll;
         }
+        for bg in &mut layout.bg_images {
+            bg.y -= scroll;
+            if let Some(c) = &mut bg.clip {
+                c[1] -= scroll;
+            }
+        }
         for b in &mut layout.bounds {
             b.y -= scroll;
         }
         self.bounds = layout.bounds;
         self.submits = layout.submits;
-        let list = argus_gfx::DisplayList {
-            rects: layout.rects,
-            runs: layout.runs,
-        };
-        let painted =
-            argus_gfx::render_display_list(&list, font, self.viewport.width, self.viewport.height);
-        argus_gfx::composite_over(fb.pixels_mut(), &painted.pixels);
-
-        // Blit decoded images over the composited page.
         let (vw, vh) = (self.viewport.width, self.viewport.height);
+
+        // Fetch any `background-image` sources discovered during layout (their URLs
+        // aren't known until the cascade runs in `layout`).
+        for bgi in &layout.bg_images {
+            if !images.contains_key(&bgi.src) {
+                let decoded = if bgi.src.starts_with("data:") {
+                    argus_image::decode_data_url(&bgi.src)
+                } else {
+                    let bytes = fetch_resource(channel, &bgi.src)?;
+                    (!bytes.is_empty())
+                        .then(|| argus_image::decode(&bytes))
+                        .flatten()
+                };
+                if let Some(img) = decoded {
+                    images.insert(bgi.src.clone(), img);
+                }
+            }
+        }
+
+        // Paint in z-order. With background images, render in two passes so they
+        // land between the background-color/border layer and the text: rects →
+        // composite → background images → runs → composite. Without any, a single
+        // pass suffices.
+        let n_rects = layout.rects.len();
+        let n_runs = layout.runs.len();
+        if layout.bg_images.is_empty() {
+            let list = argus_gfx::DisplayList {
+                rects: layout.rects,
+                runs: layout.runs,
+            };
+            let painted = argus_gfx::render_display_list(&list, font, vw, vh);
+            argus_gfx::composite_over(fb.pixels_mut(), &painted.pixels);
+        } else {
+            let rects_list = argus_gfx::DisplayList {
+                rects: layout.rects,
+                runs: Vec::new(),
+            };
+            let bg = argus_gfx::render_display_list(&rects_list, font, vw, vh);
+            argus_gfx::composite_over(fb.pixels_mut(), &bg.pixels);
+            for bgi in &layout.bg_images {
+                if let Some(img) = images.get(&bgi.src) {
+                    blit_background(fb.pixels_mut(), vw, vh, bgi, img);
+                }
+            }
+            let runs_list = argus_gfx::DisplayList {
+                rects: Vec::new(),
+                runs: layout.runs,
+            };
+            let text = argus_gfx::render_display_list(&runs_list, font, vw, vh);
+            argus_gfx::composite_over(fb.pixels_mut(), &text.pixels);
+        }
+
+        // Blit decoded foreground images over the composited page.
         for ib in &layout.images {
             if let Some(img) = images.get(&ib.src) {
                 let (cx, cy, cw, ch) = ib.crop;
@@ -447,10 +497,11 @@ impl Content {
         }
 
         log!(
-            "rendered page: {} rects, {} runs, {} images, {} links",
-            list.rects.len(),
-            list.runs.len(),
+            "rendered page: {} rects, {} runs, {} images, {} bg-images, {} links",
+            n_rects,
+            n_runs,
             layout.images.len(),
+            layout.bg_images.len(),
             layout.links.len()
         );
         self.links = layout.links;
@@ -980,6 +1031,43 @@ fn is_editable_el(e: &argus_dom::ElementData) -> bool {
                 e.attr("type").unwrap_or("text"),
                 "text" | "search" | "email" | "url" | "tel" | "password"
             ))
+}
+
+/// Paint a `background-image` over its box: tiled to fill (the default) or once at
+/// the top-left for `no-repeat`. Each tile is clipped to the box so it never
+/// overflows the element.
+fn blit_background(
+    fb: &mut [u8],
+    vw: u32,
+    vh: u32,
+    bgi: &argus_layout::BgImage,
+    img: &argus_image::DecodedImage,
+) {
+    let (iw, ih) = (img.width, img.height);
+    if iw == 0 || ih == 0 {
+        return;
+    }
+    let clip = bgi
+        .clip
+        .map(|[x, y, w, h]| [x as i32, y as i32, w as i32, h as i32]);
+    let blit_at = |fb: &mut [u8], x: i32, y: i32| {
+        argus_gfx::blit_rgba_cropped(
+            fb, vw, vh, x, y, iw, ih, &img.rgba, iw, ih, 0, 0, iw, ih, clip,
+        );
+    };
+    if bgi.no_repeat {
+        blit_at(fb, bgi.x as i32, bgi.y as i32);
+        return;
+    }
+    // Tile across the box (bounded so a tiny image over a huge box can't spin).
+    let (iwf, ihf) = (iw as f32, ih as f32);
+    let cols = ((bgi.w / iwf).ceil() as i32 + 1).clamp(1, 4096);
+    let rows = ((bgi.h / ihf).ceil() as i32 + 1).clamp(1, 4096);
+    for row in 0..rows {
+        for col in 0..cols {
+            blit_at(fb, bgi.x as i32 + col * iw as i32, bgi.y as i32 + row * ih as i32);
+        }
+    }
 }
 
 /// The concatenated text-node content of `node`'s subtree (a `<textarea>`'s
