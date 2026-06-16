@@ -801,6 +801,39 @@ fn build_post_data(doc: &Document, form: NodeId, submit_id: Option<NodeId>) -> O
 /// never collides with an author href.
 pub const DETAILS_TOGGLE_PREFIX: &str = "\u{1}toggle:";
 
+/// Sentinel `href` prefix for a `<label>` whose click should activate its
+/// associated form control: this prefix followed by the control's `id`. The
+/// content process focuses (text fields) or toggles (checkbox/radio/select) it.
+pub const LABEL_PREFIX: &str = "\u{1}label:";
+
+/// The `id` of the form control a `<label>` is associated with: its `for`
+/// attribute, else the first labelable descendant control that has an `id`.
+fn label_target(doc: &Document, label_id: NodeId) -> Option<String> {
+    let el = doc.node(label_id).as_element()?;
+    if let Some(f) = el.attr("for").filter(|f| !f.is_empty()) {
+        return Some(f.to_string());
+    }
+    fn first_control(doc: &Document, n: NodeId) -> Option<String> {
+        for c in doc.children(n) {
+            if let Some(e) = doc.node(c).as_element() {
+                if (e.name.is_html("input")
+                    || e.name.is_html("select")
+                    || e.name.is_html("textarea")
+                    || e.name.is_html("button"))
+                    && e.attr("id").is_some()
+                {
+                    return e.attr("id").map(str::to_string);
+                }
+            }
+            if let Some(found) = first_control(doc, c) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    first_control(doc, label_id)
+}
+
 /// If `id` is a `<summary>` directly inside a `<details>`, the sentinel toggle href
 /// for that details (its document-order index among all `<details>`). `None`
 /// otherwise.
@@ -4077,9 +4110,14 @@ impl Ctx<'_> {
                     *pending_space = false;
                     return;
                 }
-                // An <a href> sets the link target for its descendants.
+                // An <a href> sets the link target for its descendants; a <label>
+                // becomes a sentinel link that activates its associated control.
                 let child_link = if e.name.is_html("a") {
                     e.attr("href").map(Rc::from).or(link)
+                } else if e.name.is_html("label") {
+                    label_target(self.doc, id)
+                        .map(|t| Rc::from(format!("{LABEL_PREFIX}{t}").as_str()))
+                        .or(link)
                 } else {
                     link
                 };
@@ -4574,6 +4612,32 @@ mod tests {
             open.contains(&"Hidden".to_string()),
             "open body shows: {open:?}"
         );
+    }
+
+    #[test]
+    fn label_becomes_a_control_activation_link() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // `for=` association: the label's text links to that control id.
+        let doc = parse("<label for=\"e\">Email</label><input id=\"e\">");
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        assert!(
+            l.links.iter().any(|l| l.href == format!("{LABEL_PREFIX}e")),
+            "for= label links to control e"
+        );
+        // Wrapping association: the first labelable descendant with an id.
+        let doc2 = parse("<label>Agree <input id=\"chk\" type=\"checkbox\"></label>");
+        let l2 = layout(&doc2, &font, 400.0, &ImageSizes::new());
+        assert!(
+            l2.links.iter().any(|l| l.href == format!("{LABEL_PREFIX}chk")),
+            "wrapping label links to chk"
+        );
+        // A label with no resolvable control produces no activation link.
+        let doc3 = parse("<label>Orphan</label>");
+        let l3 = layout(&doc3, &font, 400.0, &ImageSizes::new());
+        assert!(l3.links.iter().all(|l| !l.href.starts_with(LABEL_PREFIX)));
     }
 
     #[test]

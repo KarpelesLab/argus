@@ -168,6 +168,16 @@ pub fn run(channel: Channel) -> io::Result<()> {
                         },
                         &[],
                     )?;
+                } else if let Some(target) = url.strip_prefix(argus_layout::LABEL_PREFIX) {
+                    // Clicking a label focuses/toggles its control; re-render.
+                    let target = target.to_string();
+                    content.activate_label_target(&target);
+                    content.apply_input_values();
+                    proto::send(
+                        &channel,
+                        Msg::ClickResult { url: String::new(), post_body: Vec::new() },
+                        &[],
+                    )?;
                 } else if let Some(rest) = url.strip_prefix(argus_layout::DETAILS_TOGGLE_PREFIX) {
                     // A `<summary>` toggle: flip the details' open state and re-render
                     // (no navigation). Empty ClickResult → the browser re-renders.
@@ -564,20 +574,26 @@ impl Content {
     /// `checked`/`selected` maps (re-applied each render) and feeds both the visible
     /// state and form submission.
     fn toggle_form_control(&mut self, x: f32, y: f32) -> bool {
-        let Some(id) = self.hit_id(x, y) else {
-            return false;
-        };
+        match self.hit_id(x, y) {
+            Some(id) => self.toggle_control_by_id(&id),
+            None => false,
+        }
+    }
+
+    /// Mutate the id'd control: a checkbox flips, a radio selects within its
+    /// name-group, a `<select>` advances its option. Returns whether it applied.
+    fn toggle_control_by_id(&mut self, id: &str) -> bool {
         let Some(doc) = &self.doc else { return false };
-        let Some(el) = find_element_by_id(doc, &id).and_then(|n| doc.node(n).as_element()) else {
+        let Some(el) = find_element_by_id(doc, id).and_then(|n| doc.node(n).as_element()) else {
             return false;
         };
         if el.name.is_html("select") {
-            let n = self.select_options(&id).len();
+            let n = self.select_options(id).len();
             if n == 0 {
                 return false;
             }
-            let next = (self.current_selected_index(&id) + 1) % n;
-            self.selected.insert(id, next);
+            let next = (self.current_selected_index(id) + 1) % n;
+            self.selected.insert(id.to_string(), next);
             return true;
         }
         if !el.name.is_html("input") {
@@ -585,8 +601,8 @@ impl Content {
         }
         match el.attr("type").unwrap_or("text") {
             "checkbox" => {
-                let next = !self.is_checked(&id, el);
-                self.checked.insert(id, next);
+                let next = !self.is_checked(id, el);
+                self.checked.insert(id.to_string(), next);
                 true
             }
             "radio" => {
@@ -596,10 +612,20 @@ impl Content {
                         self.checked.insert(gid, false);
                     }
                 }
-                self.checked.insert(id, true);
+                self.checked.insert(id.to_string(), true);
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Clicking a `<label>` activates its associated control: focus a text field,
+    /// or toggle a checkbox/radio/select.
+    fn activate_label_target(&mut self, id: &str) {
+        if self.is_editable_input(id) {
+            self.focused = Some(id.to_string());
+        } else {
+            self.toggle_control_by_id(id);
         }
     }
 
@@ -1249,6 +1275,32 @@ mod tests {
         c.focused = None;
         c.apply_focus();
         assert!(!marked(&c, "a"), "marker cleared when focus leaves");
+    }
+
+    #[test]
+    fn clicking_a_label_activates_its_control() {
+        fn checked(c: &Content, id: &str) -> bool {
+            let doc = c.doc.as_ref().unwrap();
+            find_element_by_id(doc, id)
+                .and_then(|n| doc.node(n).as_element())
+                .is_some_and(|e| e.attr("checked").is_some())
+        }
+        // A label for a checkbox toggles it.
+        let mut c = headless(
+            "<label for=\"x\">Agree</label><input id=\"x\" type=\"checkbox\">",
+            vec![],
+        );
+        c.activate_label_target("x");
+        c.apply_input_values();
+        assert!(checked(&c, "x"), "label toggled the checkbox on");
+        c.activate_label_target("x");
+        c.apply_input_values();
+        assert!(!checked(&c, "x"), "label toggled it back off");
+
+        // A label for a text field focuses it.
+        let mut c2 = headless("<label for=\"t\">Name</label><input id=\"t\">", vec![]);
+        c2.activate_label_target("t");
+        assert_eq!(c2.focused.as_deref(), Some("t"), "label focused the text field");
     }
 
     #[test]
