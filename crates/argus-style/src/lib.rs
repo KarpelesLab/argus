@@ -1996,21 +1996,40 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             }
         }
     }
-    if let Some(v) = map.get("border-width").and_then(|v| len_px(v, fs)) {
-        cs.border = Edges::uniform(v);
+    // `border-width`: 1–4 lengths (CSS edge order) → per-side widths. A single
+    // value keeps the old behavior (only set when it parses, so keyword widths and
+    // junk are left untouched).
+    if let Some(v) = map.get("border-width") {
+        if v.split_whitespace().count() > 1 {
+            cs.border = edges_shorthand(v, fs);
+        } else if let Some(px) = len_px(v, fs) {
+            cs.border = Edges::uniform(px);
+        }
     }
-    if let Some(v) = map
-        .get("border-color")
-        .and_then(|v| resolve_color(v, cs.color, parent.border_color))
-    {
-        cs.border_color = v;
-    }
-    // Per-side border colors default to the (shorthand) border color; per-side
-    // shorthands and `-color` longhands override below.
+    // Per-side border colors default to the (shorthand) border color; the
+    // `border-color` shorthand (1–4 colors, CSS edge order with replication),
+    // per-side `border-<side>` shorthands, and `-color` longhands override below.
     cs.border_top_color = cs.border_color;
     cs.border_right_color = cs.border_color;
     cs.border_bottom_color = cs.border_color;
     cs.border_left_color = cs.border_color;
+    if let Some(v) = map.get("border-color") {
+        let [t, r, b, l] = color_edges(v, cs.color, parent.border_color);
+        if let Some(c) = t {
+            // Legacy uniform paths (non-solid frame painter) read `border_color`.
+            cs.border_color = c;
+            cs.border_top_color = c;
+        }
+        if let Some(c) = r {
+            cs.border_right_color = c;
+        }
+        if let Some(c) = b {
+            cs.border_bottom_color = c;
+        }
+        if let Some(c) = l {
+            cs.border_left_color = c;
+        }
+    }
     // Per-side border *shorthands* (`border-bottom: 12px solid yellow`): set that
     // side's width + color (+ style; `none`/`hidden` zeroes it). Run BEFORE the
     // per-side `-width`/`-color` longhands so those (more specific) still win.
@@ -2912,6 +2931,51 @@ fn logical_edges(map: &HashMap<String, String>, prop: &str, fs: f32, edges: &mut
 }
 
 /// `top right bottom left` shorthand with 1–4 values.
+/// Split a value on top-level whitespace, keeping parenthesised groups (e.g.
+/// `rgb(0 0 0 / .5)`) intact so a functional color counts as one token.
+fn split_top_level(v: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    for ch in v.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            c if c.is_whitespace() && depth == 0 => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Resolve a `border-color`-style shorthand (1–4 colors, CSS edge order with the
+/// usual replication) into `[top, right, bottom, left]`. A `None` entry means that
+/// token failed to parse, so the corresponding side keeps its prior value.
+fn color_edges(v: &str, cur: Color, inherited: Color) -> [Option<Color>; 4] {
+    let toks = split_top_level(v);
+    let get = |i: usize| toks.get(i).and_then(|t| resolve_color(t, cur, inherited));
+    match toks.len() {
+        0 => [None; 4],
+        1 => [get(0); 4],
+        2 => [get(0), get(1), get(0), get(1)],
+        3 => [get(0), get(1), get(2), get(1)],
+        _ => [get(0), get(1), get(2), get(3)],
+    }
+}
+
 fn edges_shorthand(v: &str, fs: f32) -> Edges {
     let vals: Vec<f32> = v
         .split_whitespace()
@@ -3076,6 +3140,50 @@ mod tests {
 
         // `none`/`hidden` zeroes the side.
         assert_eq!(cs("border-right: 5px none red").border.right, 0.0);
+    }
+
+    #[test]
+    fn multi_value_border_color_and_width_shorthands() {
+        let cs = |decl: &str| {
+            let mut doc = Document::new();
+            let d = one(&mut doc, "div", vec![]);
+            computed_style(
+                &doc,
+                d,
+                &ComputedStyle::initial(),
+                &parse_stylesheet(&format!("div {{ {decl} }}")),
+            )
+        };
+        let red = Color { r: 255, g: 0, b: 0, a: 255 };
+        let yellow = Color { r: 255, g: 255, b: 0, a: 255 };
+        let blue = Color { r: 0, g: 0, b: 255, a: 255 };
+        let lime = Color { r: 0, g: 128, b: 0, a: 255 }; // `green` keyword
+
+        // Four-value border-color → distinct per-side colors (ACID2's nose idiom).
+        let b = cs("border:10px solid; border-color: red yellow green blue");
+        assert_eq!(b.border_top_color, red);
+        assert_eq!(b.border_right_color, yellow);
+        assert_eq!(b.border_bottom_color, lime);
+        assert_eq!(b.border_left_color, blue);
+
+        // Two-value border-color → top/bottom, then left/right (replication).
+        let c = cs("border:5px solid; border-color: red blue");
+        assert_eq!((c.border_top_color, c.border_bottom_color), (red, red));
+        assert_eq!((c.border_left_color, c.border_right_color), (blue, blue));
+
+        // `transparent` survives (the CSS-triangle technique).
+        let t = cs("border:5px solid; border-color: transparent transparent red transparent");
+        assert_eq!(t.border_top_color.a, 0, "top is transparent");
+        assert_eq!(t.border_bottom_color, red);
+
+        // Four-value border-width → distinct per-side widths.
+        let w = cs("border-style: solid; border-width: 1px 2px 3px 4px");
+        assert_eq!(
+            (w.border.top, w.border.right, w.border.bottom, w.border.left),
+            (1.0, 2.0, 3.0, 4.0)
+        );
+        // A single width still works (uniform).
+        assert_eq!(cs("border-width: 7px").border, Edges::uniform(7.0));
     }
 
     #[test]

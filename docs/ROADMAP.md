@@ -247,7 +247,9 @@ Property` / `JSON` suffice).
 
 **Borders, backgrounds, color**
 
-- **border-radius**, **per-side border colors**, **`border-style`** (none/hidden,
+- **border-radius**, **per-side border colors** (incl. the 1–4-value `border-color`
+  and `border-width` box shorthands, CSS edge order with replication),
+  **`border-style`** (none/hidden,
   solid/double/dotted/dashed); **mitered border corners** — each solid border edge
   is a trapezoid from the outer to the inner (padding-box) corner, so adjacent
   differently-colored sides meet on the diagonal, and a `0×0` box with thick borders
