@@ -1908,6 +1908,16 @@ fn render_text(doc: &argus_dom::Document) -> String {
 /// Render a page (a fetched `url`, or the sample) to pixels once, off-screen.
 /// Returns the framebuffer size and RGBA bytes. Used by the `--dump-page` tool.
 pub fn render_once(url: Option<&str>, viewport: Size) -> io::Result<(Size, Vec<u8>)> {
+    render_once_scrolled(url, viewport, 0)
+}
+
+/// Like [`render_once`], but composites at vertical scroll offset `scroll_y` (so
+/// `position: sticky` and the scrolled viewport can be captured by `--dump-page`).
+pub fn render_once_scrolled(
+    url: Option<&str>,
+    viewport: Size,
+    scroll_y: u32,
+) -> io::Result<(Size, Vec<u8>)> {
     log::set_role(Role::Browser);
     let mut content = spawn_child(Role::Content)?;
     let mut net = spawn_child(Role::NetService)?;
@@ -1916,6 +1926,9 @@ pub fn render_once(url: Option<&str>, viewport: Size) -> io::Result<(Size, Vec<u
 
     let page = resolve_page(&net, url);
     provide_page(&content, &page)?;
+    if scroll_y > 0 {
+        proto::send(content.channel(), Msg::SetScroll { y: scroll_y }, &[])?;
+    }
 
     let (frame, _) = request_frame(&content, &net, url)?;
     let pixels = frame.pixels().to_vec();

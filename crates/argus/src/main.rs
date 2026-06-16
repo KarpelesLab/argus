@@ -215,7 +215,12 @@ fn dump_page(path: &str, url: Option<&str>) -> std::io::Result<()> {
         .filter(|&h| h > 0 && h <= 32768)
         .unwrap_or(1600);
     let viewport = Size::new(w, h);
-    let (size, rgba) = argus_browser::render_once(url, viewport)?;
+    // `--scroll=N`: composite at vertical scroll offset N (e.g. to capture
+    // `position: sticky` elements stuck to the viewport edge).
+    let scroll = flag_value("--scroll=")
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    let (size, rgba) = argus_browser::render_once_scrolled(url, viewport, scroll)?;
 
     let frame = VideoFrame {
         pts: None,

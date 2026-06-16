@@ -142,7 +142,10 @@ Property` / `JSON` suffice).
   then drop to the next band) + **`clear: left/right/both`**.
 - **position: relative** + **absolute/fixed** (absolute anchored to the nearest
   positioned ancestor's padding box via `top`/`left`/`right`/`bottom`; fixed to the
-  viewport).
+  viewport) + **sticky** (flows normally, then sticks to its `top`/`bottom` inset once
+  scrolled past it; `layout_scrolled` threads the scroll offset, and sticky subtrees
+  are hoisted to paint above later in-flow content). `--dump-page --scroll=N` captures
+  a scrolled frame.
 - **CSS logical properties** (`inline-size`/`block-size` + min/max, `margin`/`padding`/
   `inset`-`inline`/`block`), **`min-height`**/**`max-height`**, **`aspect-ratio`**.
 - **`overflow: hidden`/`clip`** (descendant paint confined to the border box; a

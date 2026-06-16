@@ -375,7 +375,17 @@ impl Content {
             .collect();
 
         fb.fill(Color::WHITE);
-        let mut layout = argus_layout::layout(doc, font, self.viewport.width as f32, &sizes);
+        // Lay out with the scroll offset so `position: sticky` boxes stick once
+        // scrolled past their inset. The browser keeps `scroll_y` clamped to the page,
+        // so it matches the offset subtracted below when compositing the frame.
+        let mut layout = argus_layout::layout_scrolled(
+            doc,
+            font,
+            self.viewport.width as f32,
+            self.viewport.height as f32,
+            self.scroll_y as f32,
+            &sizes,
+        );
 
         // Apply the scroll offset: shift everything up by the clamped scroll amount
         // so the visible window of the (taller) page is rendered. Links shift too so

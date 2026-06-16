@@ -353,6 +353,10 @@ pub enum Position {
     Relative,
     Absolute,
     Fixed,
+    /// `sticky` — flows in normal position but, once scrolled to its `top`/`bottom`
+    /// inset, sticks to that viewport edge. Honored when layout knows the scroll
+    /// offset (`layout_scrolled`); equivalent to a non-shifting box at scroll 0.
+    Sticky,
 }
 
 /// `flex-direction` for a flex container (the subset layout honors: main axis
@@ -1810,11 +1814,11 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
         cs.hidden = matches!(v.as_str(), "hidden" | "collapse");
     }
     if let Some(v) = map.get("position") {
-        // `sticky` falls back to static (it needs scroll tracking).
         cs.position = match v.as_str() {
             "relative" => Position::Relative,
             "absolute" => Position::Absolute,
             "fixed" => Position::Fixed,
+            "sticky" => Position::Sticky,
             _ => Position::Static,
         };
     }
@@ -3893,6 +3897,27 @@ mod tests {
         // Multiple functions parse together.
         let multi = filt("filter: grayscale(0.5) brightness(1.2)");
         assert!((multi.grayscale - 0.5).abs() < 1e-6 && (multi.brightness - 1.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn position_keyword_parsing_includes_sticky() {
+        let cs = |decl: &str| {
+            let mut doc = Document::new();
+            let d = one(&mut doc, "div", vec![]);
+            computed_style(
+                &doc,
+                d,
+                &ComputedStyle::initial(),
+                &parse_stylesheet(&format!("div {{ {decl} }}")),
+            )
+            .position
+        };
+        assert_eq!(cs("position: sticky"), Position::Sticky);
+        assert_eq!(cs("position: fixed"), Position::Fixed);
+        assert_eq!(cs("position: absolute"), Position::Absolute);
+        assert_eq!(cs("position: relative"), Position::Relative);
+        assert_eq!(cs("position: static"), Position::Static);
+        assert_eq!(cs("position: gibberish"), Position::Static);
     }
 
     #[test]

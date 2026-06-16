@@ -944,6 +944,22 @@ pub fn form_post_data_for_field(doc: &Document, field_id: NodeId) -> Option<(Str
 /// Lay `doc` out into a display list for a viewport `viewport_width` pixels wide,
 /// given the intrinsic sizes of any images.
 pub fn layout(doc: &Document, font: &Font, viewport_width: f32, images: &ImageSizes) -> Layout {
+    // Scroll-independent layout: `position: sticky` boxes don't shift (correct at the
+    // top of the page). The live frame uses `layout_scrolled` to honor scrolling.
+    layout_scrolled(doc, font, viewport_width, 0.0, 0.0, images)
+}
+
+/// Like [`layout`], but `viewport_height`/`scroll_y` let `position: sticky` boxes
+/// stick to the viewport edge once scrolled past their `top`/`bottom` inset. Pass the
+/// same `scroll_y` the caller subtracts when compositing the scrolled frame.
+pub fn layout_scrolled(
+    doc: &Document,
+    font: &Font,
+    viewport_width: f32,
+    viewport_height: f32,
+    scroll_y: f32,
+    images: &ImageSizes,
+) -> Layout {
     let content_x = PAGE_MARGIN;
     let content_width = (viewport_width - 2.0 * PAGE_MARGIN).max(0.0);
     // Apply `@media` rules that match this viewport width.
@@ -968,6 +984,9 @@ pub fn layout(doc: &Document, font: &Font, viewport_width: f32, images: &ImageSi
         cb_w: viewport_width,
         cb_h: None,
         viewport_w: viewport_width,
+        viewport_h: viewport_height,
+        scroll_y,
+        sticky_ranges: Vec::new(),
         counters: HashMap::new(),
         uses_counters: argus_style::uses_counters(&author),
     };
@@ -978,6 +997,7 @@ pub fn layout(doc: &Document, font: &Font, viewport_width: f32, images: &ImageSi
         _ => ComputedStyle::initial(),
     };
     ctx.layout_block(start, start_style, content_x, content_width, None);
+    ctx.hoist_sticky();
 
     Layout {
         rects: ctx.rects,
@@ -1030,6 +1050,16 @@ struct Ctx<'a> {
     cb_h: Option<f32>,
     /// Viewport width — the containing block used by `position: fixed`.
     viewport_w: f32,
+    /// Viewport height and the current scroll offset (document Y at the viewport top),
+    /// used to place `position: sticky` boxes. Both `0` in the plain `layout()` entry
+    /// (sticky then behaves as a non-shifting box); set by `layout_scrolled`.
+    viewport_h: f32,
+    scroll_y: f32,
+    /// Display-list `[start, end)` mark pairs of `position: sticky` subtrees, hoisted
+    /// to paint last (above in-flow content) after layout. Positioned boxes form a
+    /// stacking context above the normal flow; the flat doc-order display list would
+    /// otherwise let later siblings paint over a stuck box.
+    sticky_ranges: Vec<(DisplayListMark, DisplayListMark)>,
     /// CSS counter values (`counter-reset`/`-increment`), in document order, for
     /// `counter()` in generated content. Empty/unused unless the page has counters.
     counters: HashMap<String, i32>,
@@ -1038,6 +1068,40 @@ struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
+    /// Move every `position: sticky` subtree's display items to the end of each
+    /// channel (preserving order) so they paint above later in-flow content — the
+    /// stacking behavior of positioned boxes, approximated on the flat display list.
+    fn hoist_sticky(&mut self) {
+        if self.sticky_ranges.is_empty() {
+            return;
+        }
+        let ranges = std::mem::take(&mut self.sticky_ranges);
+        let comp = |sel: fn(&DisplayListMark) -> usize| -> Vec<(usize, usize)> {
+            ranges.iter().map(|(s, e)| (sel(s), sel(e))).collect()
+        };
+        reorder_sticky_last(&mut self.rects, &comp(|m| m.0));
+        reorder_sticky_last(&mut self.runs, &comp(|m| m.1));
+        reorder_sticky_last(&mut self.images, &comp(|m| m.2));
+        reorder_sticky_last(&mut self.links, &comp(|m| m.3));
+        reorder_sticky_last(&mut self.bounds, &comp(|m| m.4));
+        reorder_sticky_last(&mut self.submits, &comp(|m| m.5));
+        reorder_sticky_last(&mut self.bg_images, &comp(|m| m.6));
+    }
+
+    /// The current end of every display-list channel — a snapshot used to bound the
+    /// items emitted by a subtree (e.g. for shifting or hoisting it).
+    fn mark(&self) -> DisplayListMark {
+        (
+            self.rects.len(),
+            self.runs.len(),
+            self.images.len(),
+            self.links.len(),
+            self.bounds.len(),
+            self.submits.len(),
+            self.bg_images.len(),
+        )
+    }
+
     /// Lay out block `id` within the containing block `[x, x + avail)` (content box
     /// of the parent). `x`/`avail` are the parent's content origin and width.
     /// `marker`, if set, is a list-item marker drawn to the left of the content.
@@ -2080,6 +2144,29 @@ impl Ctx<'_> {
                 }
                 // Out of flow: following siblings ignore this box's height.
                 self.cursor_y = border_box_top;
+            }
+            Position::Sticky => {
+                // Stays in normal flow (cursor unchanged), but shifts so its screen
+                // position never crosses the `top`/`bottom` inset as the page scrolls.
+                // `screen_y = doc_y - scroll_y` (the caller subtracts `scroll_y`), so a
+                // downward doc-shift of `dy` keeps a `top` box pinned at the inset.
+                let fs = style.font_size;
+                let dy = if let Some(t) = style.inset_top {
+                    let t = t.to_px(fs, self.viewport_h);
+                    (t + self.scroll_y - border_box_top).max(0.0)
+                } else if let Some(b) = style.inset_bottom {
+                    let b = b.to_px(fs, self.viewport_h);
+                    // Pin the box's screen-bottom at `viewport_h - b` (shift up).
+                    let limit_doc_bottom = self.viewport_h - b + self.scroll_y;
+                    (limit_doc_bottom - (border_box_top + border_box_h)).min(0.0)
+                } else {
+                    0.0
+                };
+                if dy != 0.0 {
+                    self.shift_display_list(ds_start, 0.0, dy);
+                }
+                // Record the subtree so it can be hoisted to paint above later content.
+                self.sticky_ranges.push((ds_start, self.mark()));
             }
             Position::Static => {}
         }
@@ -4722,6 +4809,21 @@ fn transform_text(word: &str, transform: TextTransform) -> String {
 }
 
 /// Shift a clip rect's origin by `(dx, dy)` (its size is unchanged).
+/// Stable-partition `v` so items whose index falls in any `[start, end)` range move
+/// to the end (in their original relative order); used to hoist sticky subtrees.
+fn reorder_sticky_last<T>(v: &mut Vec<T>, ranges: &[(usize, usize)]) {
+    let is_sticky = |i: usize| ranges.iter().any(|&(s, e)| i >= s && i < e);
+    if !(0..v.len()).any(is_sticky) {
+        return;
+    }
+    let order: Vec<usize> = (0..v.len())
+        .filter(|&i| !is_sticky(i))
+        .chain((0..v.len()).filter(|&i| is_sticky(i)))
+        .collect();
+    let mut slots: Vec<Option<T>> = v.drain(..).map(Some).collect();
+    *v = order.into_iter().map(|i| slots[i].take().unwrap()).collect();
+}
+
 fn shift_clip(clip: &mut Option<[f32; 4]>, dx: f32, dy: f32) {
     if let Some(c) = clip {
         c[0] += dx;
@@ -7846,6 +7948,71 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         assert!((w - 20.0).abs() < 1e-3 && (h - 10.0).abs() < 1e-3, "extents swap: {w}x{h}");
         assert!((x + w / 2.0 - 5.0).abs() < 1e-3, "center x preserved");
         assert!((y + h / 2.0 - 10.0).abs() < 1e-3, "center y preserved");
+    }
+
+    #[test]
+    fn sticky_box_sticks_to_top_once_scrolled_past() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let html = "<div style=\"height:50px\">spacer</div>\
+                    <div style=\"position:sticky; top:0; height:30px; background:#00aa00\">S</div>\
+                    <div style=\"height:2000px\">tall</div>";
+        let doc = parse(html);
+        let green = |l: &Layout| {
+            l.rects
+                .iter()
+                .find(|r| r.color == argus_geometry::Color { r: 0, g: 170, b: 0, a: 255 })
+                .map(|r| r.y)
+                .expect("sticky background rect")
+        };
+
+        // Not scrolled (plain `layout`): the sticky box sits at its natural position
+        // (~50px spacer + page margin), not at 0.
+        let natural = green(&layout(&doc, &font, 400.0, &ImageSizes::new()));
+        assert!(natural > 40.0, "natural position kept at scroll 0, got {natural}");
+
+        // Scrolled 500px past it: the box sticks to the viewport top — its doc-Y rises
+        // to ~scroll so that `doc_y - scroll` lands at the `top:0` inset (screen 0).
+        let stuck = green(&layout_scrolled(&doc, &font, 400.0, 800.0, 500.0, &ImageSizes::new()));
+        assert!((stuck - 500.0).abs() < 1.0, "stuck to top: doc-Y ~= scroll, got {stuck}");
+
+        // Barely scrolled (less than its natural offset): still in normal flow.
+        let early = green(&layout_scrolled(&doc, &font, 400.0, 800.0, 10.0, &ImageSizes::new()));
+        assert!((early - natural).abs() < 0.5, "not yet stuck, got {early} vs {natural}");
+    }
+
+    #[test]
+    fn reorder_sticky_last_hoists_ranges_preserving_order() {
+        // Indices 2..4 are "sticky": they move to the end, both groups keep order.
+        let mut v = vec!['a', 'b', 'S', 'T', 'c', 'd'];
+        reorder_sticky_last(&mut v, &[(2, 4)]);
+        assert_eq!(v, vec!['a', 'b', 'c', 'd', 'S', 'T']);
+        // No sticky range → unchanged (the common, fast path).
+        let mut w = vec![1, 2, 3];
+        reorder_sticky_last(&mut w, &[]);
+        assert_eq!(w, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn sticky_paints_above_later_content_when_stuck() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // The sticky box precedes an opaque content block in source order. When stuck,
+        // its rect must be hoisted *after* the later block's rect so it paints on top.
+        let html = "<div style=\"height:40px\">x</div>\
+                    <div style=\"position:sticky; top:0; height:20px; background:#00aa00\">S</div>\
+                    <div style=\"height:1500px; background:#ffffff\">body</div>";
+        let doc = parse(html);
+        let l = layout_scrolled(&doc, &font, 400.0, 600.0, 400.0, &ImageSizes::new());
+        let green = argus_geometry::Color { r: 0, g: 170, b: 0, a: 255 };
+        let white = argus_geometry::Color { r: 255, g: 255, b: 255, a: 255 };
+        let gi = l.rects.iter().position(|r| r.color == green).expect("sticky rect");
+        let wi = l.rects.iter().position(|r| r.color == white).expect("body rect");
+        assert!(gi > wi, "stuck sticky rect hoisted after the body rect (paints on top)");
     }
 
     #[test]
