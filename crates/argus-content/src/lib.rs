@@ -375,24 +375,24 @@ impl Content {
             .collect();
 
         fb.fill(Color::WHITE);
-        // Lay out with the scroll offset so `position: sticky` boxes stick once
-        // scrolled past their inset. The browser keeps `scroll_y` clamped to the page,
-        // so it matches the offset subtracted below when compositing the frame.
-        let mut layout = argus_layout::layout_scrolled(
-            doc,
-            font,
-            self.viewport.width as f32,
-            self.viewport.height as f32,
-            self.scroll_y as f32,
-            &sizes,
-        );
+        let vw_f = self.viewport.width as f32;
+        let vh_f = self.viewport.height as f32;
+        // Lay out with the scroll offset so `position: fixed`/`sticky` boxes are placed
+        // for this scroll position. Then clamp the scroll to the page and, if it was
+        // over-scrolled, re-lay out with the clamped value — layout and the offset
+        // subtracted below MUST agree, or fixed/sticky boxes land at the wrong place.
+        let mut scroll = self.scroll_y as f32;
+        let mut layout = argus_layout::layout_scrolled(doc, font, vw_f, vh_f, scroll, &sizes);
+        let max_scroll = (layout.height - vh_f).max(0.0);
+        if scroll > max_scroll {
+            scroll = max_scroll;
+            layout = argus_layout::layout_scrolled(doc, font, vw_f, vh_f, scroll, &sizes);
+        }
 
-        // Apply the scroll offset: shift everything up by the clamped scroll amount
-        // so the visible window of the (taller) page is rendered. Links shift too so
+        // Apply the scroll offset: shift everything up by the scroll amount so the
+        // visible window of the (taller) page is rendered. Links shift too so
         // hit-testing matches what's on screen. The page height is reported back.
         self.content_height = layout.height as u32;
-        let max_scroll = (layout.height - self.viewport.height as f32).max(0.0);
-        let scroll = (self.scroll_y as f32).min(max_scroll);
         for r in &mut layout.rects {
             r.y -= scroll;
             if let Some(q) = &mut r.quad {
@@ -450,103 +450,58 @@ impl Content {
             }
         }
 
-        // Paint in z-order. With background images, render in two passes so they
-        // land between the background-color/border layer and the text: rects →
-        // composite → background images → runs → composite. Without any, a single
-        // pass suffices.
+        // Paint in z-order via `paint_layer` (rects → bg-images → text → fg-images).
+        // The hoisted `position: sticky`/`fixed` subtrees form an *overlay* layer that
+        // is split off and painted as a second, identical pass *above* the base — so a
+        // fixed banner / sticky nav (and any image it contains) occludes the content
+        // scrolling under it. The flat base render can't (all rects paint below all
+        // text), and a positioned box's own image must paint above its own background.
         let n_rects = layout.rects.len();
         let n_runs = layout.runs.len();
-        // Split off the overlay region (hoisted `position: sticky`/`fixed` subtrees):
-        // these paint as a rects+text unit *above* everything else, so a fixed banner
-        // or sticky nav occludes the content scrolling under it (the base two-pass
-        // render paints all rects below all text, which can't occlude foreign text).
-        let overlay_rects = layout.rects.split_off(layout.overlay_rects.min(layout.rects.len()));
-        let overlay_runs = layout.runs.split_off(layout.overlay_runs.min(layout.runs.len()));
-        if layout.bg_images.is_empty() {
-            let list = argus_gfx::DisplayList {
-                rects: layout.rects,
-                runs: layout.runs,
-            };
-            let painted = argus_gfx::render_display_list(&list, font, vw, vh);
-            argus_gfx::composite_over(fb.pixels_mut(), &painted.pixels);
-        } else {
-            let rects_list = argus_gfx::DisplayList {
-                rects: layout.rects,
-                runs: Vec::new(),
-            };
-            let bg = argus_gfx::render_display_list(&rects_list, font, vw, vh);
-            argus_gfx::composite_over(fb.pixels_mut(), &bg.pixels);
-            for bgi in &layout.bg_images {
-                if let Some(img) = images.get(&bgi.src) {
-                    blit_background(fb.pixels_mut(), vw, vh, bgi, img);
-                }
-            }
-            let runs_list = argus_gfx::DisplayList {
-                rects: Vec::new(),
-                runs: layout.runs,
-            };
-            let text = argus_gfx::render_display_list(&runs_list, font, vw, vh);
-            argus_gfx::composite_over(fb.pixels_mut(), &text.pixels);
-        }
+        let n_images = layout.images.len();
+        let n_bg = layout.bg_images.len();
+        let overlay_rects = layout.rects.split_off(layout.overlay_rects.min(n_rects));
+        let overlay_runs = layout.runs.split_off(layout.overlay_runs.min(n_runs));
+        let overlay_bg = layout.bg_images.split_off(layout.overlay_bg_images.min(n_bg));
+        let overlay_imgs = layout.images.split_off(layout.overlay_images.min(n_images));
 
-        // Blit decoded foreground images over the composited page.
-        for ib in &layout.images {
-            if let Some(img) = images.get(&ib.src) {
-                let (cx, cy, cw, ch) = ib.crop;
-                // A CSS `filter` transforms the sampled pixels (a per-box copy;
-                // identity filters blit the decoded image directly, no copy).
-                let owned;
-                let rgba: &[u8] = if ib.filter.is_identity() {
-                    &img.rgba
-                } else {
-                    let mut buf = img.rgba.clone();
-                    for px in buf.chunks_exact_mut(4) {
-                        let mut p = [px[0], px[1], px[2], px[3]];
-                        ib.filter.apply_pixel(&mut p);
-                        px.copy_from_slice(&p);
-                    }
-                    owned = buf;
-                    &owned
-                };
-                argus_gfx::blit_rgba_cropped(
-                    fb.pixels_mut(),
-                    vw,
-                    vh,
-                    ib.x as i32,
-                    ib.y as i32,
-                    ib.w as u32,
-                    ib.h as u32,
-                    rgba,
-                    img.width,
-                    img.height,
-                    (cx * img.width as f32) as u32,
-                    (cy * img.height as f32) as u32,
-                    (cw * img.width as f32).max(1.0) as u32,
-                    (ch * img.height as f32).max(1.0) as u32,
-                    ib.clip
-                        .map(|[x, y, w, h]| [x as i32, y as i32, w as i32, h as i32]),
-                );
-            }
-        }
-
-        // Overlay pass: positioned (sticky/fixed) boxes paint above the base layer and
-        // foreground images, as a single rects-then-text unit so their backgrounds
-        // occlude content underneath while their own text stays on top.
-        if !overlay_rects.is_empty() || !overlay_runs.is_empty() {
-            let overlay = argus_gfx::DisplayList {
-                rects: overlay_rects,
-                runs: overlay_runs,
-            };
-            let painted = argus_gfx::render_display_list(&overlay, font, vw, vh);
-            argus_gfx::composite_over(fb.pixels_mut(), &painted.pixels);
+        // Base layer.
+        paint_layer(
+            fb.pixels_mut(),
+            vw,
+            vh,
+            font,
+            &images,
+            layout.rects,
+            layout.runs,
+            &layout.bg_images,
+            &layout.images,
+        );
+        // Overlay layer (positioned), painted above the base.
+        if !overlay_rects.is_empty()
+            || !overlay_runs.is_empty()
+            || !overlay_bg.is_empty()
+            || !overlay_imgs.is_empty()
+        {
+            paint_layer(
+                fb.pixels_mut(),
+                vw,
+                vh,
+                font,
+                &images,
+                overlay_rects,
+                overlay_runs,
+                &overlay_bg,
+                &overlay_imgs,
+            );
         }
 
         log!(
             "rendered page: {} rects, {} runs, {} images, {} bg-images, {} links",
             n_rects,
             n_runs,
-            layout.images.len(),
-            layout.bg_images.len(),
+            n_images,
+            n_bg,
             layout.links.len()
         );
         self.links = layout.links;
@@ -1082,6 +1037,81 @@ fn is_editable_el(e: &argus_dom::ElementData) -> bool {
 /// Paint a `background-image` over its box: tiled to fill (the default) or once at
 /// the top-left for `no-repeat`. Each tile is clipped to the box so it never
 /// overflows the element.
+/// Paint one stacking layer onto `fb` in z-order: background/border rects, then any
+/// `background-image`s (between the rect and text layers), then text runs, then
+/// foreground (`<img>`) blits. Shared by the base content and the positioned overlay
+/// so both render identically — the overlay just receives the hoisted slices.
+#[allow(clippy::too_many_arguments)]
+fn paint_layer(
+    fb: &mut [u8],
+    vw: u32,
+    vh: u32,
+    font: &Font,
+    images: &HashMap<String, argus_image::DecodedImage>,
+    rects: Vec<argus_gfx::RectFill>,
+    runs: Vec<argus_gfx::TextRun>,
+    bg_images: &[argus_layout::BgImage],
+    fg_images: &[argus_layout::ImageBox],
+) {
+    if bg_images.is_empty() {
+        let list = argus_gfx::DisplayList { rects, runs };
+        let painted = argus_gfx::render_display_list(&list, font, vw, vh);
+        argus_gfx::composite_over(fb, &painted.pixels);
+    } else {
+        // Two passes so background images land between the rect and text layers.
+        let rects_list = argus_gfx::DisplayList { rects, runs: Vec::new() };
+        let bg = argus_gfx::render_display_list(&rects_list, font, vw, vh);
+        argus_gfx::composite_over(fb, &bg.pixels);
+        for bgi in bg_images {
+            if let Some(img) = images.get(&bgi.src) {
+                blit_background(fb, vw, vh, bgi, img);
+            }
+        }
+        let runs_list = argus_gfx::DisplayList { rects: Vec::new(), runs };
+        let text = argus_gfx::render_display_list(&runs_list, font, vw, vh);
+        argus_gfx::composite_over(fb, &text.pixels);
+    }
+    // Foreground images blit over this layer's composited pixels.
+    for ib in fg_images {
+        if let Some(img) = images.get(&ib.src) {
+            let (cx, cy, cw, ch) = ib.crop;
+            // A CSS `filter` transforms the sampled pixels (a per-box copy; identity
+            // filters blit the decoded image directly, no copy).
+            let owned;
+            let rgba: &[u8] = if ib.filter.is_identity() {
+                &img.rgba
+            } else {
+                let mut buf = img.rgba.clone();
+                for px in buf.chunks_exact_mut(4) {
+                    let mut p = [px[0], px[1], px[2], px[3]];
+                    ib.filter.apply_pixel(&mut p);
+                    px.copy_from_slice(&p);
+                }
+                owned = buf;
+                &owned
+            };
+            argus_gfx::blit_rgba_cropped(
+                fb,
+                vw,
+                vh,
+                ib.x as i32,
+                ib.y as i32,
+                ib.w as u32,
+                ib.h as u32,
+                rgba,
+                img.width,
+                img.height,
+                (cx * img.width as f32) as u32,
+                (cy * img.height as f32) as u32,
+                (cw * img.width as f32).max(1.0) as u32,
+                (ch * img.height as f32).max(1.0) as u32,
+                ib.clip
+                    .map(|[x, y, w, h]| [x as i32, y as i32, w as i32, h as i32]),
+            );
+        }
+    }
+}
+
 fn blit_background(
     fb: &mut [u8],
     vw: u32,

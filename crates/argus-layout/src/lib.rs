@@ -575,12 +575,15 @@ pub struct Layout {
     pub bounds: Vec<ElementBound>,
     /// Total content height in pixels.
     pub height: f32,
-    /// Index in `rects`/`runs` where the **overlay** region begins: the hoisted
-    /// `position: sticky`/`fixed` subtrees, which the content process paints (as a
-    /// rects+text unit) *above* the base layer so they occlude foreign content. Equal
-    /// to `rects.len()`/`runs.len()` when nothing is positioned.
+    /// Index in `rects`/`runs`/`bg_images`/`images` where the **overlay** region
+    /// begins: the hoisted `position: sticky`/`fixed` subtrees, which the content
+    /// process paints (rects → bg-images → text → images, as a unit) *above* the base
+    /// layer so they occlude foreign content. Equal to the channel length when nothing
+    /// is positioned.
     pub overlay_rects: usize,
     pub overlay_runs: usize,
+    pub overlay_bg_images: usize,
+    pub overlay_images: usize,
 }
 
 /// A `background-image: url()` fill over an element's border box. The content
@@ -995,6 +998,8 @@ pub fn layout_scrolled(
         hoist_ranges: Vec::new(),
         overlay_rects: 0,
         overlay_runs: 0,
+        overlay_bg_images: 0,
+        overlay_images: 0,
         counters: HashMap::new(),
         uses_counters: argus_style::uses_counters(&author),
     };
@@ -1017,6 +1022,8 @@ pub fn layout_scrolled(
         bounds: ctx.bounds,
         overlay_rects: ctx.overlay_rects,
         overlay_runs: ctx.overlay_runs,
+        overlay_bg_images: ctx.overlay_bg_images,
+        overlay_images: ctx.overlay_images,
         height: ctx.cursor_y + PAGE_MARGIN,
     }
 }
@@ -1071,9 +1078,11 @@ struct Ctx<'a> {
     /// context above the normal flow; the flat doc-order display list would otherwise
     /// let later siblings paint over a stuck/fixed box.
     hoist_ranges: Vec<(DisplayListMark, DisplayListMark, i32)>,
-    /// Overlay split for `rects`/`runs` after `hoist_positioned` (see `Layout`).
+    /// Overlay split per channel after `hoist_positioned` (see `Layout`).
     overlay_rects: usize,
     overlay_runs: usize,
+    overlay_bg_images: usize,
+    overlay_images: usize,
     /// CSS counter values (`counter-reset`/`-increment`), in document order, for
     /// `counter()` in generated content. Empty/unused unless the page has counters.
     counters: HashMap<String, i32>,
@@ -1089,6 +1098,8 @@ impl Ctx<'_> {
         // No hoist → the overlay region is empty (starts at the end of each channel).
         self.overlay_rects = self.rects.len();
         self.overlay_runs = self.runs.len();
+        self.overlay_bg_images = self.bg_images.len();
+        self.overlay_images = self.images.len();
         if self.hoist_ranges.is_empty() {
             return;
         }
@@ -1102,11 +1113,11 @@ impl Ctx<'_> {
         // together above the base layer — the two-pass rects-then-runs render can't.
         self.overlay_rects = reorder_hoisted_last(&mut self.rects, &comp(|m| m.0));
         self.overlay_runs = reorder_hoisted_last(&mut self.runs, &comp(|m| m.1));
-        reorder_hoisted_last(&mut self.images, &comp(|m| m.2));
+        self.overlay_images = reorder_hoisted_last(&mut self.images, &comp(|m| m.2));
         reorder_hoisted_last(&mut self.links, &comp(|m| m.3));
         reorder_hoisted_last(&mut self.bounds, &comp(|m| m.4));
         reorder_hoisted_last(&mut self.submits, &comp(|m| m.5));
-        reorder_hoisted_last(&mut self.bg_images, &comp(|m| m.6));
+        self.overlay_bg_images = reorder_hoisted_last(&mut self.bg_images, &comp(|m| m.6));
     }
 
     /// The current end of every display-list channel — a snapshot used to bound the
@@ -8070,6 +8081,26 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         let gi = l.rects.iter().position(|r| r.color == green).expect("sticky rect");
         let wi = l.rects.iter().position(|r| r.color == white).expect("body rect");
         assert!(gi > wi, "stuck sticky rect hoisted after the body rect (paints on top)");
+    }
+
+    #[test]
+    fn fixed_box_background_image_is_in_the_overlay_region() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A fixed box with a background-image plus a normal block that also has one.
+        // The fixed box's bg-image must be hoisted into the overlay region so the
+        // content process paints it above the base layer (with the box's own bg/text).
+        let html = "<div style=\"background-image:url(a.png); height:30px\">base</div>\
+                    <div style=\"position:fixed; top:0; height:30px; background-image:url(b.png)\">F</div>";
+        let doc = parse(html);
+        let l = layout_scrolled(&doc, &font, 400.0, 600.0, 100.0, &ImageSizes::new());
+        assert_eq!(l.bg_images.len(), 2, "both background images emitted");
+        assert!(l.overlay_bg_images < l.bg_images.len(), "an overlay bg-image region exists");
+        // The base bg-image (a.png) is before the split; the fixed one (b.png) after.
+        let b_idx = l.bg_images.iter().position(|b| b.src.contains("b.png")).unwrap();
+        assert!(b_idx >= l.overlay_bg_images, "fixed box's bg-image is in the overlay");
     }
 
     #[test]

@@ -145,9 +145,11 @@ Property` / `JSON` suffice).
   and **scroll-stable** — stays put as the page scrolls) + **sticky** (flows normally,
   then sticks to its `top`/`bottom` inset once scrolled past it). `layout_scrolled`
   threads the scroll offset; fixed/sticky subtrees are hoisted into an **overlay pass**
-  (rects+text painted as a unit above the base layer) so they occlude the content
-  scrolling under them, ordered by **`z-index`** then document order (nested boxes take
-  the innermost level). `--dump-page --scroll=N` captures a scrolled frame.
+  (background rects → background-images → text → `<img>`s painted as a unit above the
+  base layer via the shared `paint_layer`) so they — and any image they contain —
+  occlude the content scrolling under them, ordered by **`z-index`** then document order
+  (nested boxes take the innermost level). `--dump-page --scroll=N` captures a scrolled
+  frame.
 - **CSS logical properties** (`inline-size`/`block-size` + min/max, `margin`/`padding`/
   `inset`-`inline`/`block`), **`min-height`**/**`max-height`**, **`aspect-ratio`**.
 - **`overflow: hidden`/`clip`** (descendant paint confined to the border box; a
