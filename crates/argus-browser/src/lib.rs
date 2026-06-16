@@ -24,26 +24,34 @@ const SAMPLE_IMAGE: &str = include_str!("../sample_image.txt");
 /// index. Navigating to a new URL truncates any forward entries (standard
 /// browser semantics).
 #[derive(Debug, Default)]
+/// One session-history entry: a URL and the scroll offset the user left it at, so
+/// back/forward restores their position.
+struct HistoryEntry {
+    url: String,
+    scroll: u32,
+}
+
 struct History {
-    stack: Vec<String>,
+    stack: Vec<HistoryEntry>,
     index: usize,
 }
 
 impl History {
     fn new(url: String) -> History {
         History {
-            stack: vec![url],
+            stack: vec![HistoryEntry { url, scroll: 0 }],
             index: 0,
         }
     }
 
-    /// Record a navigation to `url` (dropping any forward history).
+    /// Record a navigation to `url` (dropping any forward history). A new entry
+    /// starts at the top (scroll 0).
     fn push(&mut self, url: String) {
-        if self.stack.get(self.index) == Some(&url) {
+        if self.stack.get(self.index).map(|e| &e.url) == Some(&url) {
             return; // no-op navigation to the same URL
         }
         self.stack.truncate(self.index + 1);
-        self.stack.push(url);
+        self.stack.push(HistoryEntry { url, scroll: 0 });
         self.index = self.stack.len() - 1;
     }
 
@@ -51,7 +59,7 @@ impl History {
     fn back(&mut self) -> Option<&str> {
         if self.index > 0 {
             self.index -= 1;
-            Some(&self.stack[self.index])
+            Some(&self.stack[self.index].url)
         } else {
             None
         }
@@ -61,7 +69,7 @@ impl History {
     fn forward(&mut self) -> Option<&str> {
         if self.index + 1 < self.stack.len() {
             self.index += 1;
-            Some(&self.stack[self.index])
+            Some(&self.stack[self.index].url)
         } else {
             None
         }
@@ -69,7 +77,17 @@ impl History {
 
     /// The URL of the current entry.
     fn current(&self) -> &str {
-        &self.stack[self.index]
+        &self.stack[self.index].url
+    }
+
+    /// Remember the scroll offset for the current entry (call before leaving it).
+    fn set_scroll(&mut self, y: u32) {
+        self.stack[self.index].scroll = y;
+    }
+
+    /// The saved scroll offset of the current entry (restored after back/forward).
+    fn scroll(&self) -> u32 {
+        self.stack[self.index].scroll
     }
 }
 
@@ -2179,6 +2197,18 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
                         }
                     }
                 }
+            } else if tabs.active().scroll_y > 0 {
+                // Restore a saved scroll position (back/forward) onto the freshly
+                // reloaded page.
+                let max = content_height.saturating_sub(content_vp.height);
+                let y = tabs.active().scroll_y.min(max);
+                tabs.active_mut().scroll_y = y;
+                let ch = procs[tabs.active_index()].channel();
+                proto::send(ch, Msg::SetScroll { y }, &[])?;
+                let (frame2, h2) =
+                    request_frame(&procs[tabs.active_index()], &net, active_target(&tabs).as_deref())?;
+                content_height = h2;
+                present_framed(&window, &frame2, &tabs, window_size)?;
             }
         }};
     }
@@ -2189,6 +2219,8 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
         ($url:expr, $body:expr) => {{
             let proc = &procs[tabs.active_index()];
             let (frame, h) = post_page(proc, &net, &window, &$url, &$body)?;
+            let leaving = tabs.active().scroll_y;
+            tabs.active_mut().history.set_scroll(leaving);
             tabs.active_mut().history.push($url);
             tabs.active_mut().scroll_y = 0;
             content_height = h;
@@ -2278,6 +2310,8 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
                     } else if !url.is_empty() {
                         let target = resolve_url(active_target(&tabs).as_deref(), &url);
                         log!("navigating to {target}");
+                        let leaving = tabs.active().scroll_y;
+                        tabs.active_mut().history.set_scroll(leaving);
                         tabs.active_mut().history.push(target);
                         tabs.active_mut().scroll_y = 0;
                         reload_active!();
@@ -2331,6 +2365,8 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
                     Msg::ClickResult { url, .. } if !url.is_empty() => {
                         let target = resolve_url(active_target(&tabs).as_deref(), &url);
                         log!("submitting form -> {target}");
+                        let leaving = tabs.active().scroll_y;
+                        tabs.active_mut().history.set_scroll(leaving);
                         tabs.active_mut().history.push(target);
                         tabs.active_mut().scroll_y = 0;
                         reload_active!();
@@ -2339,14 +2375,21 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
                 }
             }
             Event::Back => {
+                // Remember where we are, then restore the previous entry's scroll.
+                let cur = tabs.active().scroll_y;
+                tabs.active_mut().history.set_scroll(cur);
                 if tabs.active_mut().history.back().is_some() {
-                    tabs.active_mut().scroll_y = 0;
+                    let restore = tabs.active().history.scroll();
+                    tabs.active_mut().scroll_y = restore;
                     reload_active!();
                 }
             }
             Event::Forward => {
+                let cur = tabs.active().scroll_y;
+                tabs.active_mut().history.set_scroll(cur);
                 if tabs.active_mut().history.forward().is_some() {
-                    tabs.active_mut().scroll_y = 0;
+                    let restore = tabs.active().history.scroll();
+                    tabs.active_mut().scroll_y = restore;
                     reload_active!();
                 }
             }
@@ -2804,6 +2847,28 @@ mod tests {
         // Re-navigating to the current URL is a no-op.
         h.push("b".into());
         assert_eq!(h.forward(), Some("d"));
+    }
+
+    #[test]
+    fn history_remembers_per_entry_scroll() {
+        let mut h = History::new("a".into());
+        // Scroll down on 'a', then navigate to 'b' (which starts at the top).
+        h.set_scroll(120);
+        h.push("b".into());
+        assert_eq!(h.scroll(), 0, "a fresh page starts at the top");
+        h.set_scroll(40); // scroll down a bit on 'b'
+        // Back to 'a' restores its saved offset; forward to 'b' restores its.
+        assert_eq!(h.back(), Some("a"));
+        assert_eq!(h.scroll(), 120, "back restores a's scroll");
+        assert_eq!(h.forward(), Some("b"));
+        assert_eq!(h.scroll(), 40, "forward restores b's scroll");
+        // A new navigation from 'a' resets the saved scroll for the new entry.
+        h.back();
+        h.set_scroll(99);
+        h.push("c".into());
+        assert_eq!(h.scroll(), 0, "new entry c starts at the top");
+        assert_eq!(h.back(), Some("a"));
+        assert_eq!(h.scroll(), 99, "a kept its updated scroll");
     }
 
     #[test]
