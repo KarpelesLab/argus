@@ -166,7 +166,9 @@ Property` / `JSON` suffice).
 
 - **`::before`/`::after`** (string `content` + **`attr()`** + concatenation, inline &
   block; CSS `\<hex>` escapes; **`open-quote`/`close-quote`**, UA `<q>` quotes; **CSS
-  counters**).
+  counters**; **`content: url(...)` generated images** — rendered as an inline
+  replaced box, intrinsic-sized; the URL is collected pre-layout from the cascade
+  and fetched like an `<img>`).
 - **`@media`** (min/max-width + prefers-color-scheme/hover/pointer/orientation),
   **`var()`** + **`calc()`/`min()`/`max()`/`clamp()`**, **`@supports`**.
 

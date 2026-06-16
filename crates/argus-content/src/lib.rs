@@ -1150,12 +1150,27 @@ fn find_element_by_id(doc: &argus_dom::Document, id: &str) -> Option<argus_dom::
 
 /// Collect the `src` of every `<img>` element in document order.
 fn collect_img_srcs(doc: &argus_dom::Document, viewport_w: f32) -> Vec<String> {
+    // The author stylesheet, so we can resolve `::before`/`::after`
+    // `content: url(...)` generated images (their URLs live in CSS, not the DOM, so
+    // layout can only size them if they're fetched first).
+    let author = argus_style::author_stylesheet(doc);
     fn walk(
         doc: &argus_dom::Document,
         id: argus_dom::NodeId,
         viewport_w: f32,
+        author: &argus_style::AuthorStylesheet,
         out: &mut Vec<String>,
     ) {
+        if doc.node(id).as_element().is_some() {
+            for which in [
+                argus_style::PseudoElement::Before,
+                argus_style::PseudoElement::After,
+            ] {
+                if let Some(url) = argus_style::pseudo_content_image(doc, id, author, which) {
+                    out.push(url);
+                }
+            }
+        }
         if let argus_dom::NodeData::Element(e) = &doc.node(id).data {
             if e.name.is_html("img") {
                 // Fetch the same URL layout resolves (`<picture>` source, else
@@ -1190,11 +1205,11 @@ fn collect_img_srcs(doc: &argus_dom::Document, viewport_w: f32) -> Vec<String> {
             }
         }
         for child in doc.children(id) {
-            walk(doc, child, viewport_w, out);
+            walk(doc, child, viewport_w, author, out);
         }
     }
     let mut out = Vec::new();
-    walk(doc, doc.root(), viewport_w, &mut out);
+    walk(doc, doc.root(), viewport_w, &author, &mut out);
     out
 }
 

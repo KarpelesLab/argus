@@ -1324,8 +1324,13 @@ impl Ctx<'_> {
             // by it: at the end we extend the cursor past them and drop them so they
             // don't leak to siblings.
             let float_base = self.floats.len();
-            // `::before` generated content is the element's first inline content.
-            if let Some(text) =
+            // `::before` generated content is the element's first inline content — a
+            // `content: url()` image, else text.
+            if let Some(url) =
+                argus_style::pseudo_content_image(self.doc, id, self.author, PseudoElement::Before)
+            {
+                self.gather_generated_image(&url, &style, &mut words, &mut pending_space);
+            } else if let Some(text) =
                 argus_style::pseudo_content(self.doc, id, self.author, PseudoElement::Before, &self.counters)
             {
                 self.gather_generated(&text, &style, &mut words, &mut pending_space);
@@ -1672,7 +1677,11 @@ impl Ctx<'_> {
                 }
             }
             // `::after` generated content is the element's last inline content.
-            if let Some(text) =
+            if let Some(url) =
+                argus_style::pseudo_content_image(self.doc, id, self.author, PseudoElement::After)
+            {
+                self.gather_generated_image(&url, &style, &mut words, &mut pending_space);
+            } else if let Some(text) =
                 argus_style::pseudo_content(self.doc, id, self.author, PseudoElement::After, &self.counters)
             {
                 self.gather_generated(&text, &style, &mut words, &mut pending_space);
@@ -2903,12 +2912,31 @@ impl Ctx<'_> {
     /// shrink-to-content base size to flex items that have no explicit `width`.
     /// Block descendants are treated as inline here (an over-estimate that is fine
     /// for the typical flex item — a label or button).
-    fn intrinsic_border_width(&self, id: NodeId, style: &ComputedStyle) -> f32 {
+    fn intrinsic_border_width(&mut self, id: NodeId, style: &ComputedStyle) -> f32 {
         let mut words: Vec<InlineWord> = Vec::new();
         let mut pending_space = false;
+        // This is a measurement: gather into `words` but discard any display-list
+        // items the gather emits (e.g. a generated-content image), so the dry run
+        // leaves no phantom geometry.
+        let snap = (
+            self.rects.len(),
+            self.runs.len(),
+            self.images.len(),
+            self.links.len(),
+            self.bounds.len(),
+            self.submits.len(),
+            self.bg_images.len(),
+        );
         for child in self.doc.children(id) {
             self.gather_inline(child, style, None, &mut words, &mut pending_space);
         }
+        self.rects.truncate(snap.0);
+        self.runs.truncate(snap.1);
+        self.images.truncate(snap.2);
+        self.links.truncate(snap.3);
+        self.bounds.truncate(snap.4);
+        self.submits.truncate(snap.5);
+        self.bg_images.truncate(snap.6);
         let mut max_line = 0.0f32;
         let mut cur = 0.0f32;
         for w in &words {
@@ -4033,6 +4061,81 @@ impl Ctx<'_> {
         }
     }
 
+    /// Emit a generated-content image (`::before`/`::after` with `content: url(...)`)
+    /// as an atomic inline box, sized from the decoded image's intrinsic size (capped
+    /// to the viewport so a stray huge icon can't overflow). Does nothing if the URL
+    /// wasn't fetched/sized.
+    fn gather_generated_image(
+        &mut self,
+        url: &str,
+        istyle: &ComputedStyle,
+        words: &mut Vec<InlineWord>,
+        pending_space: &mut bool,
+    ) {
+        let (iw, ih) = self.image_sizes.get(url).copied().unwrap_or((0, 0));
+        if iw == 0 || ih == 0 {
+            return;
+        }
+        let mut bw = iw as f32;
+        let mut bh = ih as f32;
+        let cap = self.viewport_w.max(0.0);
+        if cap > 0.0 && bw > cap {
+            bh *= cap / bw;
+            bw = cap;
+        }
+        let start = (
+            self.rects.len(),
+            self.runs.len(),
+            self.images.len(),
+            self.links.len(),
+            self.bounds.len(),
+            self.submits.len(),
+            self.bg_images.len(),
+        );
+        // Pushed at the origin; `flush_words` shifts it into the inline position.
+        self.images.push(ImageBox {
+            x: 0.0,
+            y: 0.0,
+            w: bw,
+            h: bh,
+            src: url.to_string(),
+            crop: (0.0, 0.0, 1.0, 1.0),
+            clip: None,
+            filter: istyle.filter,
+        });
+        let end = (
+            self.rects.len(),
+            self.runs.len(),
+            self.images.len(),
+            self.links.len(),
+            self.bounds.len(),
+            self.submits.len(),
+            self.bg_images.len(),
+        );
+        let space_before = *pending_space;
+        *pending_space = false;
+        words.push(InlineWord {
+            text: String::new(),
+            font_size: istyle.font_size,
+            font_key: istyle.font_key,
+            color: argus_geometry::Color::TRANSPARENT,
+            background: argus_geometry::Color::TRANSPARENT,
+            space_before,
+            underline: false,
+            strike: false,
+            overline: false,
+            bold: false,
+            italic: false,
+            shadow: None,
+            decoration_color: argus_geometry::Color::TRANSPARENT,
+            decoration_style: argus_style::DecorationStyle::Solid,
+            href: None,
+            hard_break: false,
+            baseline_shift: 0.0,
+            atomic: Some((start, end, bw, bh, istyle.vertical_align)),
+        });
+    }
+
     /// Gather a generated-content string (`::before`/`::after`) into inline words,
     /// styled like the element itself.
     fn gather_generated(
@@ -4086,7 +4189,7 @@ impl Ctx<'_> {
     }
 
     fn gather_inline(
-        &self,
+        &mut self,
         id: NodeId,
         style: &ComputedStyle,
         link: Option<Rc<str>>,
@@ -4208,8 +4311,12 @@ impl Ctx<'_> {
                     link
                 };
                 // `::before`/`::after` generated content for inline elements (e.g.
-                // the UA quotes on `<q>`).
-                if let Some(t) =
+                // the UA quotes on `<q>`) — a `content: url()` image, else text.
+                if let Some(url) =
+                    argus_style::pseudo_content_image(self.doc, id, self.author, PseudoElement::Before)
+                {
+                    self.gather_generated_image(&url, &cstyle, words, pending_space);
+                } else if let Some(t) =
                     argus_style::pseudo_content(self.doc, id, self.author, PseudoElement::Before, &self.counters)
                 {
                     self.gather_generated(&t, &cstyle, words, pending_space);
@@ -4217,7 +4324,11 @@ impl Ctx<'_> {
                 for child in self.doc.children(id) {
                     self.gather_inline(child, &cstyle, child_link.clone(), words, pending_space);
                 }
-                if let Some(t) =
+                if let Some(url) =
+                    argus_style::pseudo_content_image(self.doc, id, self.author, PseudoElement::After)
+                {
+                    self.gather_generated_image(&url, &cstyle, words, pending_space);
+                } else if let Some(t) =
                     argus_style::pseudo_content(self.doc, id, self.author, PseudoElement::After, &self.counters)
                 {
                     self.gather_generated(&t, &cstyle, words, pending_space);
@@ -6831,6 +6942,35 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         let gray = render("filter: grayscale(1)");
         assert!(!gray.filter.is_identity());
         assert!((gray.filter.grayscale - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn generated_content_url_emits_an_inline_image() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        let mut sizes = ImageSizes::new();
+        sizes.insert("icon.png".to_string(), (24, 24));
+        // `::before { content: url(icon.png) }` emits an inline image box for the
+        // icon, ahead of the element's text.
+        let doc = parse(
+            "<style>.a::before { content: url(icon.png) }</style>\
+             <div class=\"a\">label</div>",
+        );
+        let l = layout(&doc, &font, 400.0, &sizes);
+        let img = l.images.iter().find(|im| im.src == "icon.png");
+        assert!(img.is_some(), "generated-content image emitted");
+        let img = img.unwrap();
+        assert!((img.w - 24.0).abs() < 0.5 && (img.h - 24.0).abs() < 0.5, "intrinsic size");
+        // The "label" text still renders (image is in addition, not instead).
+        assert!(l.runs.iter().any(|r| r.text == "label"));
+
+        // A text `content` still renders as text (not an image).
+        let doc2 = parse("<style>.b::before { content: \"X \" }</style><p class=\"b\">y</p>");
+        let l2 = layout(&doc2, &font, 400.0, &sizes);
+        assert!(l2.images.iter().all(|im| im.src != "icon.png"));
+        assert!(l2.runs.iter().any(|r| r.text == "X"));
     }
 
     #[test]

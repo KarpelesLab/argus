@@ -1314,10 +1314,37 @@ pub fn pseudo_content(
     which: argus_css::PseudoElement,
     counters: &HashMap<String, i32>,
 ) -> Option<String> {
+    let v = pseudo_content_value(doc, node, author, which)?;
+    // A `url(...)` value is a generated *image* (see `pseudo_content_image`), not
+    // text — don't also emit it as a text run.
+    if v.trim_start().starts_with("url(") {
+        return None;
+    }
+    Some(resolve_content(doc, node, &v, counters))
+}
+
+/// The generated-content image URL of a `::before`/`::after` (when its `content`
+/// is `url(...)`), or `None`. Layout renders this as an inline replaced box.
+pub fn pseudo_content_image(
+    doc: &Document,
+    node: NodeId,
+    author: &Stylesheet,
+    which: argus_css::PseudoElement,
+) -> Option<String> {
+    let v = pseudo_content_value(doc, node, author, which)?;
+    v.trim_start().starts_with("url(").then(|| extract_url(&v)).flatten()
+}
+
+/// The winning `content` declaration value for a pseudo-element (UA then author,
+/// later rules + higher specificity win), or `None` for absent/`none`/`normal`.
+fn pseudo_content_value(
+    doc: &Document,
+    node: NodeId,
+    author: &Stylesheet,
+    which: argus_css::PseudoElement,
+) -> Option<String> {
     let mut best: Option<(Specificity, usize, String)> = None;
     let mut order = 0usize;
-    // Scan the UA stylesheet first (lowest priority), then author rules — later
-    // rules (higher `order`) win ties, so author content overrides UA defaults.
     for rule in ua_stylesheet().rules.iter().chain(author.rules.iter()) {
         let spec = rule
             .selectors
@@ -1342,7 +1369,7 @@ pub fn pseudo_content(
     if v.eq_ignore_ascii_case("none") || v.eq_ignore_ascii_case("normal") {
         return None;
     }
-    Some(resolve_content(doc, node, v, counters))
+    Some(v.to_string())
 }
 
 /// Resolve a `content` value into its rendered string: a sequence of quoted
