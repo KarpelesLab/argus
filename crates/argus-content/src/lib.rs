@@ -1050,19 +1050,43 @@ fn blit_background(
     let clip = bgi
         .clip
         .map(|[x, y, w, h]| [x as i32, y as i32, w as i32, h as i32]);
+    let (iwf, ihf) = (iw as f32, ih as f32);
+    let (bw, bh) = (bgi.w, bgi.h);
+    let (px, py) = bgi.pos;
+
+    // `cover`/`contain` scale the image and paint it once, positioned (and clipped)
+    // within the box. `cover` overflows (negative offset → cropped); `contain` fits.
+    if matches!(bgi.size, argus_style::BgSize::Cover | argus_style::BgSize::Contain) {
+        let scale = if bgi.size == argus_style::BgSize::Cover {
+            (bw / iwf).max(bh / ihf)
+        } else {
+            (bw / iwf).min(bh / ihf)
+        };
+        let (dw, dh) = ((iwf * scale).max(1.0), (ihf * scale).max(1.0));
+        let ox = bgi.x + (bw - dw) * px;
+        let oy = bgi.y + (bh - dh) * py;
+        argus_gfx::blit_rgba_cropped(
+            fb, vw, vh, ox as i32, oy as i32, dw as u32, dh as u32, &img.rgba, iw, ih, 0, 0, iw,
+            ih, clip,
+        );
+        return;
+    }
+
     let blit_at = |fb: &mut [u8], x: i32, y: i32| {
         argus_gfx::blit_rgba_cropped(
             fb, vw, vh, x, y, iw, ih, &img.rgba, iw, ih, 0, 0, iw, ih, clip,
         );
     };
+    // `no-repeat`: paint once at the position (natural size).
     if bgi.no_repeat {
-        blit_at(fb, bgi.x as i32, bgi.y as i32);
+        let ox = bgi.x + (bw - iwf) * px;
+        let oy = bgi.y + (bh - ihf) * py;
+        blit_at(fb, ox as i32, oy as i32);
         return;
     }
-    // Tile across the box (bounded so a tiny image over a huge box can't spin).
-    let (iwf, ihf) = (iw as f32, ih as f32);
-    let cols = ((bgi.w / iwf).ceil() as i32 + 1).clamp(1, 4096);
-    let rows = ((bgi.h / ihf).ceil() as i32 + 1).clamp(1, 4096);
+    // Tile to fill from the top-left (bounded so a tiny image can't spin forever).
+    let cols = ((bw / iwf).ceil() as i32 + 1).clamp(1, 4096);
+    let rows = ((bh / ihf).ceil() as i32 + 1).clamp(1, 4096);
     for row in 0..rows {
         for col in 0..cols {
             blit_at(fb, bgi.x as i32 + col * iw as i32, bgi.y as i32 + row * ih as i32);

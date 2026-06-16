@@ -586,8 +586,12 @@ pub struct BgImage {
     pub w: f32,
     pub h: f32,
     pub src: String,
-    /// `background-repeat: no-repeat` — paint once at the top-left instead of tiling.
+    /// `background-repeat: no-repeat` — paint once instead of tiling.
     pub no_repeat: bool,
+    /// `background-size` — natural (tiled) vs cover/contain (scaled, painted once).
+    pub size: argus_style::BgSize,
+    /// `background-position` as `(x, y)` fractions in `0.0..=1.0`.
+    pub pos: (f32, f32),
     /// `overflow: hidden` clip rect confining the fill, if any.
     pub clip: Option<[f32; 4]>,
 }
@@ -1948,6 +1952,8 @@ impl Ctx<'_> {
                     h,
                     src: url,
                     no_repeat: style.bg_no_repeat,
+                    size: style.bg_size,
+                    pos: style.bg_position,
                     clip: Some([border_box_left, border_box_top, border_box_w, h]),
                 });
             }
@@ -6836,6 +6842,17 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         assert!(!bg.no_repeat, "tiles by default");
         assert!(bg.w > 0.0 && bg.h > 0.0, "covers the element box");
         assert_eq!(bg.clip, Some([bg.x, bg.y, bg.w, bg.h]), "clipped to its box");
+        assert_eq!(bg.size, argus_style::BgSize::Auto, "natural size by default");
+        assert_eq!(bg.pos, (0.0, 0.0), "top-left by default");
+
+        // background-size: cover + background-position carry onto the BgImage.
+        let cover = parse(
+            "<div style=\"width:200px;height:80px;background-image:url(h.jpg);\
+             background-size:cover;background-position:center\">x</div>",
+        );
+        let bc = &layout(&cover, &font, 400.0, &ImageSizes::new()).bg_images[0];
+        assert_eq!(bc.size, argus_style::BgSize::Cover);
+        assert_eq!(bc.pos, (0.5, 0.5));
 
         // no-repeat is recorded; a gradient background emits no bg-image.
         let nr = parse("<div style=\"background-image:url(b.png); background-repeat:no-repeat\">x</div>");

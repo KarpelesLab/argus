@@ -162,6 +162,17 @@ impl Filter {
     }
 }
 
+/// `background-size` — how a bitmap background is scaled into its box. `Auto`
+/// paints at the image's natural size (tiled); `Cover`/`Contain` scale to fill or
+/// fit the box (painted once).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum BgSize {
+    #[default]
+    Auto,
+    Cover,
+    Contain,
+}
+
 /// Extract the URL from the first `url(...)` in a value (e.g. a `background-image`),
 /// stripping optional quotes. `None` if there is no `url()`.
 pub fn extract_url(v: &str) -> Option<String> {
@@ -637,6 +648,11 @@ pub struct ComputedStyle {
     pub has_bg_image: bool,
     /// `background-repeat: no-repeat` (else the image tiles to fill the box).
     pub bg_no_repeat: bool,
+    /// `background-size` — how the bitmap is scaled into the box.
+    pub bg_size: BgSize,
+    /// `background-position` as `(x, y)` fractions in `0.0..=1.0` (default top-left
+    /// `(0, 0)`).
+    pub bg_position: (f32, f32),
     /// `line-height` as a multiple of `font-size` (inherited).
     pub line_height: f32,
     /// `text-indent` for the first line, in pixels (inherited).
@@ -759,6 +775,8 @@ impl ComputedStyle {
             filter: Filter::default(),
             has_bg_image: false,
             bg_no_repeat: false,
+            bg_size: BgSize::Auto,
+            bg_position: (0.0, 0.0),
             line_height: 1.2,
             text_indent: 0.0,
             word_spacing: 0.0,
@@ -1548,6 +1566,16 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     }
     if let Some(v) = map.get("background-repeat") {
         cs.bg_no_repeat = v.split_whitespace().any(|t| t == "no-repeat");
+    }
+    if let Some(v) = map.get("background-size") {
+        cs.bg_size = match v.trim() {
+            "cover" => BgSize::Cover,
+            "contain" => BgSize::Contain,
+            _ => BgSize::Auto,
+        };
+    }
+    if let Some(v) = map.get("background-position") {
+        cs.bg_position = parse_object_position(v.trim());
     }
     // `direction: rtl` / `dir="rtl"` (mapped to `direction` by presentational hints)
     // sets the right-to-left base direction.
@@ -3576,5 +3604,13 @@ mod tests {
         assert!(cs("background-image: url(x.png); background-repeat: no-repeat").bg_no_repeat);
         // A gradient is not a bitmap background (no url flag).
         assert!(!cs("background: linear-gradient(red, blue)").has_bg_image);
+
+        // background-size / background-position.
+        assert_eq!(cs("background-size: cover").bg_size, BgSize::Cover);
+        assert_eq!(cs("background-size: contain").bg_size, BgSize::Contain);
+        assert_eq!(cs("background-size: auto").bg_size, BgSize::Auto);
+        assert_eq!(cs("background-position: center").bg_position, (0.5, 0.5));
+        assert_eq!(cs("background-position: right bottom").bg_position, (1.0, 1.0));
+        assert_eq!(cs("").bg_position, (0.0, 0.0), "default top-left");
     }
 }
