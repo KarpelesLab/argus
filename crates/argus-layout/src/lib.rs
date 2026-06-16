@@ -1277,6 +1277,11 @@ impl Ctx<'_> {
                         (String::new(), false)
                     } else {
                         match e.attr("value").filter(|v| !v.is_empty()) {
+                            // A `password` field masks its value with bullets so it
+                            // never renders in cleartext.
+                            Some(v) if ty == "password" => {
+                                ("\u{2022}".repeat(v.chars().count()), false)
+                            }
                             Some(v) => (v.to_string(), false),
                             // Submit/reset buttons show a default label when unvalued.
                             None => match ty {
@@ -4662,6 +4667,30 @@ mod tests {
         );
         let s = by_id(&fdoc, fdoc.root(), "s").unwrap();
         assert_eq!(form_get_url(&fdoc, s).as_deref(), Some("/c?msg=edited"));
+    }
+
+    #[test]
+    fn password_input_masks_its_value() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // A password field renders bullets, never the cleartext value.
+        let doc = parse("<input type=\"password\" value=\"hunter2\">");
+        let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let texts: Vec<&str> = l.runs.iter().map(|r| r.text.as_str()).collect();
+        assert!(
+            texts.iter().all(|t| !t.contains("hunter2")),
+            "cleartext password must not render: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t.chars().all(|c| c == '\u{2022}') && t.chars().count() == 7),
+            "7 bullets for a 7-char password: {texts:?}"
+        );
+        // A normal text input still shows its value.
+        let doc2 = parse("<input type=\"text\" value=\"hunter2\">");
+        let l2 = layout(&doc2, &font, 400.0, &ImageSizes::new());
+        assert!(l2.runs.iter().any(|r| r.text == "hunter2"), "text shows plainly");
     }
 
     #[test]
