@@ -33,6 +33,7 @@ pub fn run(channel: Channel) -> io::Result<()> {
         events: Vec::new(),
         storage: std::collections::HashMap::new(),
         focused: None,
+        current_fragment: None,
         input_values: std::collections::HashMap::new(),
         checked: std::collections::HashMap::new(),
         selected: std::collections::HashMap::new(),
@@ -114,6 +115,7 @@ pub fn run(channel: Channel) -> io::Result<()> {
                 content.checked.clear();
                 content.selected.clear();
                 content.details_open.clear();
+                content.current_fragment = None;
                 content.doc = Some(doc);
                 // Report localStorage so the browser can persist it to disk.
                 if !content.storage.is_empty() {
@@ -143,8 +145,10 @@ pub fn run(channel: Channel) -> io::Result<()> {
                 content.scroll_y = y;
             }
             Msg::ScrollToFragment { fragment } => {
-                // Deep-link after navigation: report the fragment target's document
-                // Y as a scroll sentinel, exactly like a same-page anchor click.
+                // Deep-link after navigation: set `:target` and report the fragment
+                // target's document Y as a scroll sentinel, like an anchor click.
+                content.current_fragment =
+                    (!fragment.is_empty()).then(|| fragment.clone());
                 let y = content.fragment_scroll_y(&fragment);
                 proto::send(
                     &channel,
@@ -170,8 +174,10 @@ pub fn run(channel: Channel) -> io::Result<()> {
                     .find(|s| s.contains(x as f32, y as f32))
                     .map(|s| (s.action.clone(), s.body.clone()));
                 if let Some(frag) = url.strip_prefix('#') {
-                    // Same-page anchor: reply with the target's absolute Y so the
-                    // browser scrolls there instead of navigating/reloading.
+                    // Same-page anchor: update `:target` and reply with the target's
+                    // absolute Y so the browser scrolls there (no navigation).
+                    content.current_fragment =
+                        (!frag.is_empty()).then(|| frag.to_string());
                     let y = content.fragment_scroll_y(frag);
                     proto::send(
                         &channel,
@@ -267,6 +273,9 @@ struct Content {
     storage: std::collections::HashMap<String, String>,
     /// The id of the focused text field (clicked), receiving keystrokes.
     focused: Option<String>,
+    /// The current URL-fragment target id (`:target`), set by anchor jumps and
+    /// deep-link scrolls, cleared on navigation. Marked on the matching element.
+    current_fragment: Option<String>,
     /// User-typed values by input id, re-applied after script runs so typing
     /// survives re-renders and event replays.
     input_values: std::collections::HashMap<String, String>,
@@ -736,8 +745,9 @@ impl Content {
         out
     }
 
-    /// Mark the focused element with the `__argus_focus` sentinel attribute (and
-    /// strip it from any other) so the UA stylesheet draws a focus outline. Called
+    /// Mark interaction state on the DOM for the cascade: the focused element gets
+    /// `__argus_focus` (UA focus ring + `:focus`), and the current URL-fragment
+    /// target gets `__argus_target` (`:target`). Stale markers are stripped. Called
     /// each render before layout.
     fn apply_focus(&mut self) {
         // Collect element nodes first (immutable), then mutate (disjoint borrows).
@@ -751,16 +761,23 @@ impl Content {
         let mut nodes = Vec::new();
         collect(doc, doc.root(), &mut nodes);
         let focused = self.focused.clone();
+        let target = self.current_fragment.clone();
         let Some(doc) = &mut self.doc else { return };
+        let set_marker = |e: &mut argus_dom::ElementData, name: &str, want: bool| {
+            let has = e.attrs.iter().any(|a| &*a.name == name);
+            if want && !has {
+                e.attrs.push(argus_dom::Attribute::new(name, ""));
+            } else if !want && has {
+                e.attrs.retain(|a| &*a.name != name);
+            }
+        };
         for n in nodes {
             if let argus_dom::NodeData::Element(e) = doc.data_mut(n) {
-                let is_focused = focused.as_deref() == e.attr("id");
-                let has = e.attrs.iter().any(|a| &*a.name == "__argus_focus");
-                if is_focused && focused.is_some() && !has {
-                    e.attrs.push(argus_dom::Attribute::new("__argus_focus", ""));
-                } else if (!is_focused || focused.is_none()) && has {
-                    e.attrs.retain(|a| &*a.name != "__argus_focus");
-                }
+                let id = e.attr("id");
+                let is_focused = focused.is_some() && focused.as_deref() == id;
+                let is_target = target.is_some() && target.as_deref() == id;
+                set_marker(e, "__argus_focus", is_focused);
+                set_marker(e, "__argus_target", is_target);
             }
         }
     }
@@ -1120,6 +1137,7 @@ mod tests {
             events: Vec::new(),
             storage: std::collections::HashMap::new(),
             focused: None,
+            current_fragment: None,
             input_values: std::collections::HashMap::new(),
             checked: std::collections::HashMap::new(),
             selected: std::collections::HashMap::new(),
@@ -1376,6 +1394,28 @@ mod tests {
         c.focused = None;
         c.apply_focus();
         assert!(!marked(&c, "a"), "marker cleared when focus leaves");
+    }
+
+    #[test]
+    fn current_fragment_marks_the_target_element() {
+        fn has_target(c: &Content, id: &str) -> bool {
+            let doc = c.doc.as_ref().unwrap();
+            find_element_by_id(doc, id)
+                .and_then(|n| doc.node(n).as_element())
+                .is_some_and(|e| e.attr("__argus_target").is_some())
+        }
+        let mut c = headless("<section id=\"a\">A</section><section id=\"b\">B</section>", vec![]);
+        c.current_fragment = Some("b".to_string());
+        c.apply_focus();
+        assert!(has_target(&c, "b"), "the fragment target is marked");
+        assert!(!has_target(&c, "a"), "non-target isn't marked");
+        // Changing the fragment moves the marker; clearing removes it.
+        c.current_fragment = Some("a".to_string());
+        c.apply_focus();
+        assert!(has_target(&c, "a") && !has_target(&c, "b"), "marker follows the fragment");
+        c.current_fragment = None;
+        c.apply_focus();
+        assert!(!has_target(&c, "a"), "marker cleared with no fragment");
     }
 
     #[test]

@@ -96,6 +96,9 @@ pub enum PseudoClass {
     /// `:placeholder-shown` — an empty `<input>`/`<textarea>` with a `placeholder`
     /// (so the placeholder text is currently visible).
     PlaceholderShown,
+    /// `:target` — the element whose `id` matches the current URL fragment (the
+    /// content process marks it with `__argus_target` before the cascade).
+    Target,
     /// `:root` — the document's root element (`<html>`).
     Root,
     /// `:empty` — no element or (non-whitespace) text children.
@@ -365,6 +368,7 @@ fn parse_compound(tokens: &[Token], i: &mut usize) -> Option<Compound> {
                                 "placeholder-shown" => {
                                     c.pseudos.push(PseudoClass::PlaceholderShown)
                                 }
+                                "target" => c.pseudos.push(PseudoClass::Target),
                                 "root" => c.pseudos.push(PseudoClass::Root),
                                 "empty" => c.pseudos.push(PseudoClass::Empty),
                                 "first-of-type" => c.pseudos.push(PseudoClass::FirstOfType),
@@ -836,6 +840,9 @@ fn pseudo_matches(doc: &Document, node: NodeId, p: PseudoClass) -> bool {
                     && e.attr("placeholder").is_some()
                     && e.attr("value").is_none_or(|v| v.is_empty())
         ),
+        // `:target` — the element matching the current URL fragment (marked by the
+        // content process).
+        PseudoClass::Target => element_has_attr(doc, node, "__argus_target"),
         // `:root` — an element whose parent is the document node.
         PseudoClass::Root => doc
             .node(node)
@@ -1231,6 +1238,26 @@ mod tests {
         assert!(matches(&doc, empty, &sel("input:placeholder-shown")));
         assert!(!matches(&doc, filled, &sel(":placeholder-shown")));
         assert!(!matches(&doc, bare, &sel(":placeholder-shown")));
+    }
+
+    #[test]
+    fn target_pseudo_class() {
+        let mut doc = Document::new();
+        let root = doc.root();
+        // The content process marks the URL-fragment element with `__argus_target`.
+        let hit = doc.create_element(
+            QualName::html("section"),
+            vec![
+                Attribute::new("id", "sec"),
+                Attribute::new("__argus_target", ""),
+            ],
+        );
+        doc.append(root, hit);
+        let miss = doc.create_element(QualName::html("section"), vec![Attribute::new("id", "x")]);
+        doc.append(root, miss);
+        assert!(matches(&doc, hit, &sel("section:target")));
+        assert!(matches(&doc, hit, &sel(":target")));
+        assert!(!matches(&doc, miss, &sel(":target")));
     }
 
     #[test]
