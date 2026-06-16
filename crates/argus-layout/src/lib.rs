@@ -491,6 +491,9 @@ pub struct ImageBox {
     pub crop: (f32, f32, f32, f32),
     /// `overflow: hidden` clip rect `(x, y, w, h)` confining this image, if any.
     pub clip: Option<[f32; 4]>,
+    /// `filter` color/tone functions to apply to the sampled pixels (identity when
+    /// no `filter` is set).
+    pub filter: argus_style::Filter,
 }
 
 /// The border-box of an element that carries an `id`, for click hit-testing,
@@ -2322,6 +2325,7 @@ impl Ctx<'_> {
                             src: key.clone(),
                             crop: (0.0, 0.0, 1.0, 1.0),
                             clip: None,
+                            filter: istyle.filter,
                         });
                         self.cursor_y += h;
                         return;
@@ -2544,6 +2548,7 @@ impl Ctx<'_> {
                     src: src.to_string(),
                     crop,
                     clip: None,
+                    filter: istyle.filter,
                 });
             }
             self.cursor_y += h;
@@ -6742,6 +6747,12 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         // `right` crops from the right edge (crop x0 ~0.5 for a half-width crop).
         let right = render("object-fit: cover; object-position: right");
         assert!((right.crop.0 - 0.5).abs() < 0.02, "right crop x0 ~0.5, got {}", right.crop.0);
+
+        // A CSS `filter` rides on the ImageBox (applied at blit time by content).
+        assert!(render("").filter.is_identity(), "no filter by default");
+        let gray = render("filter: grayscale(1)");
+        assert!(!gray.filter.is_identity());
+        assert!((gray.filter.grayscale - 1.0).abs() < 1e-6);
     }
 
     #[test]

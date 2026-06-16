@@ -410,6 +410,21 @@ impl Content {
         for ib in &layout.images {
             if let Some(img) = images.get(&ib.src) {
                 let (cx, cy, cw, ch) = ib.crop;
+                // A CSS `filter` transforms the sampled pixels (a per-box copy;
+                // identity filters blit the decoded image directly, no copy).
+                let owned;
+                let rgba: &[u8] = if ib.filter.is_identity() {
+                    &img.rgba
+                } else {
+                    let mut buf = img.rgba.clone();
+                    for px in buf.chunks_exact_mut(4) {
+                        let mut p = [px[0], px[1], px[2], px[3]];
+                        ib.filter.apply_pixel(&mut p);
+                        px.copy_from_slice(&p);
+                    }
+                    owned = buf;
+                    &owned
+                };
                 argus_gfx::blit_rgba_cropped(
                     fb.pixels_mut(),
                     vw,
@@ -418,7 +433,7 @@ impl Content {
                     ib.y as i32,
                     ib.w as u32,
                     ib.h as u32,
-                    &img.rgba,
+                    rgba,
                     img.width,
                     img.height,
                     (cx * img.width as f32) as u32,

@@ -72,6 +72,152 @@ pub enum ObjectFit {
     Cover,
 }
 
+/// A subset of CSS `filter` — color/tone functions applied per-pixel to a replaced
+/// image. Amounts are normalized (`grayscale`/`sepia`/`invert`/`opacity` in
+/// `0..=1`; `brightness`/`contrast`/`saturate` are multipliers, `1.0` = identity).
+/// `blur` is parsed (px) but not applied here (spatial — reserved). `Copy` so it
+/// rides in `ComputedStyle`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Filter {
+    pub grayscale: f32,
+    pub sepia: f32,
+    pub invert: f32,
+    pub opacity: f32,
+    pub brightness: f32,
+    pub contrast: f32,
+    pub saturate: f32,
+    pub blur: f32,
+}
+
+impl Default for Filter {
+    fn default() -> Self {
+        Filter {
+            grayscale: 0.0,
+            sepia: 0.0,
+            invert: 0.0,
+            opacity: 1.0,
+            brightness: 1.0,
+            contrast: 1.0,
+            saturate: 1.0,
+            blur: 0.0,
+        }
+    }
+}
+
+impl Filter {
+    /// Whether this filter is the identity (nothing to apply).
+    pub fn is_identity(&self) -> bool {
+        *self == Filter::default()
+    }
+
+    /// Apply the filter to one straight-alpha RGBA pixel in place. Functions are
+    /// applied in a fixed canonical order (brightness, contrast, saturate, sepia,
+    /// grayscale, invert, opacity) — single-filter uses (the common case) are exact.
+    pub fn apply_pixel(&self, px: &mut [u8; 4]) {
+        let mut r = px[0] as f32 / 255.0;
+        let mut g = px[1] as f32 / 255.0;
+        let mut b = px[2] as f32 / 255.0;
+        // brightness (linear multiply), contrast (around 0.5).
+        for c in [&mut r, &mut g, &mut b] {
+            *c *= self.brightness;
+            *c = (*c - 0.5) * self.contrast + 0.5;
+        }
+        let lum = |r: f32, g: f32, b: f32| 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        // saturate: interpolate between greyscale and full color (s>1 oversaturates).
+        if self.saturate != 1.0 {
+            let l = lum(r, g, b);
+            r = l + (r - l) * self.saturate;
+            g = l + (g - l) * self.saturate;
+            b = l + (b - l) * self.saturate;
+        }
+        // sepia (standard matrix), mixed by amount.
+        if self.sepia > 0.0 {
+            let s = self.sepia;
+            let (sr, sg, sb) = (
+                0.393 * r + 0.769 * g + 0.189 * b,
+                0.349 * r + 0.686 * g + 0.168 * b,
+                0.272 * r + 0.534 * g + 0.131 * b,
+            );
+            r += (sr - r) * s;
+            g += (sg - g) * s;
+            b += (sb - b) * s;
+        }
+        // grayscale: mix toward luminance.
+        if self.grayscale > 0.0 {
+            let l = lum(r, g, b);
+            r += (l - r) * self.grayscale;
+            g += (l - g) * self.grayscale;
+            b += (l - b) * self.grayscale;
+        }
+        // invert.
+        if self.invert > 0.0 {
+            r += (1.0 - 2.0 * r) * self.invert;
+            g += (1.0 - 2.0 * g) * self.invert;
+            b += (1.0 - 2.0 * b) * self.invert;
+        }
+        px[0] = (r.clamp(0.0, 1.0) * 255.0).round() as u8;
+        px[1] = (g.clamp(0.0, 1.0) * 255.0).round() as u8;
+        px[2] = (b.clamp(0.0, 1.0) * 255.0).round() as u8;
+        px[3] = (px[3] as f32 * self.opacity.clamp(0.0, 1.0)).round() as u8;
+    }
+}
+
+/// Parse a `filter` value (a space-separated list of `name(arg)` functions) into a
+/// [`Filter`]. Unknown functions are ignored. `none` / empty → identity.
+fn parse_filter(v: &str) -> Filter {
+    let mut f = Filter::default();
+    let v = v.trim();
+    if v.is_empty() || v.eq_ignore_ascii_case("none") {
+        return f;
+    }
+    let bytes = v.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // function name up to '('.
+        let name_start = i;
+        while i < bytes.len() && bytes[i] != b'(' {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let name = v[name_start..i].trim().to_ascii_lowercase();
+        i += 1; // past '('
+        let arg_start = i;
+        while i < bytes.len() && bytes[i] != b')' {
+            i += 1;
+        }
+        let arg = v[arg_start..i.min(v.len())].trim();
+        i += 1; // past ')'
+        // numeric arg: percentage → /100, plain number as-is, `Npx` for blur.
+        let num = |a: &str, default: f32| -> f32 {
+            if a.is_empty() {
+                return default;
+            }
+            if let Some(p) = a.strip_suffix('%') {
+                p.trim().parse::<f32>().map(|n| n / 100.0).unwrap_or(default)
+            } else {
+                a.trim_end_matches("px")
+                    .trim()
+                    .parse::<f32>()
+                    .unwrap_or(default)
+            }
+        };
+        match name.as_str() {
+            "grayscale" | "greyscale" => f.grayscale = num(arg, 1.0).clamp(0.0, 1.0),
+            "sepia" => f.sepia = num(arg, 1.0).clamp(0.0, 1.0),
+            "invert" => f.invert = num(arg, 1.0).clamp(0.0, 1.0),
+            "opacity" => f.opacity = num(arg, 1.0).clamp(0.0, 1.0),
+            "brightness" => f.brightness = num(arg, 1.0).max(0.0),
+            "contrast" => f.contrast = num(arg, 1.0).max(0.0),
+            "saturate" => f.saturate = num(arg, 1.0).max(0.0),
+            "blur" => f.blur = num(arg, 0.0).max(0.0),
+            _ => {}
+        }
+    }
+    f
+}
+
 /// Parse `object-position` to `(x, y)` alignment fractions in `0.0..=1.0`. Handles
 /// the keyword set (`left`/`center`/`right`/`top`/`bottom`) and percentages, in one
 /// or two values (keyword order is tolerated; a length without `%` falls back to
@@ -469,6 +615,8 @@ pub struct ComputedStyle {
     /// `object-position` — alignment of the fitted image within its box, as
     /// `(x, y)` fractions in `0.0..=1.0` (default `(0.5, 0.5)`, i.e. centered).
     pub object_position: (f32, f32),
+    /// `filter` — per-pixel color/tone functions applied to a replaced image.
+    pub filter: Filter,
     /// `line-height` as a multiple of `font-size` (inherited).
     pub line_height: f32,
     /// `text-indent` for the first line, in pixels (inherited).
@@ -588,6 +736,7 @@ impl ComputedStyle {
             caption_side_bottom: false,
             object_fit: ObjectFit::Fill,
             object_position: (0.5, 0.5),
+            filter: Filter::default(),
             line_height: 1.2,
             text_indent: 0.0,
             word_spacing: 0.0,
@@ -1496,6 +1645,9 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
     }
     if let Some(v) = map.get("object-position") {
         cs.object_position = parse_object_position(v.trim());
+    }
+    if let Some(v) = map.get("filter") {
+        cs.filter = parse_filter(v);
     }
     // `gap` shorthand: `<row-gap> [<column-gap>]` (column defaults to row).
     if let Some(v) = map.get("gap").or_else(|| map.get("grid-gap")) {
@@ -3321,5 +3473,52 @@ mod tests {
         assert_eq!(pos("object-position: top"), (0.5, 0.0));
         // Keyword order is tolerated (vertical-first).
         assert_eq!(pos("object-position: top left"), (0.0, 0.0));
+    }
+
+    #[test]
+    fn filter_parses_and_transforms_pixels() {
+        let filt = |decl: &str| -> Filter {
+            let mut doc = Document::new();
+            let d = one(&mut doc, "img", vec![]);
+            computed_style(
+                &doc,
+                d,
+                &ComputedStyle::initial(),
+                &parse_stylesheet(&format!("img {{ {decl} }}")),
+            )
+            .filter
+        };
+        // Default / none is identity.
+        assert!(filt("").is_identity());
+        assert!(filt("filter: none").is_identity());
+
+        // grayscale(1) → r=g=b (the luminance) for a pure-red pixel.
+        let g = filt("filter: grayscale(100%)");
+        let mut px = [255, 0, 0, 255];
+        g.apply_pixel(&mut px);
+        assert_eq!(px[0], px[1]);
+        assert_eq!(px[1], px[2]);
+        assert!(px[0] > 0 && px[0] < 120, "red's luminance ~0.21*255: {}", px[0]);
+
+        // invert(1) flips channels; alpha untouched.
+        let inv = filt("filter: invert(1)");
+        let mut p2 = [0, 0, 0, 200];
+        inv.apply_pixel(&mut p2);
+        assert_eq!(p2, [255, 255, 255, 200]);
+
+        // brightness(0) → black; opacity(0.5) halves alpha.
+        let b0 = filt("filter: brightness(0)");
+        let mut p3 = [200, 100, 50, 255];
+        b0.apply_pixel(&mut p3);
+        assert_eq!([p3[0], p3[1], p3[2]], [0, 0, 0]);
+        let op = filt("filter: opacity(50%)");
+        let mut p4 = [10, 20, 30, 200];
+        op.apply_pixel(&mut p4);
+        assert_eq!(p4[3], 100, "alpha halved");
+        assert_eq!([p4[0], p4[1], p4[2]], [10, 20, 30], "color unchanged");
+
+        // Multiple functions parse together.
+        let multi = filt("filter: grayscale(0.5) brightness(1.2)");
+        assert!((multi.grayscale - 0.5).abs() < 1e-6 && (multi.brightness - 1.2).abs() < 1e-6);
     }
 }
