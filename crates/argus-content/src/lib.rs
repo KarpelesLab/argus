@@ -786,6 +786,17 @@ impl Content {
         } else {
             edit_value(&current, ch)
         };
+        // Enforce `maxlength` (in Unicode scalars) so typing can't exceed it.
+        let next = match self
+            .doc
+            .as_ref()
+            .and_then(|d| find_element_by_id(d, &id).and_then(|n| d.node(n).as_element()))
+            .and_then(|e| e.attr("maxlength"))
+            .and_then(|m| m.parse::<usize>().ok())
+        {
+            Some(max) if next.chars().count() > max => next.chars().take(max).collect(),
+            _ => next,
+        };
         self.input_values.insert(id, next);
         self.apply_input_values();
         None
@@ -1246,6 +1257,30 @@ mod tests {
         // Backspace removes the last char.
         c.type_key(0x08);
         assert_eq!(dom_value(&c), "init!\n");
+    }
+
+    #[test]
+    fn maxlength_caps_typed_input() {
+        fn dom_value(c: &Content) -> String {
+            let doc = c.doc.as_ref().unwrap();
+            find_element_by_id(doc, "t")
+                .and_then(|n| doc.node(n).as_element())
+                .and_then(|e| e.attr("value"))
+                .unwrap_or("")
+                .to_string()
+        }
+        let mut c = headless("<input id=\"t\" maxlength=\"3\">", vec![]);
+        c.focused = Some("t".to_string());
+        for ch in "abcde".chars() {
+            c.type_key(ch as u32);
+        }
+        assert_eq!(dom_value(&c), "abc", "typing stops at maxlength");
+        // Backspace still works under the cap.
+        c.type_key(0x08);
+        assert_eq!(dom_value(&c), "ab");
+        c.type_key('z' as u32);
+        c.type_key('y' as u32);
+        assert_eq!(dom_value(&c), "abz", "refills up to the cap");
     }
 
     #[test]
