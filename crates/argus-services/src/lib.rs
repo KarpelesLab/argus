@@ -29,18 +29,23 @@ pub fn run(role: Role, channel: Channel) -> io::Result<()> {
     loop {
         match proto::recv(&channel) {
             Ok((Msg::LoadUrl { url }, _)) if role == Role::NetService => {
-                let (status, body) = match cache.lookup(&url) {
-                    CacheLookup::Fresh(body) => {
+                let (status, body, csp) = match cache.lookup(&url) {
+                    CacheLookup::Fresh { body, csp } => {
                         log!("GET {url} -> 200 ({} bytes, cached)", body.len());
-                        (200, body)
+                        (200, body, csp)
                     }
-                    CacheLookup::Stale { validators, body } => {
+                    CacheLookup::Stale {
+                        validators,
+                        body,
+                        csp,
+                    } => {
                         // Revalidate with a conditional request.
                         let (status, headers, new_body) =
                             fetch(&url, &validators.conditional_headers(), &mut jar);
                         if status == 304 || status == 0 {
-                            // Not modified (or transport error): serve the stored body.
-                            // A 304 may carry fresh caching headers; honor them.
+                            // Not modified (or transport error): serve the stored body
+                            // and its stored CSP. A 304 may carry fresh caching
+                            // headers; honor them.
                             if status == 304 {
                                 if let Some(ttl) = freshness_from_headers(&headers) {
                                     cache.refresh(&url, ttl);
@@ -49,41 +54,59 @@ pub fn run(role: Role, channel: Channel) -> io::Result<()> {
                             } else {
                                 log!("GET {url} -> stale-served ({} bytes)", body.len());
                             }
-                            (200, body)
+                            (200, body, csp)
                         } else {
                             log!("GET {url} -> {status} ({} bytes, refetched)", new_body.len());
+                            let csp = extract_csp(&headers);
                             if let Some(ttl) = cacheable_ttl(status, &headers) {
                                 cache.put(
                                     url.clone(),
                                     new_body.clone(),
                                     ttl,
                                     extract_validators(&headers),
+                                    csp.clone(),
                                 );
                             }
-                            (status, new_body)
+                            (status, new_body, csp)
                         }
                     }
                     CacheLookup::Miss => {
                         let (status, headers, body) = fetch(&url, &[], &mut jar);
                         log!("GET {url} -> {status} ({} bytes)", body.len());
+                        let csp = extract_csp(&headers);
                         if let Some(ttl) = cacheable_ttl(status, &headers) {
-                            cache.put(url.clone(), body.clone(), ttl, extract_validators(&headers));
+                            cache.put(
+                                url.clone(),
+                                body.clone(),
+                                ttl,
+                                extract_validators(&headers),
+                                csp.clone(),
+                            );
                         }
-                        (status, body)
+                        (status, body, csp)
                     }
                 };
-                proto::send(&channel, Msg::ResourceLoaded { status, body }, &[])?;
+                proto::send(&channel, Msg::ResourceLoaded { status, body, csp }, &[])?;
             }
             Ok((Msg::PostUrl { url, body }, _)) if role == Role::NetService => {
                 // Form POST: never cached (POST is not idempotent), always hits the
                 // network. Cookies set by the response thread through the jar.
-                let (status, _headers, resp) = post(&url, &body, &mut jar);
+                let (status, headers, resp) = post(&url, &body, &mut jar);
                 log!(
                     "POST {url} ({} bytes) -> {status} ({} bytes)",
                     body.len(),
                     resp.len()
                 );
-                proto::send(&channel, Msg::ResourceLoaded { status, body: resp }, &[])?;
+                let csp = extract_csp(&headers);
+                proto::send(
+                    &channel,
+                    Msg::ResourceLoaded {
+                        status,
+                        body: resp,
+                        csp,
+                    },
+                    &[],
+                )?;
             }
             Ok((Msg::Shutdown, _)) => {
                 log!("shutting down");
@@ -167,15 +190,23 @@ struct CacheEntry {
     body: Vec<u8>,
     expiry: std::time::Instant,
     validators: Validators,
+    /// The response's `Content-Security-Policy` header value(s), preserved so a
+    /// cache hit enforces the same policy as the original fetch (dropping it would
+    /// silently weaken security on repeat visits).
+    csp: Vec<String>,
 }
 
 /// The outcome of consulting the cache for a URL.
 enum CacheLookup {
-    /// A fresh entry: serve its body without a network request.
-    Fresh(Vec<u8>),
+    /// A fresh entry: serve its body (and stored CSP) without a network request.
+    Fresh { body: Vec<u8>, csp: Vec<String> },
     /// An expired entry that carries validators: revalidate with a conditional
-    /// request, serving the stored body if the origin answers `304`.
-    Stale { validators: Validators, body: Vec<u8> },
+    /// request, serving the stored body (and CSP) if the origin answers `304`.
+    Stale {
+        validators: Validators,
+        body: Vec<u8>,
+        csp: Vec<String>,
+    },
     /// No usable entry: fetch unconditionally.
     Miss,
 }
@@ -185,10 +216,14 @@ impl HttpCache {
     /// entry without validators is evicted (it can't be revalidated).
     fn lookup(&mut self, url: &str) -> CacheLookup {
         match self.entries.get(url) {
-            Some(e) if e.expiry > std::time::Instant::now() => CacheLookup::Fresh(e.body.clone()),
+            Some(e) if e.expiry > std::time::Instant::now() => CacheLookup::Fresh {
+                body: e.body.clone(),
+                csp: e.csp.clone(),
+            },
             Some(e) if !e.validators.is_empty() => CacheLookup::Stale {
                 validators: e.validators.clone(),
                 body: e.body.clone(),
+                csp: e.csp.clone(),
             },
             Some(_) => {
                 self.entries.remove(url);
@@ -198,7 +233,14 @@ impl HttpCache {
         }
     }
 
-    fn put(&mut self, url: String, body: Vec<u8>, ttl: std::time::Duration, validators: Validators) {
+    fn put(
+        &mut self,
+        url: String,
+        body: Vec<u8>,
+        ttl: std::time::Duration,
+        validators: Validators,
+        csp: Vec<String>,
+    ) {
         let expiry = std::time::Instant::now() + ttl;
         self.entries.insert(
             url,
@@ -206,6 +248,7 @@ impl HttpCache {
                 body,
                 expiry,
                 validators,
+                csp,
             },
         );
     }
@@ -311,6 +354,18 @@ fn extract_validators(headers: &[(String, String)]) -> Validators {
         etag: get("etag"),
         last_modified: get("last-modified"),
     }
+}
+
+/// Every `Content-Security-Policy` response-header value (a response may send more
+/// than one; each is an independent policy that must all be satisfied). Empty (not
+/// `Content-Security-Policy-Report-Only`, which only reports) values are dropped.
+fn extract_csp(headers: &[(String, String)]) -> Vec<String> {
+    headers
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("content-security-policy"))
+        .map(|(_, v)| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .collect()
 }
 
 /// Parse an RFC 7231 IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`) to Unix epoch
@@ -424,16 +479,16 @@ mod tests {
     }
 
     fn is_fresh(l: &CacheLookup) -> bool {
-        matches!(l, CacheLookup::Fresh(_))
+        matches!(l, CacheLookup::Fresh { .. })
     }
 
     #[test]
     fn cache_store_and_expiry() {
         let mut c = HttpCache::default();
-        c.put("u".into(), b"body".to_vec(), Duration::from_secs(60), no_validators());
-        assert!(matches!(c.lookup("u"), CacheLookup::Fresh(b) if b == b"body"));
+        c.put("u".into(), b"body".to_vec(), Duration::from_secs(60), no_validators(), vec![]);
+        assert!(matches!(c.lookup("u"), CacheLookup::Fresh { body, .. } if body == b"body"));
         // An expired entry without validators is not served (and is evicted).
-        c.put("v".into(), b"x".to_vec(), Duration::from_secs(0), no_validators());
+        c.put("v".into(), b"x".to_vec(), Duration::from_secs(0), no_validators(), vec![]);
         assert!(matches!(c.lookup("v"), CacheLookup::Miss));
         assert!(matches!(c.lookup("missing"), CacheLookup::Miss));
     }
@@ -445,10 +500,10 @@ mod tests {
             etag: Some("\"abc\"".into()),
             last_modified: None,
         };
-        c.put("u".into(), b"cached".to_vec(), Duration::from_secs(0), v);
+        c.put("u".into(), b"cached".to_vec(), Duration::from_secs(0), v, vec![]);
         // Stale but revalidatable: returned as Stale (not evicted), with its validators.
         match c.lookup("u") {
-            CacheLookup::Stale { validators, body } => {
+            CacheLookup::Stale { validators, body, .. } => {
                 assert_eq!(body, b"cached");
                 assert_eq!(
                     validators.conditional_headers(),
@@ -460,6 +515,41 @@ mod tests {
         // A successful revalidation refreshes freshness.
         c.refresh("u", Duration::from_secs(60));
         assert!(is_fresh(&c.lookup("u")));
+    }
+
+    #[test]
+    fn extract_csp_collects_all_policy_headers() {
+        // Case-insensitive header name; multiple policies; blanks dropped; other
+        // headers ignored.
+        let headers = h(&[
+            ("Content-Security-Policy", "default-src 'self'"),
+            ("X-Frame-Options", "DENY"),
+            ("content-security-policy", "script-src 'none'"),
+            ("Content-Security-Policy", "  "),
+        ]);
+        assert_eq!(
+            extract_csp(&headers),
+            vec!["default-src 'self'".to_string(), "script-src 'none'".to_string()]
+        );
+        assert!(extract_csp(&h(&[("Content-Type", "text/html")])).is_empty());
+    }
+
+    #[test]
+    fn cache_preserves_csp_on_hit() {
+        let mut c = HttpCache::default();
+        c.put(
+            "u".into(),
+            b"body".to_vec(),
+            Duration::from_secs(60),
+            no_validators(),
+            vec!["default-src 'self'".to_string()],
+        );
+        match c.lookup("u") {
+            CacheLookup::Fresh { csp, .. } => {
+                assert_eq!(csp, vec!["default-src 'self'".to_string()], "CSP survives a cache hit");
+            }
+            _ => panic!("expected Fresh"),
+        }
     }
 
     #[test]

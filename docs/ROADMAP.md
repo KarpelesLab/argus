@@ -109,8 +109,11 @@ Property` / `JSON` suffice).
   `Last-Modified` entries refetch with `If-None-Match`/`If-Modified-Since` and refresh
   in place on `304`).
 - **CSP enforcement** (inline-script `script-src`/`default-src`) from `<meta>` and
-  response headers, **all policies enforced** (multiple metas + headers; strictest
-  wins) via `apply_scripts_with_csp`: `script-src-elem` CSP3 precedence;
+  **response headers threaded across IPC** (net service extracts the
+  `Content-Security-Policy` header — preserved through the HTTP cache — into
+  `ResourceLoaded`; the browser carries it into `LoadDocument`; content enforces it on
+  every script run via `apply_scripts_session_geom_csp`), **all policies enforced**
+  (multiple metas + headers; strictest wins): `script-src-elem` CSP3 precedence;
   **`'nonce-…'` allow-listing** (case-sensitive; `'unsafe-inline'` ignored when a
   nonce source is present, per CSP3); **`'sha256/384/512-…'` hash-source allow-listing**
   (inline-script body digest via **purecrypto**, base64-compared; hashes disable
@@ -124,8 +127,8 @@ Property` / `JSON` suffice).
   open; page clicks offset past the strip); **one isolated content process per tab**
   (own sandboxed process, DOM/JS/scroll preserved when inactive, instant switch-back;
   closing a tab shuts down + reaps it).
-- **Remaining**: threading the CSP header across IPC to the apply site; more CSP
-  directives.
+- **Remaining**: more CSP directives (`img-src`/`style-src`/`connect-src`/external
+  `<script src>`); `report-uri`/`report-to`.
 
 ### Phase 4 — Layout & CSS breadth — 🟡 in progress
 

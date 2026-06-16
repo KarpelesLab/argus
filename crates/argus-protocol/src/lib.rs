@@ -180,8 +180,10 @@ pub enum Msg {
     /// content → browser: the updated `localStorage` (store text form) after a
     /// script run changed it, so the browser can persist it to disk.
     StorageChanged { data: String },
-    /// browser → content: the HTML document to render.
-    LoadDocument { html: String },
+    /// browser → content: the HTML document to render, plus any
+    /// `Content-Security-Policy` response-header policy strings (one per header) so
+    /// content can enforce header-delivered CSP, not just `<meta>` policies.
+    LoadDocument { html: String, csp: Vec<String> },
     /// browser → net service: fetch this URL.
     LoadUrl { url: String },
     /// browser → net service: POST `body` (`application/x-www-form-urlencoded`) to
@@ -192,7 +194,12 @@ pub enum Msg {
     /// url is the [`SCROLL_TO_PREFIX`] sentinel + that Y (so the browser scrolls).
     ScrollToFragment { fragment: String },
     /// net service → browser: a fetched resource (`status == 0` means failure).
-    ResourceLoaded { status: u16, body: Vec<u8> },
+    /// `csp` carries the response's `Content-Security-Policy` header value(s).
+    ResourceLoaded {
+        status: u16,
+        body: Vec<u8>,
+        csp: Vec<String>,
+    },
     /// content → browser: fetch a subresource (e.g. an image) at `url`.
     FetchResource { url: String },
     /// browser → content: subresource bytes (empty = not found / error).
@@ -300,9 +307,10 @@ impl Msg {
                 buf.push(TAG_STORAGE_CHANGED);
                 put_bytes(&mut buf, data.as_bytes());
             }
-            Msg::LoadDocument { html } => {
+            Msg::LoadDocument { html, csp } => {
                 buf.push(TAG_LOAD_DOCUMENT);
                 put_bytes(&mut buf, html.as_bytes());
+                put_str_list(&mut buf, csp);
             }
             Msg::LoadUrl { url } => {
                 buf.push(TAG_LOAD_URL);
@@ -317,10 +325,11 @@ impl Msg {
                 buf.push(TAG_SCROLL_TO_FRAGMENT);
                 put_bytes(&mut buf, fragment.as_bytes());
             }
-            Msg::ResourceLoaded { status, body } => {
+            Msg::ResourceLoaded { status, body, csp } => {
                 buf.push(TAG_RESOURCE_LOADED);
                 buf.extend_from_slice(&status.to_le_bytes());
                 put_bytes(&mut buf, body);
+                put_str_list(&mut buf, csp);
             }
             Msg::FetchResource { url } => {
                 buf.push(TAG_FETCH_RESOURCE);
@@ -381,6 +390,7 @@ impl Msg {
             },
             TAG_LOAD_DOCUMENT => Msg::LoadDocument {
                 html: String::from_utf8_lossy(c.bytes()?).into_owned(),
+                csp: get_str_list(&mut c)?,
             },
             TAG_LOAD_URL => Msg::LoadUrl {
                 url: String::from_utf8_lossy(c.bytes()?).into_owned(),
@@ -395,6 +405,7 @@ impl Msg {
             TAG_RESOURCE_LOADED => Msg::ResourceLoaded {
                 status: c.u16()?,
                 body: c.bytes()?.to_vec(),
+                csp: get_str_list(&mut c)?,
             },
             TAG_FETCH_RESOURCE => Msg::FetchResource {
                 url: String::from_utf8_lossy(c.bytes()?).into_owned(),
@@ -423,6 +434,25 @@ fn put_size(buf: &mut Vec<u8>, s: Size) {
 fn put_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
     buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     buf.extend_from_slice(bytes);
+}
+
+/// Encode a list of strings: a `u32` count followed by each as a length-prefixed
+/// blob (the same framing as [`put_bytes`]).
+fn put_str_list(buf: &mut Vec<u8>, list: &[String]) {
+    buf.extend_from_slice(&(list.len() as u32).to_le_bytes());
+    for s in list {
+        put_bytes(buf, s.as_bytes());
+    }
+}
+
+/// Decode a list of strings written by [`put_str_list`].
+fn get_str_list(c: &mut Cursor) -> Result<Vec<String>, DecodeError> {
+    let n = c.u32()? as usize;
+    let mut v = Vec::with_capacity(n);
+    for _ in 0..n {
+        v.push(String::from_utf8_lossy(c.bytes()?).into_owned());
+    }
+    Ok(v)
 }
 
 struct Cursor<'a> {
@@ -505,6 +535,11 @@ mod tests {
         });
         round_trip(Msg::LoadDocument {
             html: "<p>hi & bye</p>".to_string(),
+            csp: vec!["default-src 'self'".to_string(), "script-src 'none'".to_string()],
+        });
+        round_trip(Msg::LoadDocument {
+            html: "<p>no policy</p>".to_string(),
+            csp: Vec::new(),
         });
         round_trip(Msg::LoadUrl {
             url: "https://example.com/x".to_string(),
@@ -519,6 +554,12 @@ mod tests {
         round_trip(Msg::ResourceLoaded {
             status: 200,
             body: vec![60, 104, 49, 62],
+            csp: vec!["default-src 'self'".to_string()],
+        });
+        round_trip(Msg::ResourceLoaded {
+            status: 0,
+            body: Vec::new(),
+            csp: Vec::new(),
         });
         round_trip(Msg::FetchResource {
             url: "https://example.com/a.png".to_string(),

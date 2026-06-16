@@ -942,6 +942,22 @@ pub fn apply_scripts_session_geom(
     run_scripts(doc, events, storage, &[], None, geometry, viewport, computed)
 }
 
+/// Like [`apply_scripts_session_geom`], but also enforces the page's
+/// **header-delivered** Content-Security-Policy (`Content-Security-Policy` response
+/// headers), in addition to any `<meta http-equiv>` policies in the document.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_scripts_session_geom_csp(
+    doc: &mut Document,
+    events: &[Interaction],
+    storage: &mut std::collections::HashMap<String, String>,
+    geometry: &[(String, [f32; 4])],
+    viewport: [u32; 4],
+    computed: &[(String, Vec<(String, String)>)],
+    header_csp: &[String],
+) -> Option<String> {
+    run_scripts(doc, events, storage, header_csp, None, geometry, viewport, computed)
+}
+
 /// Default window metrics (`[width, height, scrollX, scrollY]`) for callers that
 /// don't supply them.
 const DEFAULT_VIEWPORT: [u32; 4] = [800, 600, 0, 0];
@@ -3134,6 +3150,39 @@ mod tests {
         let mut doc = argus_html::parse(html);
         apply_scripts_with_csp(&mut doc, &["script-src 'unsafe-inline'".to_string()]);
         assert_eq!(text_of(&doc, "o"), "after", "permissive header CSP allows");
+    }
+
+    #[test]
+    fn session_geom_csp_entry_point_enforces_header_policy() {
+        // The entry point content actually calls (with geometry/viewport/storage)
+        // must honor the threaded header CSP, not just <meta>.
+        let html = "<div id=\"o\">before</div>\
+             <script>document.getElementById('o').textContent = 'after';</script>";
+        let mut storage = std::collections::HashMap::new();
+        let mut doc = argus_html::parse(html);
+        apply_scripts_session_geom_csp(
+            &mut doc,
+            &[],
+            &mut storage,
+            &[],
+            DEFAULT_VIEWPORT,
+            &[],
+            &["script-src 'self'".to_string()],
+        );
+        assert_eq!(text_of(&doc, "o"), "before", "threaded header CSP blocks inline");
+
+        // No header policy → the inline script runs.
+        let mut doc = argus_html::parse(html);
+        apply_scripts_session_geom_csp(
+            &mut doc,
+            &[],
+            &mut storage,
+            &[],
+            DEFAULT_VIEWPORT,
+            &[],
+            &[],
+        );
+        assert_eq!(text_of(&doc, "o"), "after", "no CSP → runs");
     }
 
     #[test]

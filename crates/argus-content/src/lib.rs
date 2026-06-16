@@ -29,6 +29,7 @@ pub fn run(channel: Channel) -> io::Result<()> {
         viewport,
         font: None,
         html: None,
+        header_csp: Vec::new(),
         doc: None,
         events: Vec::new(),
         storage: std::collections::HashMap::new(),
@@ -85,8 +86,9 @@ pub fn run(channel: Channel) -> io::Result<()> {
                 content.storage = proto::decode_storage(&data);
                 log!("seeded localStorage ({} keys)", content.storage.len());
             }
-            Msg::LoadDocument { html } => {
-                log!("loaded document ({} bytes)", html.len());
+            Msg::LoadDocument { html, csp } => {
+                log!("loaded document ({} bytes, {} CSP header(s))", html.len(), csp.len());
+                content.header_csp = csp;
                 // Parse once, run the page's scripts against a JS-side DOM shim, and
                 // apply their mutations so layout sees the post-script tree.
                 let mut doc = argus_html::parse(&html);
@@ -97,13 +99,14 @@ pub fn run(channel: Channel) -> io::Result<()> {
                 let geom = content.geometry();
                 let vp = content.window_metrics();
                 let cstyle = content.computed_styles();
-                if let Some(console) = argus_domscript::apply_scripts_session_geom(
+                if let Some(console) = argus_domscript::apply_scripts_session_geom_csp(
                     &mut doc,
                     &[],
                     &mut content.storage,
                     &geom,
                     vp,
                     &cstyle,
+                    &content.header_csp,
                 ) {
                     for line in console.lines() {
                         log!("console.log: {line}");
@@ -265,6 +268,9 @@ struct Content {
     font: Option<Font>,
     /// The original page HTML, re-parsed for deterministic event replay.
     html: Option<String>,
+    /// `Content-Security-Policy` header value(s) delivered with the page, enforced on
+    /// every script run alongside any `<meta>` policies. Reset on each navigation.
+    header_csp: Vec<String>,
     /// The parsed document, already mutated by its scripts (Phase 2 DOM bindings).
     doc: Option<argus_dom::Document>,
     /// The interaction history replayed on every script run (event sourcing).
@@ -767,13 +773,14 @@ impl Content {
         let geom = self.geometry();
         let vp = self.window_metrics();
         let cstyle = self.computed_styles();
-        if let Some(console) = argus_domscript::apply_scripts_session_geom(
+        if let Some(console) = argus_domscript::apply_scripts_session_geom_csp(
             &mut doc,
             &self.events,
             &mut self.storage,
             &geom,
             vp,
             &cstyle,
+            &self.header_csp,
         ) {
             for line in console.lines() {
                 log!("console.log: {line}");
@@ -1291,6 +1298,7 @@ mod tests {
             viewport: Size::new(800, 600),
             font: None,
             html: Some(html.to_string()),
+            header_csp: Vec::new(),
             doc: Some(argus_html::parse(html)),
             events: Vec::new(),
             storage: std::collections::HashMap::new(),

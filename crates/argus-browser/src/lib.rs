@@ -363,20 +363,36 @@ fn provide_fonts(content: &Child) -> io::Result<()> {
     Ok(())
 }
 
-/// Send the content process a font and a document to render.
-fn provide_page(content: &Child, html: &str) -> io::Result<()> {
+/// A fetched document plus the `Content-Security-Policy` header value(s) the origin
+/// sent with it, so header-delivered CSP reaches content (not just `<meta>` policies).
+struct Page {
+    html: String,
+    csp: Vec<String>,
+}
+
+impl Page {
+    /// An error/placeholder page carries no policy.
+    fn plain(html: String) -> Page {
+        Page { html, csp: Vec::new() }
+    }
+}
+
+/// Send the content process a font and a document (with its header CSP) to render.
+fn provide_page(content: &Child, page: &Page) -> io::Result<()> {
     provide_fonts(content)?;
     proto::send(
         content.channel(),
         Msg::LoadDocument {
-            html: html.to_string(),
+            html: page.html.clone(),
+            csp: page.csp.clone(),
         },
         &[],
     )
 }
 
-/// Ask the net service to fetch `url`, returning the raw body (empty on failure).
-fn fetch_bytes(net: &Child, url: &str) -> io::Result<Vec<u8>> {
+/// Ask the net service to fetch `url`, returning the raw body and any CSP header(s)
+/// (empty body on failure).
+fn fetch_bytes_csp(net: &Child, url: &str) -> io::Result<(Vec<u8>, Vec<String>)> {
     proto::send(
         net.channel(),
         Msg::LoadUrl {
@@ -385,7 +401,9 @@ fn fetch_bytes(net: &Child, url: &str) -> io::Result<Vec<u8>> {
         &[],
     )?;
     match proto::recv(net.channel())?.0 {
-        Msg::ResourceLoaded { status, body } => Ok(if status == 0 { Vec::new() } else { body }),
+        Msg::ResourceLoaded { status, body, csp } => {
+            Ok(if status == 0 { (Vec::new(), Vec::new()) } else { (body, csp) })
+        }
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("expected ResourceLoaded, got {other:?}"),
@@ -393,21 +411,30 @@ fn fetch_bytes(net: &Child, url: &str) -> io::Result<Vec<u8>> {
     }
 }
 
-fn fetch_html(net: &Child, url: &str) -> io::Result<String> {
-    let body = fetch_bytes(net, url)?;
+/// Like [`fetch_bytes_csp`] but discards the CSP — for subresources (images), which
+/// don't carry an enforceable document policy.
+fn fetch_bytes(net: &Child, url: &str) -> io::Result<Vec<u8>> {
+    Ok(fetch_bytes_csp(net, url)?.0)
+}
+
+fn fetch_html(net: &Child, url: &str) -> io::Result<Page> {
+    let (body, csp) = fetch_bytes_csp(net, url)?;
     if body.is_empty() {
-        Ok(error_page(
+        Ok(Page::plain(error_page(
             url,
             "could not load (network error or empty response)",
-        ))
+        )))
     } else {
-        Ok(decode_html(&body))
+        Ok(Page {
+            html: decode_html(&body),
+            csp,
+        })
     }
 }
 
 /// POST `body` (`application/x-www-form-urlencoded`) to `url` via the net service
 /// and decode the response HTML — an HTML form submission with `method=post`.
-fn post_html(net: &Child, url: &str, body: &[u8]) -> io::Result<String> {
+fn post_html(net: &Child, url: &str, body: &[u8]) -> io::Result<Page> {
     proto::send(
         net.channel(),
         Msg::PostUrl {
@@ -416,12 +443,12 @@ fn post_html(net: &Child, url: &str, body: &[u8]) -> io::Result<String> {
         },
         &[],
     )?;
-    let resp = match proto::recv(net.channel())?.0 {
-        Msg::ResourceLoaded { status, body } => {
+    let (resp, csp) = match proto::recv(net.channel())?.0 {
+        Msg::ResourceLoaded { status, body, csp } => {
             if status == 0 || body.is_empty() {
-                Vec::new()
+                (Vec::new(), Vec::new())
             } else {
-                body
+                (body, csp)
             }
         }
         other => {
@@ -432,9 +459,15 @@ fn post_html(net: &Child, url: &str, body: &[u8]) -> io::Result<String> {
         }
     };
     if resp.is_empty() {
-        Ok(error_page(url, "form POST failed (network error or empty response)"))
+        Ok(Page::plain(error_page(
+            url,
+            "form POST failed (network error or empty response)",
+        )))
     } else {
-        Ok(decode_html(&resp))
+        Ok(Page {
+            html: decode_html(&resp),
+            csp,
+        })
     }
 }
 
@@ -524,12 +557,18 @@ fn error_page(url: &str, message: &str) -> String {
     )
 }
 
-/// The page to show: a fetched URL or the built-in sample.
-fn resolve_html(net: &Child, url: Option<&str>) -> String {
+/// The page to show (with its header CSP): a fetched URL or the built-in sample.
+fn resolve_page(net: &Child, url: Option<&str>) -> Page {
     match url {
-        Some(u) => fetch_html(net, u).unwrap_or_else(|e| error_page(u, &e.to_string())),
-        None => sample_html(),
+        Some(u) => fetch_html(net, u).unwrap_or_else(|e| Page::plain(error_page(u, &e.to_string()))),
+        None => Page::plain(sample_html()),
     }
+}
+
+/// The page HTML only — for headless tools (`--dump-dom`/`--dump-page`) that parse
+/// or render but don't enforce the security boundary.
+fn resolve_html(net: &Child, url: Option<&str>) -> String {
+    resolve_page(net, url).html
 }
 
 /// Headless automation: fetch a page (or the sample) and return its parsed DOM
@@ -1875,9 +1914,8 @@ pub fn render_once(url: Option<&str>, viewport: Size) -> io::Result<(Size, Vec<u
     proto::parent_handshake(content.channel(), viewport)?;
     proto::parent_handshake(net.channel(), viewport)?;
 
-    let html = resolve_html(&net, url);
-    provide_fonts(&content)?;
-    proto::send(content.channel(), Msg::LoadDocument { html }, &[])?;
+    let page = resolve_page(&net, url);
+    provide_page(&content, &page)?;
 
     let (frame, _) = request_frame(&content, &net, url)?;
     let pixels = frame.pixels().to_vec();
@@ -2024,11 +2062,8 @@ fn load_page(
     window: &argus_platform::window::Window,
     target: Option<&str>,
 ) -> io::Result<(Framebuffer, u32)> {
-    let page = match target {
-        Some(u) => fetch_html(net, u).unwrap_or_else(|e| error_page(u, &e.to_string())),
-        None => sample_html(),
-    };
-    let title = page_title(&page);
+    let page = resolve_page(net, target);
+    let title = page_title(&page.html);
     window.set_title(if title.is_empty() { "Argus" } else { &title });
     provide_page(content, &page)?;
     proto::send(content.channel(), Msg::SetScroll { y: 0 }, &[])?;
@@ -2047,8 +2082,8 @@ fn post_page(
     url: &str,
     body: &[u8],
 ) -> io::Result<(Framebuffer, u32)> {
-    let page = post_html(net, url, body).unwrap_or_else(|e| error_page(url, &e.to_string()));
-    let title = page_title(&page);
+    let page = post_html(net, url, body).unwrap_or_else(|e| Page::plain(error_page(url, &e.to_string())));
+    let title = page_title(&page.html);
     window.set_title(if title.is_empty() { "Argus" } else { &title });
     provide_page(content, &page)?;
     proto::send(content.channel(), Msg::SetScroll { y: 0 }, &[])?;
@@ -2145,13 +2180,13 @@ pub fn run_windowed(url: Option<String>) -> io::Result<()> {
         (!u.is_empty()).then(|| u.to_string())
     };
 
-    let html = resolve_html(&net, active_target(&tabs).as_deref());
-    provide_page(&procs[0], &html)?;
+    let page = resolve_page(&net, active_target(&tabs).as_deref());
+    provide_page(&procs[0], &page)?;
     log!("children handshook; page sent; opening window");
 
     // Present the first frame.
     let (frame, mut content_height) = request_frame(&procs[0], &net, active_target(&tabs).as_deref())?;
-    let title = page_title(&html);
+    let title = page_title(&page.html);
     let window = Window::open(if title.is_empty() { "Argus" } else { &title }, window_size);
     present_framed(&window, &frame, &tabs, window_size)?;
     log!("window open — per-tab processes; click a tab to switch (state kept), its right edge to close, + to open; Cmd+T/W/Shift+[ ]/1-9 too");
