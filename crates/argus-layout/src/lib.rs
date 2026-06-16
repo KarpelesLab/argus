@@ -1065,11 +1065,12 @@ struct Ctx<'a> {
     /// (sticky then behaves as a non-shifting box); set by `layout_scrolled`.
     viewport_h: f32,
     scroll_y: f32,
-    /// Display-list `[start, end)` mark pairs of `position: sticky`/`fixed` subtrees,
-    /// hoisted to paint last (above in-flow content) after layout. Positioned boxes
-    /// form a stacking context above the normal flow; the flat doc-order display list
-    /// would otherwise let later siblings paint over a stuck/fixed box.
-    hoist_ranges: Vec<(DisplayListMark, DisplayListMark)>,
+    /// Display-list `[start, end)` mark pairs of `position: sticky`/`fixed` subtrees
+    /// (with the box's `z-index`), hoisted to paint last (above in-flow content) after
+    /// layout, ordered by z-index then document order. Positioned boxes form a stacking
+    /// context above the normal flow; the flat doc-order display list would otherwise
+    /// let later siblings paint over a stuck/fixed box.
+    hoist_ranges: Vec<(DisplayListMark, DisplayListMark, i32)>,
     /// Overlay split for `rects`/`runs` after `hoist_positioned` (see `Layout`).
     overlay_rects: usize,
     overlay_runs: usize,
@@ -1092,8 +1093,9 @@ impl Ctx<'_> {
             return;
         }
         let ranges = std::mem::take(&mut self.hoist_ranges);
-        let comp = |sel: fn(&DisplayListMark) -> usize| -> Vec<(usize, usize)> {
-            ranges.iter().map(|(s, e)| (sel(s), sel(e))).collect()
+        // Per channel: (start, end, z-index) for each hoisted subtree.
+        let comp = |sel: fn(&DisplayListMark) -> usize| -> Vec<(usize, usize, i32)> {
+            ranges.iter().map(|(s, e, z)| (sel(s), sel(e), *z)).collect()
         };
         // The split index (where hoisted items begin) for rects/runs drives the
         // content overlay pass, which paints positioned boxes (background + text)
@@ -2173,7 +2175,7 @@ impl Ctx<'_> {
                 // Fixed paints above in-flow content (a positioned stacking context),
                 // like sticky — hoist its subtree to the end of each channel.
                 if fixed {
-                    self.hoist_ranges.push((ds_start, self.mark()));
+                    self.hoist_ranges.push((ds_start, self.mark(), style.z_index));
                 }
             }
             Position::Sticky => {
@@ -2197,7 +2199,7 @@ impl Ctx<'_> {
                     self.shift_display_list(ds_start, 0.0, dy);
                 }
                 // Record the subtree so it can be hoisted to paint above later content.
-                self.hoist_ranges.push((ds_start, self.mark()));
+                self.hoist_ranges.push((ds_start, self.mark(), style.z_index));
             }
             Position::Static => {}
         }
@@ -4840,19 +4842,31 @@ fn transform_text(word: &str, transform: TextTransform) -> String {
 }
 
 /// Shift a clip rect's origin by `(dx, dy)` (its size is unchanged).
-/// Stable-partition `v` so items whose index falls in any `[start, end)` range move
-/// to the end (in their original relative order); used to hoist positioned subtrees.
-/// Returns the split index — the count of non-hoisted items, i.e. where the hoisted
-/// (overlay) region begins.
-fn reorder_hoisted_last<T>(v: &mut Vec<T>, ranges: &[(usize, usize)]) -> usize {
-    let is_hoisted = |i: usize| ranges.iter().any(|&(s, e)| i >= s && i < e);
-    let split = (0..v.len()).filter(|&i| !is_hoisted(i)).count();
+/// Move items whose index falls in any hoisted `[start, end, z)` range to the end of
+/// `v`, ordered by **z-index then document order** (a stable sort); non-hoisted items
+/// keep their order in front. For nested positioned boxes (overlapping ranges) an
+/// item takes the **innermost** (smallest-span) range's z-index. Returns the split
+/// index — where the hoisted (overlay) region begins.
+fn reorder_hoisted_last<T>(v: &mut Vec<T>, ranges: &[(usize, usize, i32)]) -> usize {
+    // The z-index governing index `i`: the innermost containing range, or `None` when
+    // `i` isn't hoisted at all.
+    let z_of = |i: usize| -> Option<i32> {
+        ranges
+            .iter()
+            .filter(|&&(s, e, _)| i >= s && i < e)
+            .min_by_key(|&&(s, e, _)| e - s)
+            .map(|&(_, _, z)| z)
+    };
+    let split = (0..v.len()).filter(|&i| z_of(i).is_none()).count();
     if split == v.len() {
         return split; // nothing hoisted
     }
+    let mut hoisted: Vec<usize> = (0..v.len()).filter(|&i| z_of(i).is_some()).collect();
+    // Stable sort by z-index keeps same-z boxes in document order.
+    hoisted.sort_by_key(|&i| z_of(i).unwrap());
     let order: Vec<usize> = (0..v.len())
-        .filter(|&i| !is_hoisted(i))
-        .chain((0..v.len()).filter(|&i| is_hoisted(i)))
+        .filter(|&i| z_of(i).is_none())
+        .chain(hoisted)
         .collect();
     let mut slots: Vec<Option<T>> = v.drain(..).map(Some).collect();
     *v = order.into_iter().map(|i| slots[i].take().unwrap()).collect();
@@ -8020,14 +8034,22 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
 
     #[test]
     fn reorder_hoisted_last_hoists_ranges_preserving_order() {
-        // Indices 2..4 are "sticky": they move to the end, both groups keep order.
+        // Indices 2..4 are hoisted (z 0): they move to the end, both groups keep order.
         let mut v = vec!['a', 'b', 'S', 'T', 'c', 'd'];
-        reorder_hoisted_last(&mut v, &[(2, 4)]);
+        let split = reorder_hoisted_last(&mut v, &[(2, 4, 0)]);
         assert_eq!(v, vec!['a', 'b', 'c', 'd', 'S', 'T']);
-        // No sticky range → unchanged (the common, fast path).
+        assert_eq!(split, 4, "split = count of non-hoisted");
+        // No hoisted range → unchanged (the common, fast path).
         let mut w = vec![1, 2, 3];
-        reorder_hoisted_last(&mut w, &[]);
+        assert_eq!(reorder_hoisted_last(&mut w, &[]), 3);
         assert_eq!(w, vec![1, 2, 3]);
+
+        // z-index ordering: a higher-z later-range paints after a lower-z earlier one,
+        // but a lower-z box recorded later still goes *below* the higher-z box. Two
+        // single-item ranges: index 0 (z 5) and index 1 (z 1) → order becomes [1, 0].
+        let mut u = vec!['H', 'L'];
+        reorder_hoisted_last(&mut u, &[(0, 1, 5), (1, 2, 1)]);
+        assert_eq!(u, vec!['L', 'H'], "lower z first, higher z on top");
     }
 
     #[test]
@@ -8048,6 +8070,36 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         let gi = l.rects.iter().position(|r| r.color == green).expect("sticky rect");
         let wi = l.rects.iter().position(|r| r.color == white).expect("body rect");
         assert!(gi > wi, "stuck sticky rect hoisted after the body rect (paints on top)");
+    }
+
+    #[test]
+    fn z_index_orders_positioned_overlay_above_document_order() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // Red fixed box (z-index 1) precedes blue fixed box (z-index 5) in source, but
+        // z-index wins: blue must paint last (highest index in rects). A second case
+        // flips the z-indices to prove it's z, not document order, that decides.
+        let order = |red_z: i32, blue_z: i32| -> (usize, usize) {
+            let html = format!(
+                "<div style=\"position:fixed; top:0; width:50px; height:50px; \
+                 background:#ff0000; z-index:{red_z}\">R</div>\
+                 <div style=\"position:fixed; top:0; width:50px; height:50px; \
+                 background:#0000ff; z-index:{blue_z}\">B</div>"
+            );
+            let doc = parse(&html);
+            let l = layout(&doc, &font, 400.0, &ImageSizes::new());
+            let idx = |c: argus_geometry::Color| l.rects.iter().position(|r| r.color == c).unwrap();
+            (
+                idx(argus_geometry::Color { r: 255, g: 0, b: 0, a: 255 }),
+                idx(argus_geometry::Color { r: 0, g: 0, b: 255, a: 255 }),
+            )
+        };
+        let (red, blue) = order(1, 5);
+        assert!(blue > red, "higher z (blue) paints last");
+        let (red2, blue2) = order(9, 2);
+        assert!(red2 > blue2, "now red has higher z → red paints last");
     }
 
     #[test]

@@ -717,6 +717,9 @@ pub struct ComputedStyle {
     pub outline_style: DecorationStyle,
     /// `position` and its inset offsets (resolved during layout; not inherited).
     pub position: Position,
+    /// `z-index` for a positioned box (`auto` → 0). Higher values paint above lower
+    /// ones among the hoisted sticky/fixed overlay; ties keep document order.
+    pub z_index: i32,
     pub inset_top: Option<Length>,
     pub inset_right: Option<Length>,
     pub inset_bottom: Option<Length>,
@@ -823,6 +826,7 @@ impl ComputedStyle {
             outline_color: Color::TRANSPARENT,
             outline_style: DecorationStyle::Solid,
             position: Position::Static,
+            z_index: 0,
             inset_top: None,
             inset_right: None,
             inset_bottom: None,
@@ -1821,6 +1825,10 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             "sticky" => Position::Sticky,
             _ => Position::Static,
         };
+    }
+    if let Some(v) = map.get("z-index") {
+        // `auto` (and anything non-numeric) → 0; an integer sets the stacking level.
+        cs.z_index = v.trim().parse::<i32>().unwrap_or(0);
     }
     // `inset` shorthand: 1–4 values → top/right/bottom/left (CSS edge order); each
     // `auto` token clears that inset.
@@ -3918,6 +3926,25 @@ mod tests {
         assert_eq!(cs("position: relative"), Position::Relative);
         assert_eq!(cs("position: static"), Position::Static);
         assert_eq!(cs("position: gibberish"), Position::Static);
+    }
+
+    #[test]
+    fn z_index_parses_integers_and_auto() {
+        let z = |decl: &str| {
+            let mut doc = Document::new();
+            let d = one(&mut doc, "div", vec![]);
+            computed_style(
+                &doc,
+                d,
+                &ComputedStyle::initial(),
+                &parse_stylesheet(&format!("div {{ {decl} }}")),
+            )
+            .z_index
+        };
+        assert_eq!(z("z-index: 5"), 5);
+        assert_eq!(z("z-index: -2"), -2);
+        assert_eq!(z("z-index: auto"), 0);
+        assert_eq!(z(""), 0, "default is 0");
     }
 
     #[test]
