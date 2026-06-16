@@ -305,6 +305,8 @@ impl Content {
         self.links.clear();
         // Fetch + register any not-yet-loaded `@font-face` web fonts before paint.
         self.load_web_fonts(channel)?;
+        // Mark the focused field so the UA stylesheet draws its focus outline.
+        self.apply_focus();
         let mut fb = Framebuffer::create(self.viewport)?;
         let (Some(font), Some(doc)) = (&self.font, &self.doc) else {
             fb.fill(PHASE0_PAINT);
@@ -648,18 +650,59 @@ impl Content {
     /// Whether the element with `id` is a text-like `<input>` (editable by typing).
     fn is_editable_input(&self, id: &str) -> bool {
         let Some(doc) = &self.doc else { return false };
-        let Some(e) = find_element_by_id(doc, id) else {
-            return false;
-        };
-        let Some(el) = doc.node(e).as_element() else {
-            return false;
-        };
-        el.name.is_html("textarea")
-            || (el.name.is_html("input")
-                && matches!(
-                    el.attr("type").unwrap_or("text"),
-                    "text" | "search" | "email" | "url" | "tel" | "password"
-                ))
+        find_element_by_id(doc, id)
+            .and_then(|e| doc.node(e).as_element())
+            .is_some_and(is_editable_el)
+    }
+
+    /// Editable text fields (`<input>` text-likes and `<textarea>`) by id, in
+    /// document order — the Tab focus ring.
+    fn editable_fields_in_order(&self) -> Vec<String> {
+        let Some(doc) = &self.doc else { return Vec::new() };
+        fn walk(doc: &argus_dom::Document, n: argus_dom::NodeId, out: &mut Vec<String>) {
+            if let Some(e) = doc.node(n).as_element() {
+                if is_editable_el(e) {
+                    if let Some(id) = e.attr("id") {
+                        out.push(id.to_string());
+                    }
+                }
+            }
+            for c in doc.children(n) {
+                walk(doc, c, out);
+            }
+        }
+        let mut out = Vec::new();
+        walk(doc, doc.root(), &mut out);
+        out
+    }
+
+    /// Mark the focused element with the `__argus_focus` sentinel attribute (and
+    /// strip it from any other) so the UA stylesheet draws a focus outline. Called
+    /// each render before layout.
+    fn apply_focus(&mut self) {
+        // Collect element nodes first (immutable), then mutate (disjoint borrows).
+        let Some(doc) = &self.doc else { return };
+        fn collect(doc: &argus_dom::Document, n: argus_dom::NodeId, out: &mut Vec<argus_dom::NodeId>) {
+            out.push(n);
+            for c in doc.children(n) {
+                collect(doc, c, out);
+            }
+        }
+        let mut nodes = Vec::new();
+        collect(doc, doc.root(), &mut nodes);
+        let focused = self.focused.clone();
+        let Some(doc) = &mut self.doc else { return };
+        for n in nodes {
+            if let argus_dom::NodeData::Element(e) = doc.data_mut(n) {
+                let is_focused = focused.as_deref() == e.attr("id");
+                let has = e.attrs.iter().any(|a| &*a.name == "__argus_focus");
+                if is_focused && focused.is_some() && !has {
+                    e.attrs.push(argus_dom::Attribute::new("__argus_focus", ""));
+                } else if (!is_focused || focused.is_none()) && has {
+                    e.attrs.retain(|a| &*a.name != "__argus_focus");
+                }
+            }
+        }
     }
 
     /// Apply a typed key to the focused field: update its value and the document.
@@ -668,6 +711,14 @@ impl Content {
     /// `(action, urlencoded-body)`. Returns `None` for ordinary typing.
     fn type_key(&mut self, ch: u32) -> Option<(String, Vec<u8>)> {
         let id = self.focused.clone()?;
+        // Tab moves focus to the next editable field (wrapping).
+        if ch == 0x09 {
+            let fields = self.editable_fields_in_order();
+            if let Some(pos) = fields.iter().position(|f| *f == id) {
+                self.focused = Some(fields[(pos + 1) % fields.len()].clone());
+            }
+            return None;
+        }
         let is_textarea = self
             .doc
             .as_ref()
@@ -804,6 +855,16 @@ fn nth_details(doc: &argus_dom::Document, n: usize) -> Option<argus_dom::NodeId>
         None
     }
     walk(doc, doc.root(), n, &mut 0)
+}
+
+/// Whether `e` is a text-editable field — a text-like `<input>` or a `<textarea>`.
+fn is_editable_el(e: &argus_dom::ElementData) -> bool {
+    e.name.is_html("textarea")
+        || (e.name.is_html("input")
+            && matches!(
+                e.attr("type").unwrap_or("text"),
+                "text" | "search" | "email" | "url" | "tel" | "password"
+            ))
 }
 
 /// The concatenated text-node content of `node`'s subtree (a `<textarea>`'s
@@ -1159,6 +1220,35 @@ mod tests {
         // Backspace removes the last char.
         c.type_key(0x08);
         assert_eq!(dom_value(&c), "init!\n");
+    }
+
+    #[test]
+    fn tab_cycles_editable_focus_and_marks_it() {
+        let mut c = headless(
+            "<input id=\"a\"><input id=\"b\"><input id=\"c\" type=\"checkbox\">",
+            vec![],
+        );
+        c.focused = Some("a".to_string());
+        // Tab advances a → b (skipping the non-editable checkbox).
+        c.type_key(0x09);
+        assert_eq!(c.focused.as_deref(), Some("b"));
+        // Tab from the last editable wraps back to the first.
+        c.type_key(0x09);
+        assert_eq!(c.focused.as_deref(), Some("a"));
+        // apply_focus marks the focused element (and only it) for the UA outline.
+        fn marked(c: &Content, id: &str) -> bool {
+            let doc = c.doc.as_ref().unwrap();
+            find_element_by_id(doc, id)
+                .and_then(|n| doc.node(n).as_element())
+                .is_some_and(|e| e.attr("__argus_focus").is_some())
+        }
+        c.apply_focus();
+        assert!(marked(&c, "a"), "focused field marked");
+        assert!(!marked(&c, "b"), "unfocused field not marked");
+        // Clearing focus removes the marker.
+        c.focused = None;
+        c.apply_focus();
+        assert!(!marked(&c, "a"), "marker cleared when focus leaves");
     }
 
     #[test]

@@ -4665,6 +4665,25 @@ mod tests {
     }
 
     #[test]
+    fn focused_field_draws_a_ua_focus_outline() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // The content process marks the focused field with `__argus_focus`; the UA
+        // stylesheet's `[__argus_focus]` rule draws a blue outline (#5b9dd9).
+        let ring = |html: &str| -> bool {
+            let doc = parse(html);
+            layout(&doc, &font, 400.0, &ImageSizes::new())
+                .rects
+                .iter()
+                .any(|r| r.color.r == 0x5b && r.color.g == 0x9d && r.color.b == 0xd9)
+        };
+        assert!(ring("<input id=\"x\" __argus_focus>"), "focus outline drawn");
+        assert!(!ring("<input id=\"x\">"), "no outline without focus marker");
+    }
+
+    #[test]
     fn input_renders_value_in_a_box() {
         let Some(font) = system_font() else {
             eprintln!("no system font; skipping");

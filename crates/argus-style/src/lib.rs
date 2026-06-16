@@ -636,6 +636,7 @@ input[type=checkbox], input[type=radio] { width: 14px; height: 14px; padding: 0;
 input[type=radio] { border-radius: 8px }
 input:disabled, textarea:disabled, select:disabled, button:disabled \
   { background: #eeeeee; color: #999999; border-color: #cccccc }
+[__argus_focus] { outline-width: 2px; outline-style: solid; outline-color: #5b9dd9; outline-offset: 1px }
 ";
 
 fn ua_stylesheet() -> &'static Stylesheet {
