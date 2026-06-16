@@ -199,8 +199,28 @@ fn decode_avif(bytes: &[u8]) -> Option<DecodedImage> {
 /// gracefully (broken-image fallback). It renders real frames the moment those
 /// decoders land — no argus changes needed. See [[argus-deferred-features]].
 pub fn decode_video_frame(bytes: &[u8]) -> Option<DecodedImage> {
+    decode_video_frames(bytes, 1).into_iter().next()
+}
+
+/// Decode up to `max_frames` leading video frames of a container (MP4/MOV or
+/// Matroska/WebM) to RGBA, in presentation order — the decode core of `<video>`
+/// playback/scrubbing.
+///
+/// Same forward-compatible posture as [`decode_video_frame`]: the demux side works
+/// today (probe → open → stream select → packet pull) but the upstream pixel codecs
+/// emit nothing yet, so this returns an empty `Vec` gracefully (no panic on hostile
+/// or truncated bytes — see the `decoders_never_panic` fuzz coverage) and yields
+/// real frames the moment those decoders land. A playback loop drives this with the
+/// frame count it wants buffered; A/V sync / audio / wall-clock scheduling are a
+/// separate media-service concern (Phase 7).
+pub fn decode_video_frames(bytes: &[u8], max_frames: usize) -> Vec<DecodedImage> {
     use oxideav_core::{MediaType, RuntimeContext};
     use std::io::Cursor;
+
+    let mut out = Vec::new();
+    if max_frames == 0 {
+        return out;
+    }
 
     let mut ctx = RuntimeContext::new();
     // Containers (probe + demux).
@@ -213,25 +233,37 @@ pub fn decode_video_frame(bytes: &[u8]) -> Option<DecodedImage> {
 
     // Identify the container, then open a demuxer over the bytes.
     let mut probe = Cursor::new(bytes);
-    let container = ctx.containers.probe_input(&mut probe, None).ok()?;
-    let mut demux = ctx
-        .containers
-        .open_demuxer(&container, Box::new(Cursor::new(bytes.to_vec())), &ctx.codecs)
-        .ok()?;
+    let Ok(container) = ctx.containers.probe_input(&mut probe, None) else {
+        return out;
+    };
+    let Ok(mut demux) =
+        ctx.containers
+            .open_demuxer(&container, Box::new(Cursor::new(bytes.to_vec())), &ctx.codecs)
+    else {
+        return out;
+    };
 
     // Pick the first video stream; clone its params so the immutable borrow of
     // `streams()` ends before we mutably pull packets.
-    let (vindex, vparams) = {
-        let s = demux
-            .streams()
-            .iter()
-            .find(|s| s.params.media_type == MediaType::Video)?;
-        (s.index, s.params.clone())
+    let Some((vindex, vparams)) = demux
+        .streams()
+        .iter()
+        .find(|s| s.params.media_type == MediaType::Video)
+        .map(|s| (s.index, s.params.clone()))
+    else {
+        return out;
     };
-    let mut dec = ctx.codecs.first_decoder(&vparams).ok()?;
+    let Ok(mut dec) = ctx.codecs.first_decoder(&vparams) else {
+        return out;
+    };
 
-    // Feed packets from the video stream until a frame pops out (or we run dry).
-    for _ in 0..100_000 {
+    // Feed packets from the video stream, draining every frame each one yields,
+    // until we have `max_frames` or the stream runs dry. The outer bound guards
+    // against a pathological never-ending demuxer on hostile input.
+    for _ in 0..2_000_000 {
+        if out.len() >= max_frames {
+            break;
+        }
         let pkt = match demux.next_packet() {
             Ok(p) => p,
             Err(_) => break, // Eof or read error
@@ -242,11 +274,17 @@ pub fn decode_video_frame(bytes: &[u8]) -> Option<DecodedImage> {
         if dec.send_packet(&pkt).is_err() {
             continue;
         }
-        if let Ok(frame) = dec.receive_arena_frame() {
-            return frame_to_rgba(&frame);
+        // A single packet may produce zero or several frames (B-frame reordering).
+        while out.len() < max_frames {
+            let Ok(frame) = dec.receive_arena_frame() else {
+                break;
+            };
+            if let Some(img) = frame_to_rgba(&frame) {
+                out.push(img);
+            }
         }
     }
-    None
+    out
 }
 
 /// Decode a WebP: lossless (VP8L) via `oxideav-webp`, or lossy (VP8 key frame)
@@ -1436,6 +1474,16 @@ mod tests {
         // Truncated/garbage bytes that merely look video-ish must not panic.
         assert!(decode_video_frame(b"\x1a\x45\xdf\xa3").is_none());
         assert!(decode_video_frame(&[0; 4]).is_none());
+
+        // The multi-frame decoder (the playback decode core) is graceful too: empty
+        // today (WIP codecs), `max_frames == 0` short-circuits, and `decode_video_frame`
+        // is exactly its first frame.
+        assert!(decode_video_frames(&mp4, 8).is_empty());
+        assert!(decode_video_frames(&mp4, 0).is_empty());
+        assert!(decode_video_frames(b"\x1a\x45\xdf\xa3", 4).is_empty());
+        // `decode_video_frame` is exactly the first of `decode_video_frames`.
+        assert!(decode_video_frame(&mp4).is_none());
+        assert!(decode_video_frames(&mp4, 1).into_iter().next().is_none());
     }
 
     #[test]
