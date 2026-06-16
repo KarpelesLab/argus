@@ -591,7 +591,24 @@ fn skip_block(tokens: &[Token], i: &mut usize) {
 
 fn parse_declarations(tokens: &[Token]) -> Vec<Declaration> {
     let mut out = Vec::new();
-    for decl in tokens.split(|t| *t == Token::Semicolon) {
+    // Split on `;` only at paren depth 0, so a semicolon inside a function — e.g.
+    // `url(data:image/png;base64,...)` — doesn't terminate the declaration.
+    let mut decls: Vec<&[Token]> = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, t) in tokens.iter().enumerate() {
+        match t {
+            Token::Function(_) | Token::LParen => depth += 1,
+            Token::RParen if depth > 0 => depth -= 1,
+            Token::Semicolon if depth == 0 => {
+                decls.push(&tokens[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    decls.push(&tokens[start..]);
+    for decl in decls {
         let Some(colon) = decl.iter().position(|t| *t == Token::Colon) else {
             continue;
         };
@@ -665,7 +682,10 @@ fn stringify(tokens: &[Token]) -> String {
             Token::RParen => s.push(')'),
             Token::LBracket => s.push('['),
             Token::RBracket => s.push(']'),
-            Token::Semicolon | Token::LBrace | Token::RBrace => {}
+            // A semicolon only survives into a value when nested in a function (e.g.
+            // a `url(data:...;base64,...)`), so reconstruct it.
+            Token::Semicolon => s.push(';'),
+            Token::LBrace | Token::RBrace => {}
         }
     }
     s
@@ -682,6 +702,24 @@ fn fmt_num(n: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn url_data_uri_with_semicolon_is_one_declaration() {
+        // A `;` inside `url(data:...;base64,...)` must NOT terminate the declaration
+        // (the `;` is at paren depth 1), and the value must reconstruct intact.
+        let css = ".x { background-image: url(data:image/png;base64,AAA+/B==); color: red }";
+        let sheet = parse_stylesheet(css);
+        let r = &sheet.rules[0];
+        assert_eq!(r.declarations.len(), 2, "two declarations, not split by the data: ;");
+        assert_eq!(r.declarations[0].name, "background-image");
+        assert_eq!(
+            r.declarations[0].value,
+            "url(data:image/png;base64,AAA+/B==)",
+            "the data URI (incl. `;base64` and base64 chars) round-trips"
+        );
+        assert_eq!(r.declarations[1].name, "color");
+        assert_eq!(r.declarations[1].value, "red");
+    }
 
     #[test]
     fn parses_rules_and_declarations() {
