@@ -1716,6 +1716,14 @@ impl Ctx<'_> {
             let cap = content_top + mh.to_px(style.font_size, content_w);
             self.cursor_y = self.cursor_y.min(cap).max(natural_bottom);
         }
+        // `min-height` is applied AFTER `max-height` (CSS 2.1 §10.7), so it wins when
+        // it exceeds `max-height` (e.g. `min-height: 1em; max-height: 2mm`).
+        if let Some(mnh) = style.min_height {
+            let floor = content_top + mnh.to_px(style.font_size, content_w);
+            if self.cursor_y < floor {
+                self.cursor_y = floor;
+            }
+        }
         // `overflow: hidden`/`clip` with a definite height makes that height a hard
         // size: the box stays its specified height and the overflow is clipped
         // (below), so following siblings flow right after it rather than after the
@@ -7513,6 +7521,27 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         assert!(
             b.baseline > 200.0,
             "second block should start below the 200px min-height, got {}",
+            b.baseline
+        );
+    }
+
+    #[test]
+    fn min_height_wins_over_max_height_per_10_7() {
+        let Some(font) = system_font() else {
+            eprintln!("no system font; skipping");
+            return;
+        };
+        // CSS 2.1 §10.7: min-height is applied after max-height, so when min > max
+        // the box is at least min-height (max-height does NOT cap below it). ACID2's
+        // scalp relies on this (`min-height: 1em; max-height: 2mm`).
+        let html = "<div style=\"height:8px; min-height:200px; max-height:50px\">a</div>\
+                    <div id=\"next\">b</div>";
+        let doc = parse(html);
+        let lay = layout(&doc, &font, 400.0, &ImageSizes::new());
+        let b = lay.runs.iter().find(|r| r.text == "b").unwrap();
+        assert!(
+            b.baseline > 200.0,
+            "min-height(200) must win over max-height(50); next at {}",
             b.baseline
         );
     }
