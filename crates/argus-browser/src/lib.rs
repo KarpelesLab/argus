@@ -363,27 +363,41 @@ fn provide_fonts(content: &Child) -> io::Result<()> {
     Ok(())
 }
 
-/// A fetched document plus the `Content-Security-Policy` header value(s) the origin
-/// sent with it, so header-delivered CSP reaches content (not just `<meta>` policies).
+/// A fetched document, its page URL (for CSP `'self'`/relative resolution), plus the
+/// `Content-Security-Policy` header value(s) the origin sent with it, so
+/// header-delivered CSP reaches content (not just `<meta>` policies).
 struct Page {
     html: String,
+    url: String,
     csp: Vec<String>,
 }
 
 impl Page {
-    /// An error/placeholder page carries no policy.
+    /// An error/placeholder page carries no policy. `url` is the (possibly empty)
+    /// page address; the built-in sample passes "".
     fn plain(html: String) -> Page {
-        Page { html, csp: Vec::new() }
+        Page {
+            html,
+            url: String::new(),
+            csp: Vec::new(),
+        }
+    }
+
+    /// Set the page URL (chained when the source URL is known).
+    fn with_url(mut self, url: &str) -> Page {
+        self.url = url.to_string();
+        self
     }
 }
 
-/// Send the content process a font and a document (with its header CSP) to render.
+/// Send the content process a font and a document (with its URL + header CSP).
 fn provide_page(content: &Child, page: &Page) -> io::Result<()> {
     provide_fonts(content)?;
     proto::send(
         content.channel(),
         Msg::LoadDocument {
             html: page.html.clone(),
+            url: page.url.clone(),
             csp: page.csp.clone(),
         },
         &[],
@@ -423,10 +437,12 @@ fn fetch_html(net: &Child, url: &str) -> io::Result<Page> {
         Ok(Page::plain(error_page(
             url,
             "could not load (network error or empty response)",
-        )))
+        ))
+        .with_url(url))
     } else {
         Ok(Page {
             html: decode_html(&body),
+            url: url.to_string(),
             csp,
         })
     }
@@ -462,10 +478,12 @@ fn post_html(net: &Child, url: &str, body: &[u8]) -> io::Result<Page> {
         Ok(Page::plain(error_page(
             url,
             "form POST failed (network error or empty response)",
-        )))
+        ))
+        .with_url(url))
     } else {
         Ok(Page {
             html: decode_html(&resp),
+            url: url.to_string(),
             csp,
         })
     }
@@ -560,7 +578,9 @@ fn error_page(url: &str, message: &str) -> String {
 /// The page to show (with its header CSP): a fetched URL or the built-in sample.
 fn resolve_page(net: &Child, url: Option<&str>) -> Page {
     match url {
-        Some(u) => fetch_html(net, u).unwrap_or_else(|e| Page::plain(error_page(u, &e.to_string()))),
+        Some(u) => {
+            fetch_html(net, u).unwrap_or_else(|e| Page::plain(error_page(u, &e.to_string())).with_url(u))
+        }
         None => Page::plain(sample_html()),
     }
 }
@@ -2095,7 +2115,8 @@ fn post_page(
     url: &str,
     body: &[u8],
 ) -> io::Result<(Framebuffer, u32)> {
-    let page = post_html(net, url, body).unwrap_or_else(|e| Page::plain(error_page(url, &e.to_string())));
+    let page =
+        post_html(net, url, body).unwrap_or_else(|e| Page::plain(error_page(url, &e.to_string())).with_url(url));
     let title = page_title(&page.html);
     window.set_title(if title.is_empty() { "Argus" } else { &title });
     provide_page(content, &page)?;

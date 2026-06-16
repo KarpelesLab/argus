@@ -180,10 +180,15 @@ pub enum Msg {
     /// content → browser: the updated `localStorage` (store text form) after a
     /// script run changed it, so the browser can persist it to disk.
     StorageChanged { data: String },
-    /// browser → content: the HTML document to render, plus any
-    /// `Content-Security-Policy` response-header policy strings (one per header) so
-    /// content can enforce header-delivered CSP, not just `<meta>` policies.
-    LoadDocument { html: String, csp: Vec<String> },
+    /// browser → content: the HTML document to render, the page `url` (for CSP
+    /// `'self'`/relative-URL resolution), plus any `Content-Security-Policy`
+    /// response-header policy strings (one per header) so content can enforce
+    /// header-delivered CSP, not just `<meta>` policies.
+    LoadDocument {
+        html: String,
+        url: String,
+        csp: Vec<String>,
+    },
     /// browser → net service: fetch this URL.
     LoadUrl { url: String },
     /// browser → net service: POST `body` (`application/x-www-form-urlencoded`) to
@@ -307,9 +312,10 @@ impl Msg {
                 buf.push(TAG_STORAGE_CHANGED);
                 put_bytes(&mut buf, data.as_bytes());
             }
-            Msg::LoadDocument { html, csp } => {
+            Msg::LoadDocument { html, url, csp } => {
                 buf.push(TAG_LOAD_DOCUMENT);
                 put_bytes(&mut buf, html.as_bytes());
+                put_bytes(&mut buf, url.as_bytes());
                 put_str_list(&mut buf, csp);
             }
             Msg::LoadUrl { url } => {
@@ -390,6 +396,7 @@ impl Msg {
             },
             TAG_LOAD_DOCUMENT => Msg::LoadDocument {
                 html: String::from_utf8_lossy(c.bytes()?).into_owned(),
+                url: String::from_utf8_lossy(c.bytes()?).into_owned(),
                 csp: get_str_list(&mut c)?,
             },
             TAG_LOAD_URL => Msg::LoadUrl {
@@ -535,10 +542,12 @@ mod tests {
         });
         round_trip(Msg::LoadDocument {
             html: "<p>hi & bye</p>".to_string(),
+            url: "https://example.com/p".to_string(),
             csp: vec!["default-src 'self'".to_string(), "script-src 'none'".to_string()],
         });
         round_trip(Msg::LoadDocument {
             html: "<p>no policy</p>".to_string(),
+            url: String::new(),
             csp: Vec::new(),
         });
         round_trip(Msg::LoadUrl {

@@ -1207,6 +1207,119 @@ fn csp_policies(doc: &Document, header_csp: &[String]) -> Vec<String> {
     v
 }
 
+/// The `(scheme, host)` of `url` — lowercased, port/path/query stripped. A relative
+/// or protocol-relative URL inherits the page's scheme (and a relative path its host),
+/// so a same-origin image matches `'self'` without resolving the full path.
+fn scheme_host(url: &str, page_scheme: &str, page_host: &str) -> (String, String) {
+    let url = url.trim();
+    if let Some(rest) = url.strip_prefix("//") {
+        // Protocol-relative: page scheme, host from the URL.
+        let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+        let host = host.rsplit_once(':').map_or(host, |(h, p)| {
+            if p.chars().all(|c| c.is_ascii_digit()) { h } else { host }
+        });
+        return (page_scheme.to_string(), host.to_ascii_lowercase());
+    }
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+            let host = host.rsplit_once(':').map_or(host, |(h, p)| {
+                if p.chars().all(|c| c.is_ascii_digit()) { h } else { host }
+            });
+            (scheme.to_ascii_lowercase(), host.to_ascii_lowercase())
+        }
+        None => {
+            // `data:`/`blob:`/`mailto:` etc. carry a scheme but no `//authority`.
+            if let Some((scheme, _)) = url.split_once(':') {
+                if !scheme.is_empty() && scheme.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.') {
+                    return (scheme.to_ascii_lowercase(), String::new());
+                }
+            }
+            // A relative path: same origin as the page.
+            (page_scheme.to_string(), page_host.to_string())
+        }
+    }
+}
+
+/// Whether a single CSP source-list token matches a fetched resource's `(scheme,
+/// host)` given the page's `(scheme, host)`. Models `*`, `'self'`, scheme-sources
+/// (`https:`/`data:`), and host-sources with an optional scheme prefix and a leading
+/// `*.` wildcard. Ports/paths are ignored.
+fn csp_source_matches(
+    token: &str,
+    scheme: &str,
+    host: &str,
+    page_scheme: &str,
+    page_host: &str,
+) -> bool {
+    let t = token.trim();
+    if t == "*" {
+        // `*` matches any host-based scheme, but not `data:`/`blob:` (need them listed).
+        return !matches!(scheme, "data" | "blob" | "filesystem");
+    }
+    if t.eq_ignore_ascii_case("'self'") {
+        return scheme == page_scheme && host == page_host && !host.is_empty();
+    }
+    if t.starts_with('\'') {
+        return false; // other keyword-sources ('unsafe-inline' etc.) don't grant images
+    }
+    // Scheme-source: `https:` / `data:` (a scheme followed by ':' and nothing else).
+    if let Some(s) = t.strip_suffix(':') {
+        if !s.contains('/') {
+            return scheme.eq_ignore_ascii_case(s);
+        }
+    }
+    // Host-source, optionally `scheme://`. Strip a scheme prefix, then match the host
+    // (supporting a leading `*.` subdomain wildcard); ignore any port/path.
+    let (req_scheme, hostpart) = match t.split_once("://") {
+        Some((s, rest)) => (Some(s.to_ascii_lowercase()), rest),
+        None => (None, t),
+    };
+    if let Some(s) = req_scheme {
+        if s != scheme {
+            return false;
+        }
+    }
+    let host_pat = hostpart.split(['/', ':']).next().unwrap_or("").to_ascii_lowercase();
+    if let Some(suffix) = host_pat.strip_prefix("*.") {
+        host == suffix || host.ends_with(&format!(".{suffix}"))
+    } else {
+        host == host_pat
+    }
+}
+
+/// Whether one policy's effective image source list allows `src`. The effective
+/// directive is `img-src`, else `default-src`; a policy with neither is unrestricting.
+/// An empty list or `'none'` blocks everything.
+fn policy_allows_image(policy: &str, scheme: &str, host: &str, page_scheme: &str, page_host: &str) -> bool {
+    let Some(tokens) = csp_directive(policy, "img-src").or_else(|| csp_directive(policy, "default-src"))
+    else {
+        return true;
+    };
+    let toks: Vec<&str> = tokens.split_whitespace().collect();
+    if toks.is_empty() || (toks.len() == 1 && toks[0].eq_ignore_ascii_case("'none'")) {
+        return false;
+    }
+    toks.iter()
+        .any(|t| csp_source_matches(t, scheme, host, page_scheme, page_host))
+}
+
+/// Whether the page's CSP blocks loading an image at `src` (a `<img>`/background-image
+/// URL), considering every active policy (meta + header) — the image is blocked if any
+/// policy's effective `img-src`/`default-src` rejects it. `page_url` resolves `'self'`
+/// and relative URLs. With no governing CSP, nothing is blocked.
+pub fn csp_blocks_image(doc: &Document, header_csp: &[String], src: &str, page_url: &str) -> bool {
+    let policies = csp_policies(doc, header_csp);
+    if policies.is_empty() {
+        return false;
+    }
+    let (page_scheme, page_host) = scheme_host(page_url, "", "");
+    let (scheme, host) = scheme_host(src, &page_scheme, &page_host);
+    policies
+        .iter()
+        .any(|p| !policy_allows_image(p, &scheme, &host, &page_scheme, &page_host))
+}
+
 /// Whether one CSP policy allows an inline `<script>` with the given `nonce` and
 /// `body`. The effective directive is `script-src`, else `default-src`. If it lists
 /// any `'nonce-…'` or `'sha256/384/512-…'` source, the script must match one
@@ -3150,6 +3263,51 @@ mod tests {
         let mut doc = argus_html::parse(html);
         apply_scripts_with_csp(&mut doc, &["script-src 'unsafe-inline'".to_string()]);
         assert_eq!(text_of(&doc, "o"), "after", "permissive header CSP allows");
+    }
+
+    #[test]
+    fn csp_img_src_source_matching() {
+        let doc = argus_html::parse("<p>x</p>"); // no <meta> CSP
+        let page = "https://example.com/page.html";
+        let blocked = |csp: &str, src: &str| {
+            csp_blocks_image(&doc, &[csp.to_string()], src, page)
+        };
+
+        // 'none' blocks everything, incl. relative and data URLs.
+        assert!(blocked("img-src 'none'", "/logo.png"));
+        assert!(blocked("img-src 'none'", "data:image/png;base64,AAAA"));
+
+        // 'self' allows same-origin (relative + absolute-matching), blocks cross-origin
+        // and data: (no scheme listed).
+        assert!(!blocked("img-src 'self'", "/logo.png"));
+        assert!(!blocked("img-src 'self'", "https://example.com/a.png"));
+        assert!(blocked("img-src 'self'", "https://evil.com/a.png"));
+        assert!(blocked("img-src 'self'", "data:image/png;base64,AAAA"));
+
+        // Scheme-source and host-source (with subdomain wildcard).
+        assert!(!blocked("img-src data:", "data:image/png;base64,AAAA"));
+        assert!(!blocked("img-src https://cdn.example.com", "https://cdn.example.com/a.png"));
+        assert!(blocked("img-src https://cdn.example.com", "https://other.com/a.png"));
+        assert!(!blocked("img-src *.example.com", "https://img.example.com/a.png"));
+        assert!(blocked("img-src *.example.com", "https://example.org/a.png"));
+
+        // `*` allows host-based schemes but not data:.
+        assert!(!blocked("img-src *", "https://anywhere.com/a.png"));
+        assert!(blocked("img-src *", "data:image/png;base64,AAAA"));
+
+        // img-src takes precedence over default-src; default-src is the fallback.
+        assert!(blocked("default-src 'self'; img-src 'none'", "/a.png"));
+        assert!(!blocked("default-src 'self'", "/a.png"));
+        assert!(blocked("default-src 'none'", "/a.png"));
+
+        // No governing directive → unrestricted; multiple policies all must allow.
+        assert!(!blocked("script-src 'none'", "/a.png"), "no img/default-src → allowed");
+        assert!(csp_blocks_image(
+            &doc,
+            &["img-src 'self'".to_string(), "img-src 'none'".to_string()],
+            "/a.png",
+            page
+        ));
     }
 
     #[test]

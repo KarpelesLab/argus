@@ -117,7 +117,11 @@ Property` / `JSON` suffice).
   **`'nonce-…'` allow-listing** (case-sensitive; `'unsafe-inline'` ignored when a
   nonce source is present, per CSP3); **`'sha256/384/512-…'` hash-source allow-listing**
   (inline-script body digest via **purecrypto**, base64-compared; hashes disable
-  `'unsafe-inline'` per CSP3).
+  `'unsafe-inline'` per CSP3). **`img-src` enforcement** (`<img>` + background-images):
+  a blocked source is never fetched/decoded, so it doesn't render — source list models
+  `'none'`/`*`/`'self'`/scheme-sources (`data:`/`https:`)/host-sources (with a `*.`
+  subdomain wildcard), with `img-src` falling back to `default-src`; the page URL
+  (threaded into `LoadDocument`) resolves `'self'`/relative sources.
 - **History**: **reload** (Cmd+R, keeping scroll position); **back/forward** (Cmd+`[`/
   `]`) with **per-entry scroll restoration** (each entry remembers the offset it was
   left at; a new navigation starts at the top).
@@ -127,8 +131,8 @@ Property` / `JSON` suffice).
   open; page clicks offset past the strip); **one isolated content process per tab**
   (own sandboxed process, DOM/JS/scroll preserved when inactive, instant switch-back;
   closing a tab shuts down + reaps it).
-- **Remaining**: more CSP directives (`img-src`/`style-src`/`connect-src`/external
-  `<script src>`); `report-uri`/`report-to`.
+- **Remaining**: more CSP directives (`style-src`/`connect-src`; external `<script
+  src>` isn't executed at all, so `script-src` for it is moot); `report-uri`/`report-to`.
 
 ### Phase 4 — Layout & CSS breadth — 🟡 in progress
 

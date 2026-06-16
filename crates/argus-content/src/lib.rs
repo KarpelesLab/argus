@@ -30,6 +30,7 @@ pub fn run(channel: Channel) -> io::Result<()> {
         font: None,
         html: None,
         header_csp: Vec::new(),
+        page_url: String::new(),
         doc: None,
         events: Vec::new(),
         storage: std::collections::HashMap::new(),
@@ -86,9 +87,10 @@ pub fn run(channel: Channel) -> io::Result<()> {
                 content.storage = proto::decode_storage(&data);
                 log!("seeded localStorage ({} keys)", content.storage.len());
             }
-            Msg::LoadDocument { html, csp } => {
+            Msg::LoadDocument { html, url, csp } => {
                 log!("loaded document ({} bytes, {} CSP header(s))", html.len(), csp.len());
                 content.header_csp = csp;
+                content.page_url = url;
                 // Parse once, run the page's scripts against a JS-side DOM shim, and
                 // apply their mutations so layout sees the post-script tree.
                 let mut doc = argus_html::parse(&html);
@@ -271,6 +273,8 @@ struct Content {
     /// `Content-Security-Policy` header value(s) delivered with the page, enforced on
     /// every script run alongside any `<meta>` policies. Reset on each navigation.
     header_csp: Vec<String>,
+    /// The page URL, used to resolve CSP `'self'` and relative image sources.
+    page_url: String,
     /// The parsed document, already mutated by its scripts (Phase 2 DOM bindings).
     doc: Option<argus_dom::Document>,
     /// The interaction history replayed on every script run (event sourcing).
@@ -357,6 +361,12 @@ impl Content {
             if images.contains_key(&src) {
                 continue;
             }
+            // Content-Security-Policy `img-src`: a blocked source is never fetched or
+            // decoded, so it simply doesn't render.
+            if argus_domscript::csp_blocks_image(doc, &self.header_csp, &src, &self.page_url) {
+                log!("CSP img-src blocked image: {src}");
+                continue;
+            }
             let decoded = if src.starts_with("data:") {
                 argus_image::decode_data_url(&src)
             } else {
@@ -436,6 +446,11 @@ impl Content {
         // aren't known until the cascade runs in `layout`).
         for bgi in &layout.bg_images {
             if !images.contains_key(&bgi.src) {
+                // CSP `img-src` governs background-images too.
+                if argus_domscript::csp_blocks_image(doc, &self.header_csp, &bgi.src, &self.page_url) {
+                    log!("CSP img-src blocked background-image: {}", bgi.src);
+                    continue;
+                }
                 let decoded = if bgi.src.starts_with("data:") {
                     argus_image::decode_data_url(&bgi.src)
                 } else {
@@ -1357,6 +1372,7 @@ mod tests {
             font: None,
             html: Some(html.to_string()),
             header_csp: Vec::new(),
+            page_url: String::new(),
             doc: Some(argus_html::parse(html)),
             events: Vec::new(),
             storage: std::collections::HashMap::new(),
