@@ -72,6 +72,46 @@ pub enum ObjectFit {
     Cover,
 }
 
+/// Parse `object-position` to `(x, y)` alignment fractions in `0.0..=1.0`. Handles
+/// the keyword set (`left`/`center`/`right`/`top`/`bottom`) and percentages, in one
+/// or two values (keyword order is tolerated; a length without `%` falls back to
+/// center for that axis). Defaults to centered.
+fn parse_object_position(v: &str) -> (f32, f32) {
+    fn axis(t: &str, horiz: bool) -> Option<f32> {
+        match t {
+            "center" => Some(0.5),
+            "left" if horiz => Some(0.0),
+            "right" if horiz => Some(1.0),
+            "top" if !horiz => Some(0.0),
+            "bottom" if !horiz => Some(1.0),
+            _ => t
+                .strip_suffix('%')
+                .and_then(|p| p.trim().parse::<f32>().ok())
+                .map(|p| (p / 100.0).clamp(0.0, 1.0)),
+        }
+    }
+    let toks: Vec<&str> = v.split_whitespace().collect();
+    match toks.as_slice() {
+        [a] => {
+            if matches!(*a, "top" | "bottom") {
+                (0.5, axis(a, false).unwrap_or(0.5))
+            } else {
+                (axis(a, true).unwrap_or(0.5), 0.5)
+            }
+        }
+        [a, b] => {
+            // X then Y, unless the keywords are given vertical-first.
+            let (ax, ay) = if matches!(*a, "top" | "bottom") || matches!(*b, "left" | "right") {
+                (*b, *a)
+            } else {
+                (*a, *b)
+            };
+            (axis(ax, true).unwrap_or(0.5), axis(ay, false).unwrap_or(0.5))
+        }
+        _ => (0.5, 0.5),
+    }
+}
+
 /// `text-decoration-style` — how underline/line-through/overline lines are drawn.
 /// `Wavy` has no curve primitive available, so it renders like `Solid`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -426,6 +466,9 @@ pub struct ComputedStyle {
     pub caption_side_bottom: bool,
     /// `object-fit` — how a replaced element's image is fitted into its box.
     pub object_fit: ObjectFit,
+    /// `object-position` — alignment of the fitted image within its box, as
+    /// `(x, y)` fractions in `0.0..=1.0` (default `(0.5, 0.5)`, i.e. centered).
+    pub object_position: (f32, f32),
     /// `line-height` as a multiple of `font-size` (inherited).
     pub line_height: f32,
     /// `text-indent` for the first line, in pixels (inherited).
@@ -544,6 +587,7 @@ impl ComputedStyle {
             box_sizing: BoxSizing::ContentBox,
             caption_side_bottom: false,
             object_fit: ObjectFit::Fill,
+            object_position: (0.5, 0.5),
             line_height: 1.2,
             text_indent: 0.0,
             word_spacing: 0.0,
@@ -1449,6 +1493,9 @@ fn apply(cs: &mut ComputedStyle, map: &HashMap<String, String>, parent: &Compute
             "cover" => ObjectFit::Cover,
             _ => ObjectFit::Fill,
         };
+    }
+    if let Some(v) = map.get("object-position") {
+        cs.object_position = parse_object_position(v.trim());
     }
     // `gap` shorthand: `<row-gap> [<column-gap>]` (column defaults to row).
     if let Some(v) = map.get("gap").or_else(|| map.get("grid-gap")) {
@@ -3249,5 +3296,30 @@ mod tests {
         );
         let grad = cs.background_gradient.expect("gradient parsed");
         assert_eq!(grad.from, Color { r: 0, g: 255, b: 0, a: 255 });
+    }
+
+    #[test]
+    fn object_position_parses_keywords_and_percentages() {
+        let pos = |decl: &str| -> (f32, f32) {
+            let mut doc = Document::new();
+            let d = one(&mut doc, "img", vec![]);
+            computed_style(
+                &doc,
+                d,
+                &ComputedStyle::initial(),
+                &parse_stylesheet(&format!("img {{ {decl} }}")),
+            )
+            .object_position
+        };
+        assert_eq!(pos(""), (0.5, 0.5), "default centered");
+        assert_eq!(pos("object-position: left top"), (0.0, 0.0));
+        assert_eq!(pos("object-position: right bottom"), (1.0, 1.0));
+        assert_eq!(pos("object-position: center"), (0.5, 0.5));
+        assert_eq!(pos("object-position: 25% 75%"), (0.25, 0.75));
+        // A single value sets X (Y centered); a vertical keyword sets Y.
+        assert_eq!(pos("object-position: right"), (1.0, 0.5));
+        assert_eq!(pos("object-position: top"), (0.5, 0.0));
+        // Keyword order is tolerated (vertical-first).
+        assert_eq!(pos("object-position: top left"), (0.0, 0.0));
     }
 }

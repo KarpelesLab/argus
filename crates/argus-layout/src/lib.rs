@@ -2503,28 +2503,31 @@ impl Ctx<'_> {
             // `cover` fills the box and crops the source overflow; `fill` (default)
             // stretches the whole source to the box.
             let fit_known = iw > 0 && ih > 0 && attr_w.is_some() && attr_h.is_some();
+            // `object-position` aligns the fitted image / crop window within the box
+            // (default centered = 0.5, 0.5).
+            let (px, py) = istyle.object_position;
             let (ix, iy, dw, dh, crop) = match istyle.object_fit {
                 ObjectFit::Contain if fit_known => {
                     let scale = (w / iw as f32).min(h / ih as f32);
                     let (fw, fh) = (iw as f32 * scale, ih as f32 * scale);
                     (
-                        x + (w - fw) / 2.0,
-                        self.cursor_y + (h - fh) / 2.0,
+                        x + (w - fw) * px,
+                        self.cursor_y + (h - fh) * py,
                         fw,
                         fh,
                         (0.0, 0.0, 1.0, 1.0),
                     )
                 }
                 ObjectFit::Cover if fit_known => {
-                    // Crop the source to the box's aspect (centered), painting the
+                    // Crop the source to the box's aspect (positioned), painting the
                     // full box. box-aspect vs image-aspect decides which axis crops.
                     let (iwf, ihf) = (iw as f32, ih as f32);
                     let crop = if iwf / ihf > w / h {
                         let cw = ihf * (w / h) / iwf; // narrow horizontally
-                        ((1.0 - cw) / 2.0, 0.0, cw, 1.0)
+                        ((1.0 - cw) * px, 0.0, cw, 1.0)
                     } else {
                         let ch = iwf * (h / w) / ihf; // narrow vertically
-                        (0.0, (1.0 - ch) / 2.0, 1.0, ch)
+                        (0.0, (1.0 - ch) * py, 1.0, ch)
                     };
                     (x, self.cursor_y, w, h, crop)
                 }
@@ -6728,6 +6731,17 @@ lineargradientradialboxshadowtransformtranslatescaletabletrtdthrowspancolspanpro
         assert!((cover.crop.2 - 0.5).abs() < 0.02, "cover crops width to ~half, got {}", cover.crop.2);
         assert!((cover.crop.0 - 0.25).abs() < 0.02, "crop centered, x0 ~0.25");
         assert!((cover.crop.3 - 1.0).abs() < 0.01, "full height retained");
+
+        // object-position moves the fit/crop: `contain` with `top` aligns the
+        // letterboxed image to the box top (y offset ~0 instead of ~25).
+        let top = render("object-fit: contain; object-position: center top");
+        assert!(top.y < contain.y - 5.0, "top-aligned, y={} < centered {}", top.y, contain.y);
+        // `cover` with `left` crops from the source's left edge (crop x0 ~0).
+        let left = render("object-fit: cover; object-position: left center");
+        assert!(left.crop.0 < 0.02, "left-positioned crop starts at 0, got {}", left.crop.0);
+        // `right` crops from the right edge (crop x0 ~0.5 for a half-width crop).
+        let right = render("object-fit: cover; object-position: right");
+        assert!((right.crop.0 - 0.5).abs() < 0.02, "right crop x0 ~0.5, got {}", right.crop.0);
     }
 
     #[test]
