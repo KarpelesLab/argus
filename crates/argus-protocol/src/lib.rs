@@ -199,11 +199,15 @@ pub enum Msg {
     /// url is the [`SCROLL_TO_PREFIX`] sentinel + that Y (so the browser scrolls).
     ScrollToFragment { fragment: String },
     /// net service → browser: a fetched resource (`status == 0` means failure).
-    /// `csp` carries the response's `Content-Security-Policy` header value(s).
+    /// `csp` carries the response's `Content-Security-Policy` header value(s);
+    /// `content_type`/`content_disposition` let the browser detect a download (an
+    /// `attachment` or a non-renderable type) rather than rendering bytes as a page.
     ResourceLoaded {
         status: u16,
         body: Vec<u8>,
         csp: Vec<String>,
+        content_type: String,
+        content_disposition: String,
     },
     /// content → browser: fetch a subresource (e.g. an image) at `url`.
     FetchResource { url: String },
@@ -350,11 +354,19 @@ impl Msg {
                 buf.push(TAG_SCROLL_TO_FRAGMENT);
                 put_bytes(&mut buf, fragment.as_bytes());
             }
-            Msg::ResourceLoaded { status, body, csp } => {
+            Msg::ResourceLoaded {
+                status,
+                body,
+                csp,
+                content_type,
+                content_disposition,
+            } => {
                 buf.push(TAG_RESOURCE_LOADED);
                 buf.extend_from_slice(&status.to_le_bytes());
                 put_bytes(&mut buf, body);
                 put_str_list(&mut buf, csp);
+                put_bytes(&mut buf, content_type.as_bytes());
+                put_bytes(&mut buf, content_disposition.as_bytes());
             }
             Msg::FetchResource { url } => {
                 buf.push(TAG_FETCH_RESOURCE);
@@ -452,6 +464,8 @@ impl Msg {
                 status: c.u16()?,
                 body: c.bytes()?.to_vec(),
                 csp: get_str_list(&mut c)?,
+                content_type: String::from_utf8_lossy(c.bytes()?).into_owned(),
+                content_disposition: String::from_utf8_lossy(c.bytes()?).into_owned(),
             },
             TAG_FETCH_RESOURCE => Msg::FetchResource {
                 url: String::from_utf8_lossy(c.bytes()?).into_owned(),
@@ -623,11 +637,15 @@ mod tests {
             status: 200,
             body: vec![60, 104, 49, 62],
             csp: vec!["default-src 'self'".to_string()],
+            content_type: "text/html; charset=utf-8".to_string(),
+            content_disposition: String::new(),
         });
         round_trip(Msg::ResourceLoaded {
             status: 0,
             body: Vec::new(),
             csp: Vec::new(),
+            content_type: String::new(),
+            content_disposition: "attachment; filename=\"a.zip\"".to_string(),
         });
         round_trip(Msg::FetchResource {
             url: "https://example.com/a.png".to_string(),

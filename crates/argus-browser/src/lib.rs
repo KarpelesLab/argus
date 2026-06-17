@@ -406,7 +406,7 @@ fn provide_page(content: &Child, page: &Page) -> io::Result<()> {
 
 /// Ask the net service to fetch `url`, returning the raw body and any CSP header(s)
 /// (empty body on failure).
-fn fetch_bytes_csp(net: &Child, url: &str) -> io::Result<(Vec<u8>, Vec<String>)> {
+fn fetch_bytes_csp(net: &Child, url: &str) -> io::Result<(Vec<u8>, Vec<String>, String, String)> {
     proto::send(
         net.channel(),
         Msg::LoadUrl {
@@ -415,9 +415,17 @@ fn fetch_bytes_csp(net: &Child, url: &str) -> io::Result<(Vec<u8>, Vec<String>)>
         &[],
     )?;
     match proto::recv(net.channel())?.0 {
-        Msg::ResourceLoaded { status, body, csp } => {
-            Ok(if status == 0 { (Vec::new(), Vec::new()) } else { (body, csp) })
-        }
+        Msg::ResourceLoaded {
+            status,
+            body,
+            csp,
+            content_type,
+            content_disposition,
+        } => Ok(if status == 0 {
+            (Vec::new(), Vec::new(), String::new(), String::new())
+        } else {
+            (body, csp, content_type, content_disposition)
+        }),
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("expected ResourceLoaded, got {other:?}"),
@@ -425,27 +433,39 @@ fn fetch_bytes_csp(net: &Child, url: &str) -> io::Result<(Vec<u8>, Vec<String>)>
     }
 }
 
-/// Like [`fetch_bytes_csp`] but discards the CSP — for subresources (images), which
-/// don't carry an enforceable document policy.
+/// Like [`fetch_bytes_csp`] but discards everything except the body — for subresources
+/// (images), which don't carry an enforceable document policy or trigger downloads.
 fn fetch_bytes(net: &Child, url: &str) -> io::Result<Vec<u8>> {
     Ok(fetch_bytes_csp(net, url)?.0)
 }
 
 fn fetch_html(net: &Child, url: &str) -> io::Result<Page> {
-    let (body, csp) = fetch_bytes_csp(net, url)?;
+    // A `magnet:`/`.torrent` URL is a download by its very scheme — don't try to fetch
+    // it as a page (a magnet has no HTTP body). Route straight to the engine.
+    if url_is_download(url) {
+        let outcome = run_download(net, url, &downloads_dir());
+        return Ok(Page::plain(download_result_page(url, &outcome)).with_url(url));
+    }
+    let (body, csp, content_type, content_disposition) = fetch_bytes_csp(net, url)?;
     if body.is_empty() {
-        Ok(Page::plain(error_page(
+        return Ok(Page::plain(error_page(
             url,
             "could not load (network error or empty response)",
         ))
-        .with_url(url))
-    } else {
-        Ok(Page {
-            html: decode_html(&body),
-            url: url.to_string(),
-            csp,
-        })
+        .with_url(url));
     }
+    // A response marked as an attachment (or a non-renderable type) is downloaded to
+    // ~/Downloads rather than rendered as a page. (The page body we just fetched is
+    // discarded; the engine re-fetches it streaming — see `run_download`.)
+    if is_download_response(&content_type, &content_disposition) {
+        let outcome = run_download(net, url, &downloads_dir());
+        return Ok(Page::plain(download_result_page(url, &outcome)).with_url(url));
+    }
+    Ok(Page {
+        html: decode_html(&body),
+        url: url.to_string(),
+        csp,
+    })
 }
 
 /// POST `body` (`application/x-www-form-urlencoded`) to `url` via the net service
@@ -460,7 +480,7 @@ fn post_html(net: &Child, url: &str, body: &[u8]) -> io::Result<Page> {
         &[],
     )?;
     let (resp, csp) = match proto::recv(net.channel())?.0 {
-        Msg::ResourceLoaded { status, body, csp } => {
+        Msg::ResourceLoaded { status, body, csp, .. } => {
             if status == 0 || body.is_empty() {
                 (Vec::new(), Vec::new())
             } else {
@@ -1966,10 +1986,21 @@ pub fn render_once_scrolled(
 /// `StartDownload` engine the in-window download manager will use; the `--download=`
 /// CLI is the headless front-end (like `--dump-page` for rendering).
 pub fn download(url: &str, dir: &std::path::Path) -> io::Result<std::path::PathBuf> {
-    use std::io::Write;
     log::set_role(Role::Browser);
     let mut net = spawn_child(Role::NetService)?;
     proto::parent_handshake(net.channel(), Size::new(0, 0))?;
+    let result = run_download(&net, url, dir);
+    let _ = proto::send(net.channel(), Msg::Shutdown, &[]);
+    let _ = net.wait();
+    result
+}
+
+/// Drive a download over an existing net `Child`: send `StartDownload`, render a
+/// stderr progress bar, return the saved path. Shared by the `--download=` CLI (which
+/// spawns its own net process) and navigation-triggered downloads (which reuse the
+/// page net process). Does not shut the net process down.
+fn run_download(net: &Child, url: &str, dir: &std::path::Path) -> io::Result<std::path::PathBuf> {
+    use std::io::Write;
     proto::send(
         net.channel(),
         Msg::StartDownload {
@@ -1978,9 +2009,8 @@ pub fn download(url: &str, dir: &std::path::Path) -> io::Result<std::path::PathB
         },
         &[],
     )?;
-
     let mut started_path = String::new();
-    let result = loop {
+    loop {
         match proto::recv(net.channel())?.0 {
             Msg::DownloadStarted { path } => {
                 let name = std::path::Path::new(&path)
@@ -1999,17 +2029,126 @@ pub fn download(url: &str, dir: &std::path::Path) -> io::Result<std::path::PathB
                     eprintln!(); // finish the progress line
                 }
                 if ok {
-                    let final_path = if path.is_empty() { started_path.clone() } else { path };
-                    break Ok(std::path::PathBuf::from(final_path));
+                    let final_path = if path.is_empty() { started_path } else { path };
+                    return Ok(std::path::PathBuf::from(final_path));
                 }
-                break Err(io::Error::other(error));
+                return Err(io::Error::other(error));
             }
             _ => {}
         }
-    };
-    let _ = proto::send(net.channel(), Msg::Shutdown, &[]);
-    let _ = net.wait();
-    result
+    }
+}
+
+/// The directory navigation-triggered downloads save into: `$ARGUS_DOWNLOADS`, else
+/// `~/Downloads`. (The `--download=` CLI additionally honors `--out=`.)
+fn downloads_dir() -> std::path::PathBuf {
+    if let Some(d) = std::env::var_os("ARGUS_DOWNLOADS").filter(|d| !d.is_empty()) {
+        return std::path::PathBuf::from(d);
+    }
+    let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
+    std::path::PathBuf::from(home).join("Downloads")
+}
+
+/// Whether a URL is a download purely by its scheme/extension (no fetch needed): a
+/// `magnet:` link or a `.torrent` file. These go straight to the BitTorrent engine.
+fn url_is_download(url: &str) -> bool {
+    url.starts_with("magnet:")
+        || url
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(url)
+            .to_ascii_lowercase()
+            .ends_with(".torrent")
+}
+
+/// Whether a fetched response should be downloaded rather than rendered, from its
+/// `Content-Type` and `Content-Disposition`. A `Content-Disposition: attachment`
+/// always downloads; otherwise a clearly non-renderable (binary/archive) content type
+/// does. Renderable types (text/*, html, xml, json, images, fonts, JS/CSS) never do.
+fn is_download_response(content_type: &str, content_disposition: &str) -> bool {
+    let disp = content_disposition.trim().to_ascii_lowercase();
+    if disp.starts_with("attachment") {
+        return true;
+    }
+    let ct = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if ct.is_empty() {
+        return false; // unknown → render (the conservative default)
+    }
+    // Renderable families are never downloaded.
+    let renderable = ct.starts_with("text/")
+        || ct.starts_with("image/")
+        || ct.starts_with("font/")
+        || ct.starts_with("audio/")
+        || ct.starts_with("video/")
+        || matches!(
+            ct.as_str(),
+            "application/xhtml+xml"
+                | "application/xml"
+                | "application/json"
+                | "application/javascript"
+                | "application/ecmascript"
+                | "application/rss+xml"
+                | "application/atom+xml"
+                | "application/pdf"
+        );
+    if renderable {
+        return false;
+    }
+    // Clearly-downloadable binary/archive families.
+    ct == "application/octet-stream"
+        || ct == "application/zip"
+        || ct == "application/gzip"
+        || ct == "application/x-gzip"
+        || ct == "application/x-tar"
+        || ct == "application/x-bzip2"
+        || ct == "application/x-7z-compressed"
+        || ct == "application/x-rar-compressed"
+        || ct == "application/vnd.debian.binary-package"
+        || ct == "application/x-msdownload"
+        || ct == "application/x-apple-diskimage"
+        || ct == "application/x-bittorrent"
+}
+
+/// The page shown after a navigation-triggered download: where the file was saved, or
+/// the failure reason.
+fn download_result_page(url: &str, outcome: &io::Result<std::path::PathBuf>) -> String {
+    let esc = html_escape;
+    match outcome {
+        Ok(path) => {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            format!(
+                "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Download complete</title>\
+                 <style>body{{font:15px sans-serif;margin:2em;color:#222}} \
+                 h1{{font-size:1.4em}} code{{background:#f0f0f0;padding:2px 5px;border-radius:3px}}</style>\
+                 </head><body><h1>Download complete</h1>\
+                 <p>Saved <strong>{}</strong> to <code>{}</code></p></body></html>",
+                esc(&name),
+                esc(&path.to_string_lossy())
+            )
+        }
+        Err(e) => format!(
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Download failed</title>\
+             <style>body{{font:15px sans-serif;margin:2em;color:#900}} h1{{font-size:1.4em}}</style>\
+             </head><body><h1>Download failed</h1><p>{}</p><p style=\"color:#666\">{}</p></body></html>",
+            esc(&e.to_string()),
+            esc(url)
+        ),
+    }
+}
+
+/// Minimal HTML-escaping for text interpolated into the result page.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// A one-line human-readable progress bar `12.4 MB / 30.1 MB  41% ████░░░░`.
@@ -2617,8 +2756,35 @@ mod tests {
     use super::{
         decode_html, dom_node_json, effective_base, extract_forms, extract_images, extract_json,
         extract_jsonld, extract_links, extract_meta, extract_microdata, extract_tables,
-        page_title, render_text, resolve_url, srcset_best, History, Tabs,
+        is_download_response, page_title, render_text, resolve_url, srcset_best, url_is_download,
+        History, Tabs,
     };
+
+    #[test]
+    fn download_detection() {
+        // By URL scheme/extension (no fetch needed).
+        assert!(url_is_download("magnet:?xt=urn:btih:abc"));
+        assert!(url_is_download("https://host/ubuntu.TORRENT"));
+        assert!(url_is_download("https://host/x.torrent?v=2"));
+        assert!(!url_is_download("https://host/page.html"));
+        assert!(!url_is_download("https://host/torrentinfo")); // not a .torrent file
+
+        // Content-Disposition: attachment always downloads.
+        assert!(is_download_response("text/html", "attachment"));
+        assert!(is_download_response("text/html", "attachment; filename=\"x.pdf\""));
+        // Binary/archive content types download; renderable ones don't.
+        assert!(is_download_response("application/octet-stream", ""));
+        assert!(is_download_response("application/zip", ""));
+        assert!(is_download_response("application/x-bittorrent", ""));
+        assert!(!is_download_response("text/html; charset=utf-8", ""));
+        assert!(!is_download_response("application/json", ""));
+        assert!(!is_download_response("image/png", ""));
+        assert!(!is_download_response("application/pdf", "")); // rendered inline
+        // Unknown/empty type → render (conservative).
+        assert!(!is_download_response("", ""));
+        // `inline` disposition does not force a download.
+        assert!(!is_download_response("text/html", "inline"));
+    }
 
     #[test]
     fn a11y_tree_roles_names_and_aria() {

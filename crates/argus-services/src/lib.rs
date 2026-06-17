@@ -29,10 +29,12 @@ pub fn run(role: Role, channel: Channel) -> io::Result<()> {
     loop {
         match proto::recv(&channel) {
             Ok((Msg::LoadUrl { url }, _)) if role == Role::NetService => {
-                let (status, body, csp) = match cache.lookup(&url) {
+                // `ctype`/`cdisp` are only populated on a fresh fetch (downloads aren't
+                // cached, so a cache hit serves them empty → renders as a page).
+                let (status, body, csp, ctype, cdisp) = match cache.lookup(&url) {
                     CacheLookup::Fresh { body, csp } => {
                         log!("GET {url} -> 200 ({} bytes, cached)", body.len());
-                        (200, body, csp)
+                        (200, body, csp, String::new(), String::new())
                     }
                     CacheLookup::Stale {
                         validators,
@@ -54,7 +56,7 @@ pub fn run(role: Role, channel: Channel) -> io::Result<()> {
                             } else {
                                 log!("GET {url} -> stale-served ({} bytes)", body.len());
                             }
-                            (200, body, csp)
+                            (200, body, csp, String::new(), String::new())
                         } else {
                             log!("GET {url} -> {status} ({} bytes, refetched)", new_body.len());
                             let csp = extract_csp(&headers);
@@ -67,7 +69,9 @@ pub fn run(role: Role, channel: Channel) -> io::Result<()> {
                                     csp.clone(),
                                 );
                             }
-                            (status, new_body, csp)
+                            let ct = extract_header(&headers, "content-type");
+                            let cd = extract_header(&headers, "content-disposition");
+                            (status, new_body, csp, ct, cd)
                         }
                     }
                     CacheLookup::Miss => {
@@ -83,10 +87,22 @@ pub fn run(role: Role, channel: Channel) -> io::Result<()> {
                                 csp.clone(),
                             );
                         }
-                        (status, body, csp)
+                        let ct = extract_header(&headers, "content-type");
+                        let cd = extract_header(&headers, "content-disposition");
+                        (status, body, csp, ct, cd)
                     }
                 };
-                proto::send(&channel, Msg::ResourceLoaded { status, body, csp }, &[])?;
+                proto::send(
+                    &channel,
+                    Msg::ResourceLoaded {
+                        status,
+                        body,
+                        csp,
+                        content_type: ctype,
+                        content_disposition: cdisp,
+                    },
+                    &[],
+                )?;
             }
             Ok((Msg::PostUrl { url, body }, _)) if role == Role::NetService => {
                 // Form POST: never cached (POST is not idempotent), always hits the
@@ -104,6 +120,8 @@ pub fn run(role: Role, channel: Channel) -> io::Result<()> {
                         status,
                         body: resp,
                         csp,
+                        content_type: extract_header(&headers, "content-type"),
+                        content_disposition: extract_header(&headers, "content-disposition"),
                     },
                     &[],
                 )?;
@@ -781,6 +799,15 @@ fn extract_validators(headers: &[(String, String)]) -> Validators {
         etag: get("etag"),
         last_modified: get("last-modified"),
     }
+}
+
+/// The (trimmed) value of the first header named `name` (case-insensitive), or empty.
+fn extract_header(headers: &[(String, String)], name: &str) -> String {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.trim().to_string())
+        .unwrap_or_default()
 }
 
 /// Every `Content-Security-Policy` response-header value (a response may send more

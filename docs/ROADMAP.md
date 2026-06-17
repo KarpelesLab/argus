@@ -116,8 +116,12 @@ Property` / `JSON` suffice).
   **`argus --download=URL`** CLI renders a progress bar. **BitTorrent**: a `magnet:`
   link or `.torrent` (HTTP/local) routes through rsurl's `bittorrent` engine — parse
   magnet → peers (direct `x.pe` → tracker `announce` → DHT) → `fetch_metainfo` →
-  `file_layout` → `download` with the same progress IPC. *Remaining*: the in-window
-  download manager panel (the windowed UI slice).
+  `file_layout` → `download` with the same progress IPC. **Auto-detect on navigation**:
+  a `magnet:`/`.torrent` URL (by scheme) or a response marked `Content-Disposition:
+  attachment` / a non-renderable binary `Content-Type` (`ResourceLoaded` now carries
+  both) downloads to `~/Downloads` and shows a "Download complete" page instead of
+  rendering bytes as garbage. *Remaining*: the in-window progress panel (a live overlay
+  needs a real display; the engine, detection, and result page are done).
 - **CSP enforcement** (inline-script `script-src`/`default-src`) from `<meta>` and
   **response headers threaded across IPC** (net service extracts the
   `Content-Security-Policy` header — preserved through the HTTP cache — into
