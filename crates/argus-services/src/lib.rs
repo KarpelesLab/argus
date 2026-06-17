@@ -108,6 +108,12 @@ pub fn run(role: Role, channel: Channel) -> io::Result<()> {
                     &[],
                 )?;
             }
+            Ok((Msg::StartDownload { url, dir }, _)) if role == Role::NetService => {
+                // Stream a download to disk (the net service is trusted — it owns the
+                // socket and the filesystem) and report progress/completion to the
+                // caller. Runs synchronously: the caller has a dedicated net process.
+                download_to(&channel, &url, &dir)?;
+            }
             Ok((Msg::Shutdown, _)) => {
                 log!("shutting down");
                 return Ok(());
@@ -176,6 +182,272 @@ fn post(
             (0, Vec::new(), Vec::new())
         }
     }
+}
+
+/// Download `url` into directory `dir`, reporting `DownloadStarted`/`DownloadProgress`
+/// and a terminal `DownloadDone` to the caller. `magnet:`/`.torrent` sources are not
+/// supported yet (Slice 2). Always replies with a terminal message.
+fn download_to(channel: &Channel, url: &str, dir: &str) -> io::Result<()> {
+    let is_torrent =
+        url.starts_with("magnet:") || url.split(['?', '#']).next().unwrap_or(url).ends_with(".torrent");
+    if is_torrent {
+        log!("download: torrents not yet supported: {url}");
+        return proto::send(
+            channel,
+            Msg::DownloadDone {
+                ok: false,
+                path: String::new(),
+                error: "torrents are not supported yet".to_string(),
+            },
+            &[],
+        );
+    }
+    match http_download(channel, url, dir) {
+        Ok(path) => {
+            log!("download complete: {}", path.display());
+            proto::send(
+                channel,
+                Msg::DownloadDone {
+                    ok: true,
+                    path: path.to_string_lossy().into_owned(),
+                    error: String::new(),
+                },
+                &[],
+            )
+        }
+        Err(e) => {
+            log!("download failed for {url}: {e}");
+            proto::send(
+                channel,
+                Msg::DownloadDone {
+                    ok: false,
+                    path: String::new(),
+                    error: e,
+                },
+                &[],
+            )
+        }
+    }
+}
+
+/// Stream an HTTP(S) `url` to a file in `dir` via rsurl, emitting `DownloadStarted`
+/// (once the filename is known from the response head) and throttled
+/// `DownloadProgress`. Returns the saved path, or an error string. No cookies/resume
+/// yet (Slice 1).
+fn http_download(channel: &Channel, url: &str, dir: &str) -> Result<std::path::PathBuf, String> {
+    use std::cell::RefCell;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+
+    /// Progress reported at most once per this many bytes, to bound IPC chatter.
+    const PROGRESS_STEP: u64 = 256 * 1024;
+
+    #[derive(Default)]
+    struct DlState {
+        file: Option<std::fs::File>,
+        path: PathBuf,
+        total: u64,
+        done: u64,
+        last_sent: u64,
+        /// Set when the head/open fails; aborts the chunk loop and is the final error.
+        err: Option<String>,
+    }
+
+    let req = rsurl::Request::get(url).map_err(|e| e.to_string())?;
+    let st = RefCell::new(DlState::default());
+
+    let on_head = |head: &rsurl::ResponseHead| {
+        let mut s = st.borrow_mut();
+        if !(200..300).contains(&head.status) {
+            s.err = Some(format!("HTTP {}", head.status));
+            return;
+        }
+        let get = |name: &str| {
+            head.headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+        };
+        s.total = get("content-length").and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+        let name = download_filename(get("content-disposition"), url);
+        let path = dedupe_path(Path::new(dir), &name, |p| p.exists());
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                s.err = Some(e.to_string());
+                return;
+            }
+        }
+        match std::fs::File::create(&path) {
+            Ok(f) => {
+                s.file = Some(f);
+                let _ = proto::send(
+                    channel,
+                    Msg::DownloadStarted {
+                        path: path.to_string_lossy().into_owned(),
+                    },
+                    &[],
+                );
+                s.path = path;
+            }
+            Err(e) => s.err = Some(e.to_string()),
+        }
+    };
+
+    let on_chunk = |chunk: &[u8]| -> rsurl::Result<()> {
+        let mut s = st.borrow_mut();
+        if s.err.is_some() {
+            // Abort: an error page body / failed open — stop reading.
+            return Err(io::Error::other("download aborted").into());
+        }
+        if let Some(f) = s.file.as_mut() {
+            f.write_all(chunk)?;
+            s.done += chunk.len() as u64;
+            if s.done - s.last_sent >= PROGRESS_STEP {
+                s.last_sent = s.done;
+                let (done, total) = (s.done, s.total);
+                proto::send(channel, Msg::DownloadProgress { done, total }, &[])?;
+            }
+        }
+        Ok(())
+    };
+
+    let send_result = req.send_streaming(on_head, on_chunk);
+    let s = st.into_inner();
+
+    if let Some(err) = s.err {
+        if !s.path.as_os_str().is_empty() {
+            let _ = std::fs::remove_file(&s.path);
+        }
+        return Err(err);
+    }
+    // A transport error after the head (e.g. a dropped connection) leaves a partial
+    // file; treat it as a failure and clean up.
+    if let Err(e) = send_result {
+        if !s.path.as_os_str().is_empty() {
+            let _ = std::fs::remove_file(&s.path);
+        }
+        return Err(e.to_string());
+    }
+    if s.file.is_none() {
+        return Err("no response".to_string());
+    }
+    // Final progress so the caller sees 100% (total defaults to the byte count when the
+    // server sent no Content-Length).
+    let _ = proto::send(
+        channel,
+        Msg::DownloadProgress {
+            done: s.done,
+            total: s.total.max(s.done),
+        },
+        &[],
+    );
+    Ok(s.path)
+}
+
+/// Choose a download filename from a `Content-Disposition` header (`filename*=UTF-8''…`
+/// preferred, else `filename="…"`), else the URL's last path segment (percent-decoded),
+/// else `"download"`. The result is a bare filename: any path separators are stripped.
+fn download_filename(disposition: Option<&str>, url: &str) -> String {
+    if let Some(cd) = disposition {
+        if let Some(name) = content_disposition_filename(cd) {
+            let name = sanitize_filename(&name);
+            if !name.is_empty() {
+                return name;
+            }
+        }
+    }
+    // URL basename: drop query/fragment, strip the scheme+authority (so a host-only
+    // URL like `https://h/` has no basename), then take the last path segment.
+    let no_qf = url.split(['?', '#']).next().unwrap_or(url);
+    let path = match no_qf.split_once("://") {
+        Some((_, after)) => match after.find('/') {
+            Some(i) => &after[i + 1..],
+            None => "",
+        },
+        None => no_qf,
+    };
+    let seg = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or("");
+    let name = sanitize_filename(&percent_decode(seg));
+    if name.is_empty() {
+        "download".to_string()
+    } else {
+        name
+    }
+}
+
+/// Extract the `filename` from a `Content-Disposition` value. Prefers the RFC 5987
+/// `filename*=charset'lang'pct-encoded` form, else the quoted/bare `filename=`.
+fn content_disposition_filename(cd: &str) -> Option<String> {
+    for part in cd.split(';') {
+        let part = part.trim();
+        if let Some(v) = part.strip_prefix("filename*=") {
+            // charset'lang'value — keep the value after the second quote.
+            let value = v.splitn(3, '\'').nth(2).unwrap_or(v);
+            return Some(percent_decode(value));
+        }
+    }
+    for part in cd.split(';') {
+        let part = part.trim();
+        if let Some(v) = part.strip_prefix("filename=") {
+            return Some(v.trim().trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
+/// Strip directory separators and trim a candidate filename to a safe bare name.
+fn sanitize_filename(name: &str) -> String {
+    name.rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .trim()
+        .trim_matches('.')
+        .to_string()
+}
+
+/// Minimal percent-decoding (`%XX` → byte), lossy UTF-8. Leaves malformed escapes as-is.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Resolve `dir/name`, avoiding collisions: if it exists, try `name (1).ext`,
+/// `name (2).ext`, … `exists` is injected so this is unit-testable without the disk.
+fn dedupe_path(dir: &std::path::Path, name: &str, exists: impl Fn(&std::path::Path) -> bool) -> std::path::PathBuf {
+    let candidate = dir.join(name);
+    if !exists(&candidate) {
+        return candidate;
+    }
+    // Split into stem + extension (only a real, short trailing extension).
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() && !e.is_empty() && e.len() <= 16 => (s, Some(e)),
+        _ => (name, None),
+    };
+    for n in 1..10_000 {
+        let candidate = match ext {
+            Some(e) => dir.join(format!("{stem} ({n}).{e}")),
+            None => dir.join(format!("{stem} ({n})")),
+        };
+        if !exists(&candidate) {
+            return candidate;
+        }
+    }
+    dir.join(name)
 }
 
 /// A conservative in-memory HTTP cache keyed by URL. Entries store the body, an
@@ -597,6 +869,46 @@ mod tests {
         assert_eq!(parse_http_date("Thu, 01 Jan 1970 00:00:00 GMT"), Some(0));
         assert_eq!(parse_http_date("not a date"), None);
         assert!(parse_http_date("Mon, 32 Jan 2020 00:00:00 GMT").is_some()); // lenient day
+    }
+
+    #[test]
+    fn download_filename_resolution() {
+        // Content-Disposition wins; quoted and RFC 5987 forms; path separators stripped.
+        assert_eq!(
+            download_filename(Some("attachment; filename=\"report.pdf\""), "https://h/x"),
+            "report.pdf"
+        );
+        assert_eq!(
+            download_filename(Some("attachment; filename*=UTF-8''na%C3%AFve%20file.txt"), "https://h/x"),
+            "naïve file.txt"
+        );
+        assert_eq!(
+            download_filename(Some("attachment; filename=\"../../etc/passwd\""), "https://h/x"),
+            "passwd",
+            "directory traversal stripped to a bare name"
+        );
+        // Falls back to the URL basename (percent-decoded), ignoring query/fragment.
+        assert_eq!(download_filename(None, "https://h/a/b/file.zip?v=2#frag"), "file.zip");
+        assert_eq!(download_filename(None, "https://h/My%20Doc.txt"), "My Doc.txt");
+        // No usable name anywhere → a default.
+        assert_eq!(download_filename(None, "https://h/"), "download");
+        assert_eq!(download_filename(Some("inline"), "https://example.com"), "download");
+    }
+
+    #[test]
+    fn dedupe_path_avoids_collisions() {
+        use std::path::{Path, PathBuf};
+        let dir = Path::new("/dl");
+        // Nothing exists → the plain name.
+        assert_eq!(dedupe_path(dir, "f.bin", |_| false), PathBuf::from("/dl/f.bin"));
+        // The base exists → "f (1).bin"; the base and (1) exist → "f (2).bin".
+        let taken1 = |p: &Path| p == Path::new("/dl/f.bin");
+        assert_eq!(dedupe_path(dir, "f.bin", taken1), PathBuf::from("/dl/f (1).bin"));
+        let taken2 = |p: &Path| p == Path::new("/dl/f.bin") || p == Path::new("/dl/f (1).bin");
+        assert_eq!(dedupe_path(dir, "f.bin", taken2), PathBuf::from("/dl/f (2).bin"));
+        // Extension-less names dedupe without a trailing dot.
+        let taken_noext = |p: &Path| p == Path::new("/dl/README");
+        assert_eq!(dedupe_path(dir, "README", taken_noext), PathBuf::from("/dl/README (1)"));
     }
 
     #[test]

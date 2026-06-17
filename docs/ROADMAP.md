@@ -108,6 +108,13 @@ Property` / `JSON` suffice).
   `Expires`/`Date` freshness; **conditional revalidation** — stale `ETag`/
   `Last-Modified` entries refetch with `If-None-Match`/`If-Modified-Since` and refresh
   in place on `304`).
+- **Downloads**: the trusted net service **streams** an HTTP(S) URL to disk via rsurl
+  `send_streaming` (no in-memory buffering), naming the file from `Content-Disposition`
+  → URL basename → `download`, de-duping collisions (`name (1).ext`), into `~/Downloads`
+  (`$ARGUS_DOWNLOADS`/`--out=` override). Progress + completion stream back over IPC
+  (`StartDownload`/`DownloadStarted`/`DownloadProgress`/`DownloadDone`); the headless
+  **`argus --download=URL`** CLI renders a progress bar. *Remaining*: BitTorrent/magnet
+  (rsurl's `bittorrent` module — next slice) and the in-window download manager panel.
 - **CSP enforcement** (inline-script `script-src`/`default-src`) from `<meta>` and
   **response headers threaded across IPC** (net service extracts the
   `Content-Security-Policy` header — preserved through the HTTP cache — into

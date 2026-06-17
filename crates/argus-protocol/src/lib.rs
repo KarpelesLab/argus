@@ -214,6 +214,21 @@ pub enum Msg {
     /// `post_body` makes it a `method=post` form submission (POST `post_body` to
     /// `url`); empty `post_body` is a normal GET navigation.
     ClickResult { url: String, post_body: Vec<u8> },
+    /// caller → net service: download `url` into directory `dir` (the net service
+    /// picks the filename from `Content-Disposition`/the URL and saves it there).
+    StartDownload { url: String, dir: String },
+    /// net service → caller: the download's resolved final path (the filename is known
+    /// once the response head arrives), sent once before progress.
+    DownloadStarted { path: String },
+    /// net service → caller: bytes written so far / total (`total == 0` = unknown).
+    DownloadProgress { done: u64, total: u64 },
+    /// net service → caller: terminal result. On success `path` is the saved file; on
+    /// failure `error` describes why (`path` empty).
+    DownloadDone {
+        ok: bool,
+        path: String,
+        error: String,
+    },
     /// browser → child: exit cleanly.
     Shutdown,
 }
@@ -259,6 +274,10 @@ const TAG_PROVIDE_STORAGE: u8 = 17;
 const TAG_STORAGE_CHANGED: u8 = 18;
 const TAG_POST_URL: u8 = 19;
 const TAG_SCROLL_TO_FRAGMENT: u8 = 20;
+const TAG_START_DOWNLOAD: u8 = 21;
+const TAG_DOWNLOAD_STARTED: u8 = 22;
+const TAG_DOWNLOAD_PROGRESS: u8 = 23;
+const TAG_DOWNLOAD_DONE: u8 = 24;
 
 impl Msg {
     /// Number of file descriptors that accompany this message out-of-band.
@@ -358,6 +377,26 @@ impl Msg {
                 buf.push(TAG_INPUT_KEY);
                 buf.extend_from_slice(&ch.to_le_bytes());
             }
+            Msg::StartDownload { url, dir } => {
+                buf.push(TAG_START_DOWNLOAD);
+                put_bytes(&mut buf, url.as_bytes());
+                put_bytes(&mut buf, dir.as_bytes());
+            }
+            Msg::DownloadStarted { path } => {
+                buf.push(TAG_DOWNLOAD_STARTED);
+                put_bytes(&mut buf, path.as_bytes());
+            }
+            Msg::DownloadProgress { done, total } => {
+                buf.push(TAG_DOWNLOAD_PROGRESS);
+                buf.extend_from_slice(&done.to_le_bytes());
+                buf.extend_from_slice(&total.to_le_bytes());
+            }
+            Msg::DownloadDone { ok, path, error } => {
+                buf.push(TAG_DOWNLOAD_DONE);
+                buf.push(if *ok { 1 } else { 0 });
+                put_bytes(&mut buf, path.as_bytes());
+                put_bytes(&mut buf, error.as_bytes());
+            }
             Msg::Shutdown => buf.push(TAG_SHUTDOWN),
         }
         buf
@@ -426,6 +465,22 @@ impl Msg {
             },
             TAG_SET_SCROLL => Msg::SetScroll { y: c.u32()? },
             TAG_INPUT_KEY => Msg::InputKey { ch: c.u32()? },
+            TAG_START_DOWNLOAD => Msg::StartDownload {
+                url: String::from_utf8_lossy(c.bytes()?).into_owned(),
+                dir: String::from_utf8_lossy(c.bytes()?).into_owned(),
+            },
+            TAG_DOWNLOAD_STARTED => Msg::DownloadStarted {
+                path: String::from_utf8_lossy(c.bytes()?).into_owned(),
+            },
+            TAG_DOWNLOAD_PROGRESS => Msg::DownloadProgress {
+                done: c.u64()?,
+                total: c.u64()?,
+            },
+            TAG_DOWNLOAD_DONE => Msg::DownloadDone {
+                ok: c.u8()? != 0,
+                path: String::from_utf8_lossy(c.bytes()?).into_owned(),
+                error: String::from_utf8_lossy(c.bytes()?).into_owned(),
+            },
             TAG_SHUTDOWN => Msg::Shutdown,
             other => return Err(DecodeError::BadTag(other)),
         };
@@ -492,6 +547,10 @@ impl<'a> Cursor<'a> {
 
     fn u32(&mut self) -> Result<u32, DecodeError> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+
+    fn u64(&mut self) -> Result<u64, DecodeError> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
 
     fn size(&mut self) -> Result<Size, DecodeError> {
@@ -583,6 +642,28 @@ mod tests {
         round_trip(Msg::ClickResult {
             url: "/submit".to_string(),
             post_body: b"q=hi".to_vec(),
+        });
+        round_trip(Msg::StartDownload {
+            url: "https://host/file.zip".to_string(),
+            dir: "/home/u/Downloads".to_string(),
+        });
+        round_trip(Msg::DownloadStarted {
+            path: "/home/u/Downloads/file.zip".to_string(),
+        });
+        round_trip(Msg::DownloadProgress {
+            done: 12_400_000,
+            total: 30_100_000,
+        });
+        round_trip(Msg::DownloadProgress { done: 5, total: 0 });
+        round_trip(Msg::DownloadDone {
+            ok: true,
+            path: "/home/u/Downloads/file.zip".to_string(),
+            error: String::new(),
+        });
+        round_trip(Msg::DownloadDone {
+            ok: false,
+            path: String::new(),
+            error: "connection refused".to_string(),
         });
         round_trip(Msg::Shutdown);
     }

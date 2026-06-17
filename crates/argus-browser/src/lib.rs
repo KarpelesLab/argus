@@ -1961,6 +1961,83 @@ pub fn render_once_scrolled(
     Ok((size, pixels))
 }
 
+/// Download `url` into directory `dir` via a dedicated net process, rendering a
+/// progress bar to stderr. Returns the saved file path. This drives the same net
+/// `StartDownload` engine the in-window download manager will use; the `--download=`
+/// CLI is the headless front-end (like `--dump-page` for rendering).
+pub fn download(url: &str, dir: &std::path::Path) -> io::Result<std::path::PathBuf> {
+    use std::io::Write;
+    log::set_role(Role::Browser);
+    let mut net = spawn_child(Role::NetService)?;
+    proto::parent_handshake(net.channel(), Size::new(0, 0))?;
+    proto::send(
+        net.channel(),
+        Msg::StartDownload {
+            url: url.to_string(),
+            dir: dir.to_string_lossy().into_owned(),
+        },
+        &[],
+    )?;
+
+    let mut started_path = String::new();
+    let result = loop {
+        match proto::recv(net.channel())?.0 {
+            Msg::DownloadStarted { path } => {
+                let name = std::path::Path::new(&path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone());
+                eprintln!("→ {name}");
+                started_path = path;
+            }
+            Msg::DownloadProgress { done, total } => {
+                eprint!("\r  {}", progress_line(done, total));
+                let _ = io::stderr().flush();
+            }
+            Msg::DownloadDone { ok, path, error } => {
+                if !started_path.is_empty() {
+                    eprintln!(); // finish the progress line
+                }
+                if ok {
+                    let final_path = if path.is_empty() { started_path.clone() } else { path };
+                    break Ok(std::path::PathBuf::from(final_path));
+                }
+                break Err(io::Error::other(error));
+            }
+            _ => {}
+        }
+    };
+    let _ = proto::send(net.channel(), Msg::Shutdown, &[]);
+    let _ = net.wait();
+    result
+}
+
+/// A one-line human-readable progress bar `12.4 MB / 30.1 MB  41% ████░░░░`.
+fn progress_line(done: u64, total: u64) -> String {
+    fn human(b: u64) -> String {
+        const U: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+        let mut v = b as f64;
+        let mut i = 0;
+        while v >= 1024.0 && i < U.len() - 1 {
+            v /= 1024.0;
+            i += 1;
+        }
+        if i == 0 {
+            format!("{b} B")
+        } else {
+            format!("{v:.1} {}", U[i])
+        }
+    }
+    if total > 0 {
+        let frac = (done as f64 / total as f64).clamp(0.0, 1.0);
+        let filled = (frac * 20.0).round() as usize;
+        let bar: String = "█".repeat(filled) + &"░".repeat(20 - filled);
+        format!("{} / {}  {:>3}%  {bar}", human(done), human(total), (frac * 100.0) as u32)
+    } else {
+        format!("{}  (size unknown)", human(done))
+    }
+}
+
 /// Run the Phase 0 browser-process skeleton.
 pub fn run() -> io::Result<()> {
     log::set_role(Role::Browser);

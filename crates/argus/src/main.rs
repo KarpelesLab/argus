@@ -40,6 +40,18 @@ fn main() {
             }
             return;
         }
+        // `--download=URL`: download a file to ~/Downloads (override with --out=DIR
+        // or $ARGUS_DOWNLOADS) and exit. The headless front-end to the download engine.
+        if let Some(dl_url) = flag_value("--download=") {
+            match argus_browser::download(&dl_url, &download_dir()) {
+                Ok(path) => println!("saved {}", path.display()),
+                Err(err) => {
+                    eprintln!("[browser] download failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         // `--dump-dom`: print the parsed DOM (headless automation) and exit.
         if has_flag("--dump-dom") {
             match argus_browser::dump_dom(url.as_deref()) {
@@ -257,6 +269,19 @@ fn has_flag(flag: &str) -> bool {
 /// The value of a `prefix=value` argument, if present.
 fn flag_value(prefix: &str) -> Option<String> {
     std::env::args().find_map(|a| a.strip_prefix(prefix).map(|v| v.to_string()))
+}
+
+/// The directory downloads are saved to: `--out=DIR`, else `$ARGUS_DOWNLOADS`, else
+/// `~/Downloads`.
+fn download_dir() -> std::path::PathBuf {
+    if let Some(out) = flag_value("--out=") {
+        return std::path::PathBuf::from(out);
+    }
+    if let Some(d) = std::env::var_os("ARGUS_DOWNLOADS").filter(|d| !d.is_empty()) {
+        return std::path::PathBuf::from(d);
+    }
+    let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
+    std::path::PathBuf::from(home).join("Downloads")
 }
 
 /// Reconstruct the IPC channel a child inherited from its parent.
