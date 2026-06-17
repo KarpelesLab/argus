@@ -185,24 +185,17 @@ fn post(
 }
 
 /// Download `url` into directory `dir`, reporting `DownloadStarted`/`DownloadProgress`
-/// and a terminal `DownloadDone` to the caller. `magnet:`/`.torrent` sources are not
-/// supported yet (Slice 2). Always replies with a terminal message.
+/// and a terminal `DownloadDone` to the caller. A `magnet:` link or `.torrent` source
+/// goes through BitTorrent; everything else is a streamed HTTP(S) fetch.
 fn download_to(channel: &Channel, url: &str, dir: &str) -> io::Result<()> {
     let is_torrent =
         url.starts_with("magnet:") || url.split(['?', '#']).next().unwrap_or(url).ends_with(".torrent");
-    if is_torrent {
-        log!("download: torrents not yet supported: {url}");
-        return proto::send(
-            channel,
-            Msg::DownloadDone {
-                ok: false,
-                path: String::new(),
-                error: "torrents are not supported yet".to_string(),
-            },
-            &[],
-        );
-    }
-    match http_download(channel, url, dir) {
+    let result = if is_torrent {
+        torrent_download(channel, url, dir)
+    } else {
+        http_download(channel, url, dir)
+    };
+    match result {
         Ok(path) => {
             log!("download complete: {}", path.display());
             proto::send(
@@ -228,6 +221,168 @@ fn download_to(channel: &Channel, url: &str, dir: &str) -> io::Result<()> {
             )
         }
     }
+}
+
+/// Download a `magnet:` link or `.torrent` (an `http(s)` URL or a local/`file://`
+/// path) into `dir` via rsurl's BitTorrent engine, emitting `DownloadStarted` (once
+/// the metadata names the content) and throttled `DownloadProgress`. Mirrors rsurl's
+/// `run_bittorrent` orchestration: obtain the metainfo, gather peers (magnet peers →
+/// tracker announce → DHT), then `bittorrent::download` with a progress callback.
+/// Returns the saved path (the file for a single-file torrent, else the `dir/<name>`
+/// directory). No seeding (`SeedMode::Off`).
+fn torrent_download(channel: &Channel, source: &str, dir: &str) -> Result<std::path::PathBuf, String> {
+    use rsurl::bittorrent::{self, metadata, Magnet, Metainfo, Progress, SeedMode, TorrentOptions};
+    use std::net::SocketAddr;
+    use std::path::{Path, PathBuf};
+
+    let dir = Path::new(dir);
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let peer_id = bittorrent::generate_peer_id().map_err(|e| e.to_string())?;
+    let opts = TorrentOptions {
+        peer_id,
+        seed: SeedMode::Off,
+        ..Default::default()
+    };
+    let port = opts.listen_port;
+
+    // 1) Obtain the metainfo (and, for a magnet, the peers used to fetch it).
+    let mut peers: Vec<SocketAddr> = Vec::new();
+    let meta: Metainfo = if source.starts_with("magnet:") {
+        let magnet = Magnet::parse(source).map_err(|e| e.to_string())?;
+        peers.extend(magnet.peers.iter().copied());
+        if peers.is_empty() {
+            peers = bt_announce_peers(&magnet.trackers, magnet.info_hash, peer_id, port, 0);
+        }
+        if peers.is_empty() {
+            peers = bt_dht_peers(magnet.info_hash);
+        }
+        peers.sort();
+        peers.dedup();
+        if peers.is_empty() {
+            return Err("no peers found to fetch magnet metadata".to_string());
+        }
+        log!("torrent: fetching metadata from {} peers", peers.len());
+        let (m, _info) = metadata::fetch_metainfo(
+            magnet.info_hash,
+            &peers,
+            peer_id,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(10),
+            false,
+        )
+        .map_err(|e| e.to_string())?;
+        m
+    } else {
+        let bytes = if source.starts_with("http://") || source.starts_with("https://") {
+            let resp = rsurl::Request::get(source)
+                .and_then(|r| r.send())
+                .map_err(|e| e.to_string())?;
+            if resp.status != 200 {
+                return Err(format!("fetching torrent: HTTP {}", resp.status));
+            }
+            resp.body
+        } else {
+            let path = source.strip_prefix("file://").unwrap_or(source);
+            std::fs::read(path).map_err(|e| e.to_string())?
+        };
+        Metainfo::from_bytes(&bytes).map_err(|e| e.to_string())?
+    };
+
+    // 2) Output layout + the path we report to the caller.
+    let layout = bittorrent::file_layout(&meta, dir);
+    let target: PathBuf = if layout.len() == 1 {
+        layout[0].0.clone()
+    } else {
+        dir.join(&meta.name)
+    };
+    let _ = proto::send(
+        channel,
+        Msg::DownloadStarted {
+            path: target.to_string_lossy().into_owned(),
+        },
+        &[],
+    );
+
+    // 3) Peers for the download itself (a magnet already has them from step 1).
+    if peers.is_empty() {
+        peers = bt_announce_peers(&meta.trackers, meta.info_hash, peer_id, port, meta.total_length);
+    }
+    if peers.is_empty() {
+        peers = bt_dht_peers(meta.info_hash);
+    }
+    peers.sort();
+    peers.dedup();
+    if peers.is_empty() {
+        return Err("no peers found (trackers and DHT returned none)".to_string());
+    }
+    log!(
+        "torrent: {} ({} bytes, {} pieces, {} peers)",
+        meta.name,
+        meta.total_length,
+        meta.num_pieces(),
+        peers.len()
+    );
+
+    // 4) Download with throttled progress (skip the seeding phase — SeedMode::Off).
+    let total = meta.total_length;
+    let mut last_sent = 0u64;
+    let mut cb = |p: &Progress| {
+        if p.downloaded.saturating_sub(last_sent) >= 256 * 1024 || p.downloaded >= total {
+            last_sent = p.downloaded;
+            let _ = proto::send(channel, Msg::DownloadProgress { done: p.downloaded, total }, &[]);
+        }
+    };
+    bittorrent::download(&meta, layout, &peers, &opts, &mut cb).map_err(|e| e.to_string())?;
+    Ok(target)
+}
+
+/// Announce the torrent to its trackers (the first responsive one wins) and return
+/// the peers. Mirrors rsurl's `bt_announce_peers`.
+fn bt_announce_peers(
+    trackers: &[String],
+    info_hash: [u8; 20],
+    peer_id: [u8; 20],
+    port: u16,
+    left: u64,
+) -> Vec<std::net::SocketAddr> {
+    use rsurl::bittorrent::tracker::{self, AnnounceParams, Event};
+    let params = AnnounceParams {
+        info_hash,
+        peer_id,
+        port,
+        uploaded: 0,
+        downloaded: 0,
+        left,
+        event: Event::Started,
+        num_want: 100,
+        key: 0,
+    };
+    let mut peers = Vec::new();
+    for t in trackers {
+        if let Ok(resp) = tracker::announce(t, &params, std::time::Duration::from_secs(10)) {
+            peers.extend(resp.peers);
+        }
+        if !peers.is_empty() {
+            break;
+        }
+    }
+    peers
+}
+
+/// Find peers for `info_hash` via the BitTorrent DHT. Mirrors rsurl's `bt_dht_peers`.
+fn bt_dht_peers(info_hash: [u8; 20]) -> Vec<std::net::SocketAddr> {
+    use rsurl::bittorrent::dht;
+    let bootstrap = dht::default_bootstrap();
+    if bootstrap.is_empty() {
+        return Vec::new();
+    }
+    dht::find_peers(
+        info_hash,
+        &bootstrap,
+        dht::random_node_id(),
+        std::time::Duration::from_secs(20),
+    )
+    .unwrap_or_default()
 }
 
 /// Stream an HTTP(S) `url` to a file in `dir` via rsurl, emitting `DownloadStarted`

@@ -113,8 +113,11 @@ Property` / `JSON` suffice).
   → URL basename → `download`, de-duping collisions (`name (1).ext`), into `~/Downloads`
   (`$ARGUS_DOWNLOADS`/`--out=` override). Progress + completion stream back over IPC
   (`StartDownload`/`DownloadStarted`/`DownloadProgress`/`DownloadDone`); the headless
-  **`argus --download=URL`** CLI renders a progress bar. *Remaining*: BitTorrent/magnet
-  (rsurl's `bittorrent` module — next slice) and the in-window download manager panel.
+  **`argus --download=URL`** CLI renders a progress bar. **BitTorrent**: a `magnet:`
+  link or `.torrent` (HTTP/local) routes through rsurl's `bittorrent` engine — parse
+  magnet → peers (direct `x.pe` → tracker `announce` → DHT) → `fetch_metainfo` →
+  `file_layout` → `download` with the same progress IPC. *Remaining*: the in-window
+  download manager panel (the windowed UI slice).
 - **CSP enforcement** (inline-script `script-src`/`default-src`) from `<meta>` and
   **response headers threaded across IPC** (net service extracts the
   `Content-Security-Policy` header — preserved through the HTTP cache — into
